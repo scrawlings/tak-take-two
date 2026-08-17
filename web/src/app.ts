@@ -8,7 +8,7 @@ import type { Persistence, PersistenceSnapshot } from './persistence.js';
 import { Metrics } from './metrics.js';
 import type { Logger } from './logging.js';
 import { newRequestId } from './logging.js';
-import { boardMark, escapeHtml, FAVICON_SVG, renderShell, siteCss } from './html.js';
+import { escapeHtml, renderShell } from './html.js';
 import { createAuth, type Auth, type AuthError, type SessionUser } from './auth.js';
 import { createFormAction, statusForAuthError } from './forms.js';
 import {
@@ -18,7 +18,6 @@ import {
   renderChangePasswordPage,
   renderLoginPage,
   renderResetPasswordResult,
-  renderRoot,
 } from './views.js';
 
 export interface AppDeps {
@@ -49,14 +48,9 @@ function renderStatusPage(snapshot: PersistenceSnapshot, httpErrors: number): st
     rows.push([`games in state "${entry.state}"`, String(entry.count)]);
   }
   const body = rows
-    .map(([key, value]) => `<tr><td class="u">${escapeHtml(key)}</td><td>${escapeHtml(value)}</td></tr>`)
+    .map(([key, value]) => `<tr><td>${escapeHtml(key)}</td><td>${escapeHtml(value)}</td></tr>`)
     .join('');
-  return `<p class="eyebrow">/status</p>
-<h1>Status</h1>
-<div class="table-scroll"><table class="data">
-  <thead><tr><th>Metric</th><th>Value</th></tr></thead>
-  <tbody>${body}</tbody>
-</table></div>`;
+  return `<h1>Status</h1><table border="1" cellpadding="6">${body}</table>`;
 }
 
 /** A form field coerced to a string, or null when absent/non-textual. */
@@ -121,13 +115,7 @@ export function createApp(deps: AppDeps): App {
   });
 
   const forbiddenPage = (c: Context<{ Variables: Variables }>): Response =>
-    c.html(
-      renderShell(
-        'Forbidden',
-        '<h1>Forbidden</h1><p>Admin only.</p><p><a href="/account">Back to account</a></p>',
-      ),
-      403,
-    );
+    c.html(renderShell('Forbidden', '<h1>Forbidden</h1><p>Admin only.</p>'), 403);
 
   const adminUsersPage = (
     c: Context<{ Variables: Variables }>,
@@ -173,20 +161,16 @@ export function createApp(deps: AppDeps): App {
     });
   });
 
-  app.get('/site.css', (c) => c.text(siteCss(), 200, { 'content-type': 'text/css; charset=utf-8' }));
-  app.get('/favicon.svg', (c) => c.body(FAVICON_SVG, 200, { 'content-type': 'image/svg+xml' }));
-
   app.get('/status', (c) => {
     return c.html(renderShell('Status', renderStatusPage(persistence.metricsSnapshot(), metrics.httpErrors())));
   });
 
-  app.get('/', (c) => c.html(renderRoot()));
+  app.get('/', (c) => c.html(renderShell('Tak', '<h1>Tak</h1><p>The game hosting site.</p>')));
 
   app.get('/login', (c) => {
     const message = c.req.query('changed') ? 'Password changed — sign in again.' : undefined;
     return c.html(renderLoginPage({ message }));
   });
-
 
   app.post('/login', formAction({
     fields: ['username', 'password'],
@@ -214,7 +198,7 @@ export function createApp(deps: AppDeps): App {
   });
 
   app.get('/account/password', requireUser, (c) => {
-    return c.html(renderChangePasswordPage(c.get('user'), { forced: c.get('user').forcePasswordChange }));
+    return c.html(renderChangePasswordPage({ forced: c.get('user').forcePasswordChange }));
   });
 
   app.post('/account/password', requireUser, formAction({
@@ -235,7 +219,7 @@ export function createApp(deps: AppDeps): App {
     },
     renderError: (c, e) =>
       c.html(
-        renderChangePasswordPage(c.get('user'), { forced: c.get('user').forcePasswordChange, error: e.message }),
+        renderChangePasswordPage({ forced: c.get('user').forcePasswordChange, error: e.message }),
         statusForAuthError(e),
       ),
   }));
