@@ -64,6 +64,12 @@ export interface Persistence {
   /** Whether the database answers a trivial query. The only error channel on the module. */
   ping(): Result<void, string>;
   /**
+   * Run `fn`'s writes atomically: if the closure returns an error, every write
+   * inside it is rolled back and that error is returned. The closure must be
+   * synchronous (better-sqlite3 transactions are); argon2 hashing stays outside.
+   */
+  transaction<T>(fn: () => Result<T, string>): Result<T, string>;
+  /**
    * Current database-derived figures. Never fails: a field that cannot be read
    * is reported as empty/zero so observability stays up when the database is down.
    */
@@ -98,6 +104,21 @@ export function createPersistence(db: Db): Persistence {
       try {
         db.prepare('SELECT 1').get();
         return ok(undefined);
+      } catch (e) {
+        return err(e instanceof Error ? e.message : String(e));
+      }
+    },
+
+    transaction<T>(fn: () => Result<T, string>): Result<T, string> {
+      try {
+        // better-sqlite3 rolls the transaction back when the wrapped function
+        // throws, then rethrows; we translate that into the closure's error.
+        const run = db.transaction(() => {
+          const result = fn();
+          if (result.isErr()) throw new Error(result.error);
+          return result.value;
+        });
+        return ok(run());
       } catch (e) {
         return err(e instanceof Error ? e.message : String(e));
       }

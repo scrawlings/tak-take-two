@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import Database from 'better-sqlite3';
+import { ok, err } from 'neverthrow';
 import { runMigrations } from '../src/db.js';
 import { createPersistence } from '../src/persistence.js';
 
@@ -70,6 +71,46 @@ describe('persistence', () => {
         { state: 'proposed', count: 1 },
       ]);
       expect(snap.databaseSizeBytes).toBeGreaterThan(0);
+    });
+  });
+
+  describe('transaction', () => {
+    it('commits every write when the closure succeeds', () => {
+      const db = makeDb();
+      insertUser(db, 1, 'alice');
+      const p = createPersistence(db);
+
+      const result = p.transaction(() => {
+        const updated = p.setUserBlocked(1, true);
+        if (updated.isErr()) return updated;
+        const trail = p.appendActivityTrail({ userId: 1, event: 'test' });
+        if (trail.isErr()) return trail;
+        return ok(undefined);
+      });
+      expect(result.isOk()).toBe(true);
+
+      const user = db.prepare('SELECT blocked FROM users WHERE id = 1').get() as { blocked: number };
+      expect(user.blocked).toBe(1);
+      const trail = db.prepare("SELECT COUNT(*) AS n FROM activity_trail WHERE event = 'test'").get() as { n: number };
+      expect(trail.n).toBe(1);
+    });
+
+    it('rolls back every write when the closure returns an error', () => {
+      const db = makeDb();
+      insertUser(db, 1, 'alice');
+      const p = createPersistence(db);
+
+      const result = p.transaction(() => {
+        const updated = p.setUserBlocked(1, true);
+        if (updated.isErr()) return updated;
+        return err('injected failure');
+      });
+      expect(result.isErr()).toBe(true);
+      if (result.isOk()) return;
+      expect(result.error).toBe('injected failure');
+
+      const user = db.prepare('SELECT blocked FROM users WHERE id = 1').get() as { blocked: number };
+      expect(user.blocked).toBe(0);
     });
   });
 

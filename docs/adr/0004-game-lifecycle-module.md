@@ -22,6 +22,10 @@ Commands form one exhaustive union passed to a single method, mirroring the core
 
 The module never touches SQL. Persistence accessors (load/save game, append record, write game stats) grow inside the persistence module (ADR-0002); the Game module composes them with core rules and authorization. Trail events are written inside the module's command implementations — routes never call `appendActivityTrail` directly.
 
+## Applies to the auth module too
+
+The accounts-and-sessions module (`web/src/auth.ts`, tickets 07–08) initially grew the exact named-methods shape this ADR warns against — a dozen methods each re-running authorize → load → validate → persist → trail. It was refactored onto the same seam: one `applyAuth(actor, command)` command union (`login` | `logout` | `bootstrapAdmin` | `createUser` | `changePassword` | `changeDisplayName` | `blockUser` | `unblockUser` | `forcePasswordChange` | `resetPassword`) plus a small read surface (`getSessionUser`, `listUsers`). The actor is a separate argument — `null` for the unauthenticated commands (`login`, `bootstrapAdmin`) — and authorization, trail writes, and error wrapping live inside the command implementations. Auth is a second instance of the same seam; the rationale above is what both modules share.
+
 ## Considered options
 
 - **Named methods per operation (`propose()`, `join()`, `share()`, …)** — rejected: a dozen thin methods each re-running load → authorize → rule → persist → trail; the interface would be as wide as the implementation, relocating the shallow pile from routes into the module.

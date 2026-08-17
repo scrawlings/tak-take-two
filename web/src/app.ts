@@ -2,12 +2,15 @@ import { Hono, type Context } from 'hono';
 import { routePath } from 'hono/route';
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
 import { createMiddleware } from 'hono/factory';
+import { err } from 'neverthrow';
+import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import type { Persistence, PersistenceSnapshot } from './persistence.js';
 import { Metrics } from './metrics.js';
 import type { Logger } from './logging.js';
 import { newRequestId } from './logging.js';
 import { escapeHtml, renderShell } from './html.js';
 import { createAuth, type Auth, type AuthError, type SessionUser } from './auth.js';
+import { createFormAction, statusForAuthError } from './forms.js';
 import {
   renderAccountPage,
   renderAdminUsersPage,
@@ -51,10 +54,6 @@ function renderStatusPage(snapshot: PersistenceSnapshot, httpErrors: number): st
 }
 
 /** A form field coerced to a string, or null when absent/non-textual. */
-function formField(value: unknown): string | null {
-  return typeof value === 'string' ? value : null;
-}
-
 export function createApp(deps: AppDeps): App {
   const { persistence, metrics, logger } = deps;
   const secureCookies = deps.secureCookies ?? false;
@@ -122,7 +121,7 @@ export function createApp(deps: AppDeps): App {
     c: Context<{ Variables: Variables }>,
     actor: SessionUser,
     view?: { error?: string; message?: string },
-    status: 200 | 400 | 404 = 200,
+    status: ContentfulStatusCode = 200,
   ): Response => {
     const list = auth.listUsers(actor);
     if (list.isErr()) {
@@ -133,18 +132,13 @@ export function createApp(deps: AppDeps): App {
     return c.html(renderAdminUsersPage(actor, list.value, view), status);
   };
 
-  const handleAdminActionError = (
-    c: Context<{ Variables: Variables }>,
-    actor: SessionUser,
-    error: AuthError,
-  ): Response => {
+  /** Shared error rendering for admin forms: forbidden → 403, else the list at the mapped status. */
+  const adminFormError = (c: Context<{ Variables: Variables }>, error: AuthError): Response => {
     if (error.code === 'forbidden') return forbiddenPage(c);
-    if (error.code === 'persistence') {
-      logger.log('error', 'admin action failed', { error });
-      return c.json({ error: 'Internal Server Error' }, 500);
-    }
-    return adminUsersPage(c, actor, { error: error.message }, 400);
+    return adminUsersPage(c, c.get('user'), { error: error.message }, statusForAuthError(error));
   };
+
+  const formAction = createFormAction<{ Variables: Variables }>(logger);
 
   const userIdFrom = (c: Context<{ Variables: Variables }>): number | null => {
     const id = Number(c.req.param('id'));
@@ -178,28 +172,26 @@ export function createApp(deps: AppDeps): App {
     return c.html(renderLoginPage({ message }));
   });
 
-  app.post('/login', async (c) => {
-    const body = await c.req.parseBody();
-    const username = formField(body.username);
-    const password = formField(body.password);
-    if (username === null || password === null || username === '' || password === '') {
-      return c.html(renderLoginPage({ error: 'Enter a username and password.' }), 400);
-    }
-
-    const result = await auth.login(username, password);
-    if (result.isErr()) {
-      if (result.error.code === 'persistence') {
-        logger.log('error', 'login failed', { error: result.error });
+  app.post('/login', formAction({
+    fields: ['username', 'password'],
+    run: (c, f) =>
+      auth.applyAuth(null, { type: 'login', username: f.username ?? '', password: f.password ?? '' }),
+    onOk: (c, r) => {
+      if (r.type !== 'login') {
+        logger.log('error', 'unexpected login result', { result: r });
         return c.json({ error: 'Internal Server Error' }, 500);
       }
-      const message =
-        result.error.code === 'user-blocked' ? 'This account is blocked.' : 'Unknown username or password.';
-      return c.html(renderLoginPage({ error: message }), 401);
-    }
-
-    setSessionCookie(c, result.value.sessionId);
-    return c.redirect('/account', 303);
-  });
+      setSessionCookie(c, r.sessionId);
+      return c.redirect('/account', 303);
+    },
+    renderError: (c, e) =>
+      c.html(
+        renderLoginPage({
+          error: e.code === 'user-blocked' ? 'This account is blocked.' : 'Unknown username or password.',
+        }),
+        statusForAuthError(e),
+      ),
+  }));
 
   app.get('/account', requireUser, (c) => {
     return c.html(renderAccountPage(c.get('user')));
@@ -209,39 +201,33 @@ export function createApp(deps: AppDeps): App {
     return c.html(renderChangePasswordPage({ forced: c.get('user').forcePasswordChange }));
   });
 
-  app.post('/account/password', requireUser, async (c) => {
-    const user = c.get('user');
-    const body = await c.req.parseBody();
-    const oldPassword = formField(body.old_password);
-    const newPassword = formField(body.new_password);
-    if (oldPassword === null || newPassword === null || oldPassword === '' || newPassword === '') {
-      return c.html(
-        renderChangePasswordPage({ forced: user.forcePasswordChange, error: 'Enter both passwords.' }),
-        400,
-      );
-    }
+  app.post('/account/password', requireUser, formAction({
+    fields: ['old_password', 'new_password'],
+    run: (c, f) => {
+      const user = c.get('user');
+      return auth.applyAuth(c.get('user'), {
+        type: 'changePassword',
+        userId: user.id,
+        oldPassword: f.old_password ?? '',
+        newPassword: f.new_password ?? '',
+      });
+    },
+    onOk: (c) => {
+      // All sessions (including this one) were invalidated; sign in again.
+      clearSessionCookie(c);
+      return c.redirect('/login?changed=1', 303);
+    },
+    renderError: (c, e) =>
+      c.html(
+        renderChangePasswordPage({ forced: c.get('user').forcePasswordChange, error: e.message }),
+        statusForAuthError(e),
+      ),
+  }));
 
-    const result = await auth.changePassword(user.id, oldPassword, newPassword);
-    if (result.isErr()) {
-      if (result.error.code === 'persistence') {
-        logger.log('error', 'password change failed', { error: result.error });
-        return c.json({ error: 'Internal Server Error' }, 500);
-      }
-      return c.html(
-        renderChangePasswordPage({ forced: user.forcePasswordChange, error: result.error.message }),
-        400,
-      );
-    }
-
-    // All sessions (including this one) were invalidated; sign in again.
-    clearSessionCookie(c);
-    return c.redirect('/login?changed=1', 303);
-  });
-
-  app.post('/logout', requireUser, (c) => {
+  app.post('/logout', requireUser, async (c) => {
     const sessionId = getCookie(c, SESSION_COOKIE);
     if (sessionId) {
-      const result = auth.logout(sessionId);
+      const result = await auth.applyAuth(c.get('user'), { type: 'logout', sessionId });
       if (result.isErr()) logger.log('error', 'logout failed', { error: result.error });
     }
     clearSessionCookie(c);
@@ -252,21 +238,13 @@ export function createApp(deps: AppDeps): App {
     return c.html(renderChangeDisplayNamePage(c.get('user')));
   });
 
-  app.post('/account/display-name', requireUser, async (c) => {
-    const user = c.get('user');
-    const body = await c.req.parseBody();
-    const displayName = formField(body.display_name) ?? '';
-
-    const result = auth.changeDisplayName(user, displayName);
-    if (result.isErr()) {
-      if (result.error.code === 'persistence') {
-        logger.log('error', 'display name change failed', { error: result.error });
-        return c.json({ error: 'Internal Server Error' }, 500);
-      }
-      return c.html(renderChangeDisplayNamePage(user, { error: result.error.message }), 400);
-    }
-    return c.redirect('/account', 303);
-  });
+  app.post('/account/display-name', requireUser, formAction({
+    fields: ['display_name'],
+    run: (c, f) => auth.applyAuth(c.get('user'), { type: 'changeDisplayName', displayName: f.display_name ?? '' }),
+    onOk: (c) => c.redirect('/account', 303),
+    renderError: (c, e) =>
+      c.html(renderChangeDisplayNamePage(c.get('user'), { error: e.message }), statusForAuthError(e)),
+  }));
 
   app.get('/admin', requireUser, (c) => c.redirect('/admin/users', 303));
 
@@ -281,66 +259,69 @@ export function createApp(deps: AppDeps): App {
     return c.html(renderAdminUsersPage(user, result.value));
   });
 
-  app.post('/admin/users', requireUser, async (c) => {
-    const actor = c.get('user');
-    const body = await c.req.parseBody();
-    const username = formField(body.username) ?? '';
-    const password = formField(body.password) ?? '';
-    const displayName = formField(body.display_name);
-    const role = formField(body.role) === 'admin' ? 'admin' : 'player';
+  app.post('/admin/users', requireUser, formAction({
+    fields: ['username', 'password', 'display_name', 'role'],
+    run: (c, f) =>
+      auth.applyAuth(c.get('user'), {
+        type: 'createUser',
+        username: f.username ?? '',
+        password: f.password ?? '',
+        displayName: f.display_name ?? undefined,
+        role: f.role === 'admin' ? 'admin' : 'player',
+      }),
+    onOk: (c) => c.redirect('/admin/users', 303),
+    renderError: adminFormError,
+  }));
 
-    const result = await auth.createUser(actor, {
-      username,
-      password,
-      displayName: displayName ?? undefined,
-      role,
-    });
-    if (result.isErr()) {
-      if (result.error.code === 'forbidden') return forbiddenPage(c);
-      if (result.error.code === 'persistence') {
-        logger.log('error', 'create user failed', { error: result.error });
+  app.post('/admin/users/:id/block', requireUser, formAction({
+    fields: [],
+    run: (c) => {
+      const id = userIdFrom(c);
+      if (id === null) return Promise.resolve(err({ code: 'not-found', message: 'Unknown user.' }));
+      return auth.applyAuth(c.get('user'), { type: 'blockUser', userId: id });
+    },
+    onOk: (c) => c.redirect('/admin/users', 303),
+    renderError: adminFormError,
+  }));
+
+  app.post('/admin/users/:id/unblock', requireUser, formAction({
+    fields: [],
+    run: (c) => {
+      const id = userIdFrom(c);
+      if (id === null) return Promise.resolve(err({ code: 'not-found', message: 'Unknown user.' }));
+      return auth.applyAuth(c.get('user'), { type: 'unblockUser', userId: id });
+    },
+    onOk: (c) => c.redirect('/admin/users', 303),
+    renderError: adminFormError,
+  }));
+
+  app.post('/admin/users/:id/force-password-change', requireUser, formAction({
+    fields: [],
+    run: (c) => {
+      const id = userIdFrom(c);
+      if (id === null) return Promise.resolve(err({ code: 'not-found', message: 'Unknown user.' }));
+      return auth.applyAuth(c.get('user'), { type: 'forcePasswordChange', userId: id });
+    },
+    onOk: (c) => c.redirect('/admin/users', 303),
+    renderError: adminFormError,
+  }));
+
+  app.post('/admin/users/:id/reset-password', requireUser, formAction({
+    fields: [],
+    run: (c) => {
+      const id = userIdFrom(c);
+      if (id === null) return Promise.resolve(err({ code: 'not-found', message: 'Unknown user.' }));
+      return auth.applyAuth(c.get('user'), { type: 'resetPassword', userId: id });
+    },
+    onOk: (c, r) => {
+      if (r.type !== 'resetPassword') {
+        logger.log('error', 'unexpected reset result', { result: r });
         return c.json({ error: 'Internal Server Error' }, 500);
       }
-      return adminUsersPage(c, actor, { error: result.error.message }, 400);
-    }
-    return c.redirect('/admin/users', 303);
-  });
-
-  app.post('/admin/users/:id/block', requireUser, (c) => {
-    const actor = c.get('user');
-    const id = userIdFrom(c);
-    if (id === null) return adminUsersPage(c, actor, { error: 'Unknown user.' }, 404);
-    const result = auth.blockUser(actor, id);
-    if (result.isErr()) return handleAdminActionError(c, actor, result.error);
-    return c.redirect('/admin/users', 303);
-  });
-
-  app.post('/admin/users/:id/unblock', requireUser, (c) => {
-    const actor = c.get('user');
-    const id = userIdFrom(c);
-    if (id === null) return adminUsersPage(c, actor, { error: 'Unknown user.' }, 404);
-    const result = auth.unblockUser(actor, id);
-    if (result.isErr()) return handleAdminActionError(c, actor, result.error);
-    return c.redirect('/admin/users', 303);
-  });
-
-  app.post('/admin/users/:id/force-password-change', requireUser, (c) => {
-    const actor = c.get('user');
-    const id = userIdFrom(c);
-    if (id === null) return adminUsersPage(c, actor, { error: 'Unknown user.' }, 404);
-    const result = auth.forcePasswordChange(actor, id);
-    if (result.isErr()) return handleAdminActionError(c, actor, result.error);
-    return c.redirect('/admin/users', 303);
-  });
-
-  app.post('/admin/users/:id/reset-password', requireUser, async (c) => {
-    const actor = c.get('user');
-    const id = userIdFrom(c);
-    if (id === null) return adminUsersPage(c, actor, { error: 'Unknown user.' }, 404);
-    const result = await auth.resetPassword(actor, id);
-    if (result.isErr()) return handleAdminActionError(c, actor, result.error);
-    return c.html(renderResetPasswordResult(result.value.username, result.value.password));
-  });
+      return c.html(renderResetPasswordResult(r.username, r.password));
+    },
+    renderError: adminFormError,
+  }));
 
   app.notFound((c) => c.json({ error: 'Not Found' }, 404));
 

@@ -95,6 +95,13 @@ describe('auth HTTP', () => {
     expect(sessionCookie(res)).toBeNull();
   });
 
+  it('rejects an empty login submission', async () => {
+    const { app } = makeApp();
+    const res = await app.request('/login', form({ url: '/login', fields: { username: '', password: '' } }));
+    expect(res.status).toBe(401);
+    expect(sessionCookie(res)).toBeNull();
+  });
+
   it('refuses a blocked user at login', async () => {
     const { app, db } = makeApp();
     await insertUser(db, { id: 1, username: 'alice', password: 'hunter2-password', blocked: true });

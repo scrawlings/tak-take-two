@@ -44,7 +44,7 @@ function playerActor(id: number, username: string, displayName = username): Sess
   return { id, username, displayName, role: 'player', forcePasswordChange: false, blocked: false };
 }
 
-describe('admin: listUsers', () => {
+describe('admin: listUsers read', () => {
   it('an admin sees all users without password hashes, ordered by username', async () => {
     const db = makeDb();
     await insertUser(db, { id: 1, username: 'admin', password: 'admin-pass-1', role: 'admin' });
@@ -70,26 +70,26 @@ describe('admin: listUsers', () => {
   });
 });
 
-describe('admin: blockUser / unblockUser', () => {
+describe('admin: blockUser / unblockUser commands', () => {
   it('blocking invalidates sessions and refuses login; unblocking restores access', async () => {
     const db = makeDb();
     await insertUser(db, { id: 2, username: 'alice', password: 'alice-pass-1' });
     const auth = createAuth(createPersistence(db));
 
-    const login = await auth.login('alice', 'alice-pass-1');
-    if (login.isErr()) throw new Error('login failed');
+    const login = await auth.applyAuth(null, { type: 'login', username: 'alice', password: 'alice-pass-1' });
+    if (login.isErr() || login.value.type !== 'login') throw new Error('login failed');
     const sessionId = login.value.sessionId;
 
-    expect(auth.blockUser(adminActor(1), 2).isOk()).toBe(true);
+    expect((await auth.applyAuth(adminActor(1), { type: 'blockUser', userId: 2 })).isOk()).toBe(true);
     expect(auth.getSessionUser(sessionId).isErr()).toBe(true);
 
-    const relogin = await auth.login('alice', 'alice-pass-1');
+    const relogin = await auth.applyAuth(null, { type: 'login', username: 'alice', password: 'alice-pass-1' });
     expect(relogin.isErr()).toBe(true);
     if (relogin.isOk()) return;
     expect(relogin.error.code).toBe('user-blocked');
 
-    expect(auth.unblockUser(adminActor(1), 2).isOk()).toBe(true);
-    const after = await auth.login('alice', 'alice-pass-1');
+    expect((await auth.applyAuth(adminActor(1), { type: 'unblockUser', userId: 2 })).isOk()).toBe(true);
+    const after = await auth.applyAuth(null, { type: 'login', username: 'alice', password: 'alice-pass-1' });
     expect(after.isOk()).toBe(true);
   });
 
@@ -98,7 +98,7 @@ describe('admin: blockUser / unblockUser', () => {
     await insertUser(db, { id: 2, username: 'alice', password: 'alice-pass-1' });
     const auth = createAuth(createPersistence(db));
 
-    const result = auth.blockUser(playerActor(9, 'mallory'), 2);
+    const result = await auth.applyAuth(playerActor(9, 'mallory'), { type: 'blockUser', userId: 2 });
     expect(result.isErr()).toBe(true);
     if (result.isOk()) return;
     expect(result.error.code).toBe('forbidden');
@@ -109,33 +109,33 @@ describe('admin: blockUser / unblockUser', () => {
     await insertUser(db, { id: 1, username: 'admin', password: 'admin-pass-1', role: 'admin' });
     const auth = createAuth(createPersistence(db));
 
-    const result = auth.blockUser(adminActor(1), 1);
+    const result = await auth.applyAuth(adminActor(1), { type: 'blockUser', userId: 1 });
     expect(result.isErr()).toBe(true);
     if (result.isOk()) return;
     expect(result.error.code).toBe('cannot-block-self');
   });
 
-  it('blocking an unknown user is not-found', () => {
+  it('blocking an unknown user is not-found', async () => {
     const db = makeDb();
     const auth = createAuth(createPersistence(db));
 
-    const result = auth.blockUser(adminActor(1), 999);
+    const result = await auth.applyAuth(adminActor(1), { type: 'blockUser', userId: 999 });
     expect(result.isErr()).toBe(true);
     if (result.isOk()) return;
     expect(result.error.code).toBe('not-found');
   });
 });
 
-describe('admin: forcePasswordChange', () => {
+describe('admin: forcePasswordChange command', () => {
   it('sets the force flag on the target account', async () => {
     const db = makeDb();
     await insertUser(db, { id: 2, username: 'alice', password: 'alice-pass-1' });
     const auth = createAuth(createPersistence(db));
 
-    const login = await auth.login('alice', 'alice-pass-1');
-    if (login.isErr()) throw new Error('login failed');
+    const login = await auth.applyAuth(null, { type: 'login', username: 'alice', password: 'alice-pass-1' });
+    if (login.isErr() || login.value.type !== 'login') throw new Error('login failed');
 
-    expect(auth.forcePasswordChange(adminActor(1), 2).isOk()).toBe(true);
+    expect((await auth.applyAuth(adminActor(1), { type: 'forcePasswordChange', userId: 2 })).isOk()).toBe(true);
     const user = auth.getSessionUser(login.value.sessionId);
     expect(user.isOk()).toBe(true);
     if (user.isErr()) return;
@@ -143,19 +143,21 @@ describe('admin: forcePasswordChange', () => {
   });
 });
 
-describe('admin: resetPassword', () => {
+describe('admin: resetPassword command', () => {
   it('generates a password that verifies, forces a change, and clears sessions', async () => {
     const db = makeDb();
     await insertUser(db, { id: 2, username: 'alice', password: 'alice-pass-1' });
     const auth = createAuth(createPersistence(db));
 
-    const login = await auth.login('alice', 'alice-pass-1');
-    if (login.isErr()) throw new Error('login failed');
+    const login = await auth.applyAuth(null, { type: 'login', username: 'alice', password: 'alice-pass-1' });
+    if (login.isErr() || login.value.type !== 'login') throw new Error('login failed');
     const sessionId = login.value.sessionId;
 
-    const result = await auth.resetPassword(adminActor(1), 2);
+    const result = await auth.applyAuth(adminActor(1), { type: 'resetPassword', userId: 2 });
     expect(result.isOk()).toBe(true);
     if (result.isErr()) return;
+    expect(result.value.type).toBe('resetPassword');
+    if (result.value.type !== 'resetPassword') return;
     expect(result.value.username).toBe('alice');
     expect(result.value.password.length).toBeGreaterThan(20);
 
@@ -177,23 +179,26 @@ describe('admin: resetPassword', () => {
     await insertUser(db, { id: 2, username: 'alice', password: 'alice-pass-1' });
     const auth = createAuth(createPersistence(db));
 
-    const result = await auth.resetPassword(playerActor(9, 'mallory'), 2);
+    const result = await auth.applyAuth(playerActor(9, 'mallory'), { type: 'resetPassword', userId: 2 });
     expect(result.isErr()).toBe(true);
     if (result.isOk()) return;
     expect(result.error.code).toBe('forbidden');
   });
 });
 
-describe('auth: changeDisplayName', () => {
+describe('auth: changeDisplayName command', () => {
   it('changes the owner display name and writes a trail event', async () => {
     const db = makeDb();
     await insertUser(db, { id: 2, username: 'alice', password: 'alice-pass-1' });
     const auth = createAuth(createPersistence(db));
 
-    const result = auth.changeDisplayName(playerActor(2, 'alice'), 'Alice Wonder');
+    const result = await auth.applyAuth(playerActor(2, 'alice'), { type: 'changeDisplayName', displayName: 'Alice Wonder' });
     expect(result.isOk()).toBe(true);
     if (result.isErr()) return;
-    expect(result.value.displayName).toBe('Alice Wonder');
+
+    expect(result.value.type).toBe('changeDisplayName');
+    if (result.value.type !== 'changeDisplayName') return;
+    expect(result.value.user.displayName).toBe('Alice Wonder');
 
     const row = db.prepare('SELECT display_name FROM users WHERE id = 2').get() as { display_name: string };
     expect(row.display_name).toBe('Alice Wonder');
@@ -208,7 +213,7 @@ describe('auth: changeDisplayName', () => {
     await insertUser(db, { id: 3, username: 'bob', password: 'bob-pass-123' });
     const auth = createAuth(createPersistence(db));
 
-    const result = auth.changeDisplayName(playerActor(2, 'alice'), 'bob');
+    const result = await auth.applyAuth(playerActor(2, 'alice'), { type: 'changeDisplayName', displayName: 'bob' });
     expect(result.isErr()).toBe(true);
     if (result.isOk()) return;
     expect(result.error.code).toBe('display-name-taken');
@@ -218,16 +223,16 @@ describe('auth: changeDisplayName', () => {
     const db = makeDb();
     await insertUser(db, { id: 2, username: 'alice', password: 'alice-pass-1' });
     const auth = createAuth(createPersistence(db));
-    const result = auth.changeDisplayName(playerActor(2, 'alice'), 'alice');
+    const result = await auth.applyAuth(playerActor(2, 'alice'), { type: 'changeDisplayName', displayName: 'alice' });
     expect(result.isOk()).toBe(true);
   });
 
-  it('rejects an empty or over-long display name', () => {
+  it('rejects an empty or over-long display name', async () => {
     const db = makeDb();
     const auth = createAuth(createPersistence(db));
 
-    const empty = auth.changeDisplayName(playerActor(2, 'alice'), '   ');
-    const tooLong = auth.changeDisplayName(playerActor(2, 'alice'), 'x'.repeat(65));
+    const empty = await auth.applyAuth(playerActor(2, 'alice'), { type: 'changeDisplayName', displayName: '   ' });
+    const tooLong = await auth.applyAuth(playerActor(2, 'alice'), { type: 'changeDisplayName', displayName: 'x'.repeat(65) });
     expect(empty.isErr()).toBe(true);
     expect(tooLong.isErr()).toBe(true);
     if (empty.isOk() || tooLong.isOk()) return;

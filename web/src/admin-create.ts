@@ -31,7 +31,7 @@ async function main(): Promise<void> {
   }
 
   const auth = createAuth(createPersistence(db));
-  const result = await auth.bootstrapAdmin();
+  const result = await auth.applyAuth(null, { type: 'bootstrapAdmin' });
   db.close();
 
   if (result.isErr()) {
@@ -40,6 +40,10 @@ async function main(): Promise<void> {
       process.exit(1);
     }
     logger.log('error', 'failed to bootstrap admin', { error: result.error });
+    process.exit(1);
+  }
+  if (result.value.type !== 'bootstrapAdmin') {
+    logger.log('error', 'unexpected bootstrap result', { result: result.value });
     process.exit(1);
   }
 

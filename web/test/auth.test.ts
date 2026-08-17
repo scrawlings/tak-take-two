@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import Database from 'better-sqlite3';
+import { err } from 'neverthrow';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -35,15 +36,17 @@ function adminActor(id = 1): SessionUser {
   return { id, username: 'admin', displayName: 'admin', role: 'admin', forcePasswordChange: false, blocked: false };
 }
 
-describe('auth: bootstrapAdmin', () => {
+describe('auth: bootstrapAdmin command', () => {
   it('creates the first admin with a forced change and a verifiable password', async () => {
     const db = makeDb();
     const auth = createAuth(createPersistence(db));
 
-    const result = await auth.bootstrapAdmin();
+    const result = await auth.applyAuth(null, { type: 'bootstrapAdmin' });
     expect(result.isOk()).toBe(true);
     if (result.isErr()) return;
 
+    expect(result.value.type).toBe('bootstrapAdmin');
+    if (result.value.type !== 'bootstrapAdmin') return;
     expect(result.value.username).toBe('admin');
     expect(result.value.password.length).toBeGreaterThan(20);
 
@@ -60,25 +63,27 @@ describe('auth: bootstrapAdmin', () => {
   it('refuses when an admin already exists', async () => {
     const db = makeDb();
     const auth = createAuth(createPersistence(db));
-    await auth.bootstrapAdmin();
+    await auth.applyAuth(null, { type: 'bootstrapAdmin' });
 
-    const again = await auth.bootstrapAdmin();
+    const again = await auth.applyAuth(null, { type: 'bootstrapAdmin' });
     expect(again.isErr()).toBe(true);
     if (again.isOk()) return;
     expect(again.error.code).toBe('admin-exists');
   });
 });
 
-describe('auth: login', () => {
+describe('auth: login command', () => {
   it('creates a session for valid credentials and writes a sign-in trail event', async () => {
     const db = makeDb();
     await insertUser(db, { id: 1, username: 'alice', password: 'hunter2-password' });
     const auth = createAuth(createPersistence(db));
 
-    const result = await auth.login('alice', 'hunter2-password');
+    const result = await auth.applyAuth(null, { type: 'login', username: 'alice', password: 'hunter2-password' });
     expect(result.isOk()).toBe(true);
     if (result.isErr()) return;
 
+    expect(result.value.type).toBe('login');
+    if (result.value.type !== 'login') return;
     expect(result.value.sessionId.length).toBeGreaterThan(0);
     expect(result.value.user.username).toBe('alice');
     expect(result.value.user.role).toBe('player');
@@ -97,8 +102,8 @@ describe('auth: login', () => {
     await insertUser(db, { id: 1, username: 'alice', password: 'hunter2-password' });
     const auth = createAuth(createPersistence(db));
 
-    const unknown = await auth.login('nobody', 'whatever-pass');
-    const wrong = await auth.login('alice', 'wrong-password-123');
+    const unknown = await auth.applyAuth(null, { type: 'login', username: 'nobody', password: 'whatever-pass' });
+    const wrong = await auth.applyAuth(null, { type: 'login', username: 'alice', password: 'wrong-password-123' });
     expect(unknown.isErr()).toBe(true);
     expect(wrong.isErr()).toBe(true);
     if (unknown.isOk() || wrong.isOk()) return;
@@ -111,23 +116,23 @@ describe('auth: login', () => {
     await insertUser(db, { id: 1, username: 'alice', password: 'hunter2-password', blocked: true });
     const auth = createAuth(createPersistence(db));
 
-    const result = await auth.login('alice', 'hunter2-password');
+    const result = await auth.applyAuth(null, { type: 'login', username: 'alice', password: 'hunter2-password' });
     expect(result.isErr()).toBe(true);
     if (result.isOk()) return;
     expect(result.error.code).toBe('user-blocked');
   });
 });
 
-describe('auth: logout', () => {
+describe('auth: logout command', () => {
   it('deletes the session and writes a sign-out trail event', async () => {
     const db = makeDb();
     await insertUser(db, { id: 1, username: 'alice', password: 'hunter2-password' });
     const auth = createAuth(createPersistence(db));
 
-    const login = await auth.login('alice', 'hunter2-password');
-    if (login.isErr()) throw new Error('login failed');
+    const login = await auth.applyAuth(null, { type: 'login', username: 'alice', password: 'hunter2-password' });
+    if (login.isErr() || login.value.type !== 'login') throw new Error('login failed');
 
-    const out = auth.logout(login.value.sessionId);
+    const out = await auth.applyAuth(null, { type: 'logout', sessionId: login.value.sessionId });
     expect(out.isOk()).toBe(true);
     expect(auth.getSessionUser(login.value.sessionId).isErr()).toBe(true);
 
@@ -135,24 +140,30 @@ describe('auth: logout', () => {
     expect(trail.map((r) => r.event)).toContain('sign-out');
   });
 
-  it('is idempotent for an unknown session id', () => {
+  it('is idempotent for an unknown session id', async () => {
     const db = makeDb();
     const auth = createAuth(createPersistence(db));
-    expect(auth.logout('does-not-exist').isOk()).toBe(true);
+    const result = await auth.applyAuth(null, { type: 'logout', sessionId: 'does-not-exist' });
+    expect(result.isOk()).toBe(true);
   });
 });
 
-describe('auth: changePassword', () => {
+describe('auth: changePassword command', () => {
   it('replaces the hash, invalidates all sessions, and clears the force flag', async () => {
     const db = makeDb();
     await insertUser(db, { id: 1, username: 'alice', password: 'old-password-1', force: true });
     const auth = createAuth(createPersistence(db));
 
-    const login = await auth.login('alice', 'old-password-1');
-    if (login.isErr()) throw new Error('login failed');
+    const login = await auth.applyAuth(null, { type: 'login', username: 'alice', password: 'old-password-1' });
+    if (login.isErr() || login.value.type !== 'login') throw new Error('login failed');
     const oldSessionId = login.value.sessionId;
 
-    const result = await auth.changePassword(1, 'old-password-1', 'new-password-2');
+    const result = await auth.applyAuth(adminActor(), {
+      type: 'changePassword',
+      userId: 1,
+      oldPassword: 'old-password-1',
+      newPassword: 'new-password-2',
+    });
     expect(result.isOk()).toBe(true);
 
     const row = db.prepare('SELECT password_hash, force_password_change FROM users WHERE id = 1').get() as {
@@ -173,7 +184,12 @@ describe('auth: changePassword', () => {
     await insertUser(db, { id: 1, username: 'alice', password: 'old-password-1' });
     const auth = createAuth(createPersistence(db));
 
-    const result = await auth.changePassword(1, 'wrong-old-password', 'new-password-2');
+    const result = await auth.applyAuth(adminActor(), {
+      type: 'changePassword',
+      userId: 1,
+      oldPassword: 'wrong-old-password',
+      newPassword: 'new-password-2',
+    });
     expect(result.isErr()).toBe(true);
     if (result.isOk()) return;
     expect(result.error.code).toBe('wrong-password');
@@ -184,35 +200,42 @@ describe('auth: changePassword', () => {
     await insertUser(db, { id: 1, username: 'alice', password: 'old-password-1' });
     const auth = createAuth(createPersistence(db));
 
-    const result = await auth.changePassword(1, 'old-password-1', 'short');
+    const result = await auth.applyAuth(adminActor(), {
+      type: 'changePassword',
+      userId: 1,
+      oldPassword: 'old-password-1',
+      newPassword: 'short',
+    });
     expect(result.isErr()).toBe(true);
     if (result.isOk()) return;
     expect(result.error.code).toBe('weak-password');
   });
 });
 
-describe('auth: createUser', () => {
+describe('auth: createUser command', () => {
   it('an admin creates a player who is forced to change password on first login', async () => {
     const db = makeDb();
     const auth = createAuth(createPersistence(db));
 
-    const result = await auth.createUser(adminActor(), { username: 'bob', password: 'initial-password' });
+    const result = await auth.applyAuth(adminActor(), { type: 'createUser', username: 'bob', password: 'initial-password' });
     expect(result.isOk()).toBe(true);
     if (result.isErr()) return;
 
-    expect(result.value.username).toBe('bob');
-    expect(result.value.displayName).toBe('bob');
-    expect(result.value.forcePasswordChange).toBe(true);
-    expect(result.value.role).toBe('player');
+    expect(result.value.type).toBe('createUser');
+    if (result.value.type !== 'createUser') return;
+    expect(result.value.user.username).toBe('bob');
+    expect(result.value.user.displayName).toBe('bob');
+    expect(result.value.user.forcePasswordChange).toBe(true);
+    expect(result.value.user.role).toBe('player');
   });
 
   it('rejects a non-admin actor', async () => {
     const db = makeDb();
     const auth = createAuth(createPersistence(db));
 
-    const result = await auth.createUser(
+    const result = await auth.applyAuth(
       { id: 2, username: 'bob', displayName: 'bob', role: 'player', forcePasswordChange: false, blocked: false },
-      { username: 'carol', password: 'initial-password' },
+      { type: 'createUser', username: 'carol', password: 'initial-password' },
     );
     expect(result.isErr()).toBe(true);
     if (result.isOk()) return;
@@ -224,7 +247,7 @@ describe('auth: createUser', () => {
     await insertUser(db, { id: 1, username: 'bob', password: 'whatever-pass' });
     const auth = createAuth(createPersistence(db));
 
-    const result = await auth.createUser(adminActor(), { username: 'bob', password: 'initial-password' });
+    const result = await auth.applyAuth(adminActor(), { type: 'createUser', username: 'bob', password: 'initial-password' });
     expect(result.isErr()).toBe(true);
     if (result.isOk()) return;
     expect(result.error.code).toBe('username-taken');
@@ -234,8 +257,8 @@ describe('auth: createUser', () => {
     const db = makeDb();
     const auth = createAuth(createPersistence(db));
 
-    const weak = await auth.createUser(adminActor(), { username: 'bob', password: 'short' });
-    const badName = await auth.createUser(adminActor(), { username: 'bad name!', password: 'initial-password' });
+    const weak = await auth.applyAuth(adminActor(), { type: 'createUser', username: 'bob', password: 'short' });
+    const badName = await auth.applyAuth(adminActor(), { type: 'createUser', username: 'bad name!', password: 'initial-password' });
     expect(weak.isErr()).toBe(true);
     expect(badName.isErr()).toBe(true);
     if (weak.isOk() || badName.isOk()) return;
@@ -244,14 +267,14 @@ describe('auth: createUser', () => {
   });
 });
 
-describe('auth: getSessionUser', () => {
+describe('auth: getSessionUser read', () => {
   it('resolves a session to its user without exposing the password hash', async () => {
     const db = makeDb();
     await insertUser(db, { id: 1, username: 'alice', password: 'hunter2-password' });
     const auth = createAuth(createPersistence(db));
 
-    const login = await auth.login('alice', 'hunter2-password');
-    if (login.isErr()) throw new Error('login failed');
+    const login = await auth.applyAuth(null, { type: 'login', username: 'alice', password: 'hunter2-password' });
+    if (login.isErr() || login.value.type !== 'login') throw new Error('login failed');
 
     const result = auth.getSessionUser(login.value.sessionId);
     expect(result.isOk()).toBe(true);
@@ -283,9 +306,13 @@ describe('auth: session persistence across restarts', () => {
       runMigrations(db);
       await insertUser(db, { id: 1, username: 'alice', password: 'hunter2-password' });
 
-      const login = await createAuth(createPersistence(db)).login('alice', 'hunter2-password');
+      const login = await createAuth(createPersistence(db)).applyAuth(null, {
+        type: 'login',
+        username: 'alice',
+        password: 'hunter2-password',
+      });
       expect(login.isOk()).toBe(true);
-      if (login.isErr()) return;
+      if (login.isErr() || login.value.type !== 'login') return;
       const sessionId = login.value.sessionId;
       db.close();
 
@@ -298,5 +325,59 @@ describe('auth: session persistence across restarts', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('auth: transactional rollback', () => {
+  it('rolls back the whole change when a later write fails', async () => {
+    const db = makeDb();
+    await insertUser(db, { id: 1, username: 'alice', password: 'old-password-1' });
+    const failing = { ...createPersistence(db), deleteSessionsForUser: () => err('injected failure') };
+    const auth = createAuth(failing);
+
+    const login = await auth.applyAuth(null, { type: 'login', username: 'alice', password: 'old-password-1' });
+    if (login.isErr() || login.value.type !== 'login') throw new Error('login failed');
+    const sessionId = login.value.sessionId;
+
+    const result = await auth.applyAuth(adminActor(), {
+      type: 'changePassword',
+      userId: 1,
+      oldPassword: 'old-password-1',
+      newPassword: 'new-password-2',
+    });
+    expect(result.isErr()).toBe(true);
+    if (result.isOk()) return;
+
+    // The hash update was rolled back — the old password still verifies.
+    const row = db.prepare('SELECT password_hash FROM users WHERE id = 1').get() as { password_hash: string };
+    expect(await verifyPassword(row.password_hash, 'old-password-1')).toBe(true);
+    // The session deletion was rolled back — the session is still live.
+    const session = db.prepare('SELECT user_id FROM sessions WHERE id = ?').get(sessionId) as
+      | { user_id: number }
+      | undefined;
+    expect(session?.user_id).toBe(1);
+  });
+
+  it('rolls back the state write when the trail write fails', async () => {
+    const db = makeDb();
+    await insertUser(db, { id: 1, username: 'alice', password: 'old-password-1' });
+    db.prepare("INSERT INTO sessions (id, user_id) VALUES ('s1', 1)").run();
+    const failing = { ...createPersistence(db), appendActivityTrail: () => err('injected failure') };
+    const auth = createAuth(failing);
+
+    const result = await auth.applyAuth(adminActor(), {
+      type: 'changePassword',
+      userId: 1,
+      oldPassword: 'old-password-1',
+      newPassword: 'new-password-2',
+    });
+    expect(result.isErr()).toBe(true);
+    if (result.isOk()) return;
+
+    // The hash update was rolled back, not committed silently without its audit entry.
+    const row = db.prepare('SELECT password_hash FROM users WHERE id = 1').get() as { password_hash: string };
+    expect(await verifyPassword(row.password_hash, 'old-password-1')).toBe(true);
+    const session = db.prepare('SELECT user_id FROM sessions WHERE id = ?').get('s1') as { user_id: number } | undefined;
+    expect(session?.user_id).toBe(1);
   });
 });
