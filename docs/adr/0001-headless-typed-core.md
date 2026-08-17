@@ -12,3 +12,7 @@ Status: accepted
 ## Note for future work
 
 Generating all legal moves (needed for computer players and training) is a list-segmentation problem: compositions of the lifted count across path lengths. Memoize or precompute the composition table — the input domain (`lift × pathLength`) is tiny on 5×5/6×6 boards. Move *validation* never enumerates alternatives and stays linear in the path length.
+
+## Note on coordinate types
+
+Files and ranks are literal unions, so an invalid letter or number is a compile-time error. Per-board-size bounds (e.g. `f6` on a 5×5 board) are validated at the API boundary as a typed `Result` — TypeScript has no dependent types, and moves parsed from PTN text must be runtime-validated regardless.
