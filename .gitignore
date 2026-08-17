@@ -11,3 +11,4 @@ coverage/
 *.log
 *.pem
 web/data
+.agents
