@@ -35,11 +35,11 @@ describe('health endpoints', () => {
   });
 
   it('GET /readyz returns 503 when the database check fails', async () => {
-    const failingPersistence: Persistence = {
+    const failingPersistence = {
       ping: () => err('db down'),
       metricsSnapshot: () => ({ activeSessions: 0, gamesByState: [], databaseSizeBytes: 0 }),
       appendActivityTrail: () => ok(undefined),
-    };
+    } as unknown as Persistence;
     const app = createApp({ persistence: failingPersistence, metrics: new Metrics(), logger: silent });
     const res = await app.request('/readyz');
     expect(res.status).toBe(503);

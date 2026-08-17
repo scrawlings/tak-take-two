@@ -51,7 +51,7 @@ function main(): void {
 
   const metrics = new Metrics();
   const persistence = createPersistence(db);
-  const app = createApp({ persistence, metrics, logger });
+  const app = createApp({ persistence, metrics, logger, secureCookies: config.tls !== null });
 
   let server: Server;
   try {

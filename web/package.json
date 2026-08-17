@@ -4,9 +4,11 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tsx watch src/server.ts"
+    "dev": "tsx watch src/server.ts",
+    "admin:create": "tsx src/admin-create.ts"
   },
   "dependencies": {
+    "@node-rs/argon2": "^2.1.0",
     "better-sqlite3": "^11.10.0",
     "hono": "^4.6.0"
   },
