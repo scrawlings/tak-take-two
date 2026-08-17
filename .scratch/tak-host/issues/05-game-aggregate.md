@@ -14,7 +14,7 @@
 
 ## Comments
 
-**2026-08-17 — Completed.** Implemented in commit `3e5a860`: `core/src/aggregate.ts` (the headless game aggregate — `createTakGame`, `playMove`, `undo`, `resign`, `mutualDraw`, `fromPtn`/`fromPtnText`, `toPtn`, `resultCode`, `isFinished`; `TakGame`/`RecordedMove`/`GameEnd`/`GameError` types) plus `core/src/index.ts` exports, covered by `core/test/aggregate.test.ts` (17 tests). All checklist items pass:
+**2026-08-17 — Completed.** Implemented in commit `002064f`: `core/src/aggregate.ts` (the headless game aggregate — `createTakGame`, `playMove`, `undo`, `resign`, `mutualDraw`, `fromPtn`/`fromPtnText`, `toPtn`, `resultCode`, `isFinished`; `TakGame`/`RecordedMove`/`GameEnd`/`GameError` types) plus `core/src/index.ts` exports, covered by `core/test/aggregate.test.ts` (17 tests). All checklist items pass:
 
 - **Create + replay:** `createTakGame(size)` starts empty; every `playMove` folds the engine's `applyMove`, so `state` always matches a from-scratch replay (asserted against `applyMove` in tests), keeping position, turn, and reserves consistent.
 - **History/undo:** every move is stored with an epoch-ms timestamp (injectable for tests; `null` for imported moves); `undo` replays the history minus the last live move and is rejected with `game-finished` once ended and `no-move-to-undo` at or inside the fixed (imported) prefix — imported PTN history is fixed (`fixedMoves`).
