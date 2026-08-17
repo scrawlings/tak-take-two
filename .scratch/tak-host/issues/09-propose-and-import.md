@@ -11,3 +11,7 @@
 - [ ] The proposer can delete a proposal no one has joined; joined games cannot be deleted this way.
 - [ ] "My games" shows the signed-in player's proposals and active games.
 - [ ] Trail events are written for proposals and deletions.
+
+## Comments
+
+**2026-08-17 — Design note.** ADR-0004 (`docs/adr/0004-game-lifecycle-module.md`) fixes the web Game lifecycle seam: routes are thin adapters over a single Game module behind a command-union interface (`applyGame(gameId, actorId, command)`). This ticket gives birth to the web Game module. Read the ADR before designing.

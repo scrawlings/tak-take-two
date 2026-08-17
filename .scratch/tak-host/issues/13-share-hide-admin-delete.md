@@ -11,3 +11,7 @@
 - [ ] Admins can delete any game; affected players see a clear "removed by an admin" warning on the game view and in their lists.
 - [ ] Admins can view any game regardless of share state.
 - [ ] Trail events are written for share changes, hides, and deletions.
+
+## Comments
+
+**2026-08-17 — Design note.** ADR-0004 (`docs/adr/0004-game-lifecycle-module.md`) fixes the web Game lifecycle seam: routes are thin adapters over a single Game module behind a command-union interface (`applyGame(gameId, actorId, command)`). Build over the Game module. Read the ADR before designing.

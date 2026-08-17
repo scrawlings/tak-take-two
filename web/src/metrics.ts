@@ -1,4 +1,4 @@
-import type { Db } from './db.js';
+import type { PersistenceSnapshot } from './persistence.js';
 
 interface CounterEntry {
   labels: Record<string, string>;
@@ -68,44 +68,6 @@ export class Summary {
   }
 }
 
-export interface MetricsSnapshot {
-  httpRequestsTotal: Array<CounterEntry>;
-  httpRequestDuration: Array<SummaryEntry>;
-  httpErrorsTotal: number;
-  activeSessions: number;
-  gamesByState: Array<{ state: string; count: number }>;
-  databaseSizeBytes: number;
-}
-
-function countTable(db: Db, table: string): number {
-  try {
-    const row = db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number } | undefined;
-    return row?.n ?? 0;
-  } catch {
-    return 0;
-  }
-}
-
-function gamesByState(db: Db): Array<{ state: string; count: number }> {
-  try {
-    const rows = db
-      .prepare('SELECT state, COUNT(*) AS n FROM games GROUP BY state ORDER BY state')
-      .all() as Array<{ state: string; n: number }>;
-    return rows.map((row) => ({ state: row.state, count: row.n }));
-  } catch {
-    return [];
-  }
-}
-
-function databaseSize(db: Db): number {
-  try {
-    const pageCount = db.pragma('page_count', { simple: true }) as number;
-    const pageSize = db.pragma('page_size', { simple: true }) as number;
-    return pageCount * pageSize;
-  } catch {
-    return 0;
-  }
-}
 
 export class Metrics {
   readonly httpRequestsTotal = new Counter('http_requests_total', 'Total HTTP requests handled.');
@@ -124,30 +86,28 @@ export class Metrics {
     this.errors += 1;
   }
 
-  collect(db: Db): MetricsSnapshot {
-    return {
+  httpErrors(): number {
+    return this.errors;
+  }
+
+  render(snapshot: PersistenceSnapshot): string {
+    const lines: string[] = [];
+
+    const inMemory = {
       httpRequestsTotal: [...this.httpRequestsTotal.series()],
       httpRequestDuration: [...this.httpRequestDurationSeconds.series()],
       httpErrorsTotal: this.errors,
-      activeSessions: countTable(db, 'sessions'),
-      gamesByState: gamesByState(db),
-      databaseSizeBytes: databaseSize(db),
     };
-  }
-
-  render(db: Db): string {
-    const snapshot = this.collect(db);
-    const lines: string[] = [];
 
     lines.push(`# HELP ${this.httpRequestsTotal.name} ${this.httpRequestsTotal.help}`);
     lines.push(`# TYPE ${this.httpRequestsTotal.name} counter`);
-    for (const entry of snapshot.httpRequestsTotal) {
+    for (const entry of inMemory.httpRequestsTotal) {
       lines.push(`${this.httpRequestsTotal.name}${formatLabels(entry.labels)} ${entry.value}`);
     }
 
     lines.push(`# HELP ${this.httpRequestDurationSeconds.name} ${this.httpRequestDurationSeconds.help}`);
     lines.push(`# TYPE ${this.httpRequestDurationSeconds.name} summary`);
-    for (const entry of snapshot.httpRequestDuration) {
+    for (const entry of inMemory.httpRequestDuration) {
       lines.push(
         `${this.httpRequestDurationSeconds.name}_count${formatLabels(entry.labels)} ${entry.count}`,
       );
@@ -156,7 +116,7 @@ export class Metrics {
 
     lines.push('# HELP http_errors_total Total unhandled request errors.');
     lines.push('# TYPE http_errors_total counter');
-    lines.push(`http_errors_total ${snapshot.httpErrorsTotal}`);
+    lines.push(`http_errors_total ${inMemory.httpErrorsTotal}`);
 
     lines.push('# HELP tak_active_sessions Current number of active sessions.');
     lines.push('# TYPE tak_active_sessions gauge');

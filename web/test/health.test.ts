@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import Database from 'better-sqlite3';
+import { ok, err } from 'neverthrow';
 import { runMigrations } from '../src/db.js';
+import { createPersistence, type Persistence } from '../src/persistence.js';
 import { createApp } from '../src/app.js';
 import { Metrics } from '../src/metrics.js';
 import type { Logger } from '../src/logging.js';
@@ -10,7 +12,10 @@ const silent: Logger = { log() {} };
 function makeApp() {
   const db = new Database(':memory:');
   runMigrations(db);
-  return { app: createApp({ db, metrics: new Metrics(), logger: silent }), db };
+  return {
+    app: createApp({ persistence: createPersistence(db), metrics: new Metrics(), logger: silent }),
+    db,
+  };
 }
 
 describe('health endpoints', () => {
@@ -30,14 +35,12 @@ describe('health endpoints', () => {
   });
 
   it('GET /readyz returns 503 when the database check fails', async () => {
-    const db = new Database(':memory:');
-    runMigrations(db);
-    const failingDb = {
-      prepare() {
-        throw new Error('db down');
-      },
-    } as unknown as Database.Database;
-    const app = createApp({ db: failingDb, metrics: new Metrics(), logger: silent });
+    const failingPersistence: Persistence = {
+      ping: () => err('db down'),
+      metricsSnapshot: () => ({ activeSessions: 0, gamesByState: [], databaseSizeBytes: 0 }),
+      appendActivityTrail: () => ok(undefined),
+    };
+    const app = createApp({ persistence: failingPersistence, metrics: new Metrics(), logger: silent });
     const res = await app.request('/readyz');
     expect(res.status).toBe(503);
     expect(await res.json()).toEqual({ status: 'unavailable', db: 'error' });

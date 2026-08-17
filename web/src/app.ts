@@ -1,12 +1,12 @@
 import { Hono } from 'hono';
-import type { Db } from './db.js';
-import { Metrics, type MetricsSnapshot } from './metrics.js';
+import type { Persistence, PersistenceSnapshot } from './persistence.js';
+import { Metrics } from './metrics.js';
 import type { Logger } from './logging.js';
 import { newRequestId } from './logging.js';
 import { renderShell, escapeHtml } from './html.js';
 
 export interface AppDeps {
-  db: Db;
+  persistence: Persistence;
   metrics: Metrics;
   logger: Logger;
 }
@@ -17,10 +17,10 @@ type Variables = {
 
 export type App = Hono<{ Variables: Variables }>;
 
-function renderStatusPage(snapshot: MetricsSnapshot): string {
+function renderStatusPage(snapshot: PersistenceSnapshot, httpErrors: number): string {
   const rows: Array<[string, string]> = [
     ['active sessions', String(snapshot.activeSessions)],
-    ['http errors', String(snapshot.httpErrorsTotal)],
+    ['http errors', String(httpErrors)],
     ['database size (bytes)', String(snapshot.databaseSizeBytes)],
   ];
   for (const entry of snapshot.gamesByState) {
@@ -33,7 +33,7 @@ function renderStatusPage(snapshot: MetricsSnapshot): string {
 }
 
 export function createApp(deps: AppDeps): App {
-  const { db, metrics, logger } = deps;
+  const { persistence, metrics, logger } = deps;
   const app = new Hono<{ Variables: Variables }>();
 
   app.use('*', async (c, next) => {
@@ -59,22 +59,21 @@ export function createApp(deps: AppDeps): App {
   app.get('/healthz', (c) => c.json({ status: 'ok' }));
 
   app.get('/readyz', (c) => {
-    try {
-      db.prepare('SELECT 1').get();
-      return c.json({ status: 'ok', db: 'ok' });
-    } catch {
+    const result = persistence.ping();
+    if (result.isErr()) {
       return c.json({ status: 'unavailable', db: 'error' }, 503);
     }
+    return c.json({ status: 'ok', db: 'ok' });
   });
 
   app.get('/metrics', (c) => {
-    return c.text(metrics.render(db), 200, {
+    return c.text(metrics.render(persistence.metricsSnapshot()), 200, {
       'content-type': 'text/plain; version=0.0.4; charset=utf-8',
     });
   });
 
   app.get('/status', (c) => {
-    return c.html(renderShell('Status', renderStatusPage(metrics.collect(db))));
+    return c.html(renderShell('Status', renderStatusPage(persistence.metricsSnapshot(), metrics.httpErrors())));
   });
 
   app.get('/', (c) => c.html(renderShell('Tak', '<h1>Tak</h1><p>The game hosting site.</p>')));

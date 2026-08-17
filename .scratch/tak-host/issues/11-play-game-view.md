@@ -12,3 +12,7 @@
 - [ ] Road and flat wins are detected and finish the game with the correct PTN result; resign and mutual draw also finish it.
 - [ ] Game stats (move count, duration, result, board size) are written when a game finishes.
 - [ ] Trail events are written for moves, resignations, and draws.
+
+## Comments
+
+**2026-08-17 — Design note.** ADR-0004 (`docs/adr/0004-game-lifecycle-module.md`) fixes the web Game lifecycle seam: routes are thin adapters over a single Game module behind a command-union interface (`applyGame(gameId, actorId, command)`). Build over the Game module. Read the ADR before designing.

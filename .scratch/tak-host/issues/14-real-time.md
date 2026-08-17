@@ -10,3 +10,7 @@
 - [ ] Spectators of shared games see moves live; unshared games cannot be watched.
 - [ ] "My games" and search views reflect state changes without a manual refresh.
 - [ ] The board and history stay consistent under near-simultaneous updates from both players.
+
+## Comments
+
+**2026-08-17 — Design note.** ADR-0004 (`docs/adr/0004-game-lifecycle-module.md`) fixes the web Game lifecycle seam: routes are thin adapters over a single Game module behind a command-union interface (`applyGame(gameId, actorId, command)`). Delivery concern — adapt at the routes, over the Game module. Read the ADR before designing.
