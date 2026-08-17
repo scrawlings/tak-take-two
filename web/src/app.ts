@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { routePath } from 'hono/route';
 import type { Persistence, PersistenceSnapshot } from './persistence.js';
 import { Metrics } from './metrics.js';
 import type { Logger } from './logging.js';
@@ -44,7 +45,7 @@ export function createApp(deps: AppDeps): App {
     await next();
     const durationMs = Date.now() - start;
     const status = c.res.status;
-    const route = c.req.routePath ?? 'unmatched';
+    const route = routePath(c) ?? 'unmatched';
     metrics.observeHttp(c.req.method, route, status, durationMs);
     logger.log('info', 'request', {
       requestId,
