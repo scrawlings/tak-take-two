@@ -162,7 +162,7 @@ function applyPlace(
   }
 
   let stone: Stone;
-  let reserves = state.reserves;
+  let reserves: Reserves; 
   let opened = state.opened;
 
   if (!state.opened[mover]) {

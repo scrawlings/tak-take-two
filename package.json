@@ -3,16 +3,29 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
-  "workspaces": ["core", "web"],
+  "workspaces": [
+    "core",
+    "web"
+  ],
   "scripts": {
     "typecheck": "tsc --noEmit -p core && tsc --noEmit -p web",
     "test": "vitest run",
     "test:watch": "vitest",
-    "dev": "npm run dev -w web"
+    "dev": "npm run dev -w web",
+    "lint": "eslint ."
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.8.1",
     "@types/node": "^22.10.0",
     "typescript": "^5.6.0",
-    "vitest": "^2.1.0"
+    "typescript-eslint": "^8.67.0",
+    "vite": "^8.2.0",
+    "vitest": "^4.1.10"
+  },
+  "allowScripts": {
+    "better-sqlite3@11.10.0": true,
+    "fsevents@2.3.3": true,
+    "esbuild@0.28.2": true
   }
 }
