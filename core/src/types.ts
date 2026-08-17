@@ -155,6 +155,23 @@ export interface PtnOptions {
   readonly result?: ResultCode;
 }
 
+export type TpsErrorCode =
+  | 'tps-field-count'
+  | 'tps-bad-turn'
+  | 'tps-bad-move-count'
+  | 'tps-bad-row-count'
+  | 'tps-bad-row-width'
+  | 'tps-bad-cell'
+  | 'tps-too-many-capstones'
+  | 'tps-stones-beyond-reserve'
+  | 'tps-too-many-stones'
+  | 'tps-too-few-stones';
+
+export interface TpsError {
+  readonly code: TpsErrorCode;
+  readonly message: string;
+}
+
 /** The opponent of a player. */
 export function opponent(player: Player): Player {
   return player === 1 ? 2 : 1;
