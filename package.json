@@ -1,0 +1,18 @@
+{
+  "name": "tak-take-two",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "workspaces": ["core", "web"],
+  "scripts": {
+    "typecheck": "tsc --noEmit -p core && tsc --noEmit -p web",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "dev": "npm run dev -w web"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}
