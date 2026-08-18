@@ -46,6 +46,7 @@ interface Harness {
 
 function harness(): Harness {
   const db = new Database(':memory:');
+  db.pragma('foreign_keys = ON');
   runMigrations(db);
   const persistence = createPersistence(db);
   return {

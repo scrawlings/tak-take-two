@@ -11,6 +11,7 @@ const silent: Logger = { log() {} };
 
 function makeApp(): { app: App; db: Database.Database } {
   const db = new Database(':memory:');
+  db.pragma('foreign_keys = ON');
   runMigrations(db);
   return {
     app: createApp({ persistence: createPersistence(db), metrics: new Metrics(), logger: silent }),

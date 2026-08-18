@@ -10,6 +10,7 @@ const silent: Logger = { log() {} };
 
 function makeApp() {
   const db = new Database(':memory:');
+  db.pragma('foreign_keys = ON');
   runMigrations(db);
   return createApp({ persistence: createPersistence(db), metrics: new Metrics(), logger: silent });
 }

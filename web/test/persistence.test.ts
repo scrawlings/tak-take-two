@@ -6,6 +6,7 @@ import { createPersistence } from '../src/persistence.js';
 
 function makeDb(): Database.Database {
   const db = new Database(':memory:');
+  db.pragma('foreign_keys = ON');
   runMigrations(db);
   return db;
 }

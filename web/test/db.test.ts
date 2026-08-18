@@ -21,6 +21,7 @@ function versions(db: Database.Database): number[] {
 /** A database as it stood when only migration 1 had been written. */
 function databaseAtMigration1(): Database.Database {
   const db = new Database(':memory:');
+  db.pragma('foreign_keys = ON');
   db.exec(`CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT);
     CREATE TABLE games (
       id INTEGER PRIMARY KEY,
@@ -41,6 +42,7 @@ function databaseAtMigration1(): Database.Database {
 describe('runMigrations', () => {
   it('brings a fresh database fully up to date', () => {
     const db = new Database(':memory:');
+    db.pragma('foreign_keys = ON');
 
     expect(runMigrations(db).isOk()).toBe(true);
 
@@ -50,6 +52,7 @@ describe('runMigrations', () => {
 
   it('is idempotent: re-running applies nothing', () => {
     const db = new Database(':memory:');
+    db.pragma('foreign_keys = ON');
     runMigrations(db);
 
     expect(runMigrations(db).isOk()).toBe(true);

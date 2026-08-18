@@ -11,6 +11,7 @@ const silent: Logger = { log() {} };
 describe('/metrics', () => {
   it('returns Prometheus text format', async () => {
     const db = new Database(':memory:');
+    db.pragma('foreign_keys = ON');
     runMigrations(db);
     const app = createApp({ persistence: createPersistence(db), metrics: new Metrics(), logger: silent });
 
@@ -29,6 +30,7 @@ describe('/metrics', () => {
 
   it('counts requests it has already handled', async () => {
     const db = new Database(':memory:');
+    db.pragma('foreign_keys = ON');
     runMigrations(db);
     const metrics = new Metrics();
     const app = createApp({ persistence: createPersistence(db), metrics, logger: silent });

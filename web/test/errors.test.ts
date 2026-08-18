@@ -11,6 +11,7 @@ const silent: Logger = { log() {} };
 describe('error handling', () => {
   it('returns a generic 500 with a request id when a handler throws', async () => {
     const db = new Database(':memory:');
+    db.pragma('foreign_keys = ON');
     runMigrations(db);
     const app = createApp({ persistence: createPersistence(db), metrics: new Metrics(), logger: silent });
 
@@ -27,6 +28,7 @@ describe('error handling', () => {
 
   it('does not leak the underlying error message', async () => {
     const db = new Database(':memory:');
+    db.pragma('foreign_keys = ON');
     runMigrations(db);
     const app = createApp({ persistence: createPersistence(db), metrics: new Metrics(), logger: silent });
 
