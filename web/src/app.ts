@@ -8,7 +8,7 @@ import type { Persistence, PersistenceSnapshot } from './persistence.js';
 import { Metrics } from './metrics.js';
 import type { Logger } from './logging.js';
 import { newRequestId } from './logging.js';
-import { escapeHtml, renderShell } from './html.js';
+import { escapeHtml, renderShell, siteCss } from './html.js';
 import { createAuth, type Auth, type AuthError, type SessionUser } from './auth.js';
 import { createFormAction, statusForAuthError } from './forms.js';
 import {
@@ -18,6 +18,7 @@ import {
   renderChangePasswordPage,
   renderLoginPage,
   renderResetPasswordResult,
+  renderRoot,
 } from './views.js';
 
 export interface AppDeps {
@@ -48,9 +49,16 @@ function renderStatusPage(snapshot: PersistenceSnapshot, httpErrors: number): st
     rows.push([`games in state "${entry.state}"`, String(entry.count)]);
   }
   const body = rows
-    .map(([key, value]) => `<tr><td>${escapeHtml(key)}</td><td>${escapeHtml(value)}</td></tr>`)
+    .map(([key, value]) => `<tr><td class="key">${escapeHtml(key)}</td><td class="num">${escapeHtml(value)}</td></tr>`)
     .join('');
-  return `<h1>Status</h1><table border="1" cellpadding="6">${body}</table>`;
+  return `<h1>Status</h1>
+<p class="lede">Live figures for this server. The same numbers are available to Prometheus at <span class="mono">/metrics</span>.</p>
+<div class="table-scroll">
+  <table class="data">
+    <thead><tr><th>Measure</th><th>Value</th></tr></thead>
+    <tbody>${body}</tbody>
+  </table>
+</div>`;
 }
 
 /** A form field coerced to a string, or null when absent/non-textual. */
@@ -114,8 +122,30 @@ export function createApp(deps: AppDeps): App {
     await next();
   });
 
+  /**
+   * The signed-in user, or undefined, without redirecting. Public pages use it
+   * to draw the right masthead; it grants no access on its own.
+   */
+  const navUser = (c: Context<{ Variables: Variables }>): SessionUser | undefined => {
+    const sessionId = getCookie(c, SESSION_COOKIE);
+    if (!sessionId) return undefined;
+    const result = auth.getSessionUser(sessionId);
+    return result.isOk() && !result.value.blocked ? result.value : undefined;
+  };
+
   const forbiddenPage = (c: Context<{ Variables: Variables }>): Response =>
-    c.html(renderShell('Forbidden', '<h1>Forbidden</h1><p>Admin only.</p>'), 403);
+    c.html(
+      renderShell(
+        'Forbidden',
+        `<div class="narrow">
+  <h1>Forbidden</h1>
+  <p class="lede">This page is for admins. Your account can't open it.</p>
+  <p class="actions"><a class="btn btn-quiet" href="/account">Go to your account</a></p>
+</div>`,
+        { user: navUser(c) },
+      ),
+      403,
+    );
 
   const adminUsersPage = (
     c: Context<{ Variables: Variables }>,
@@ -161,11 +191,20 @@ export function createApp(deps: AppDeps): App {
     });
   });
 
+  app.get('/site.css', (c) =>
+    c.text(siteCss(), 200, { 'content-type': 'text/css; charset=utf-8' }),
+  );
+
   app.get('/status', (c) => {
-    return c.html(renderShell('Status', renderStatusPage(persistence.metricsSnapshot(), metrics.httpErrors())));
+    return c.html(
+      renderShell('Status', renderStatusPage(persistence.metricsSnapshot(), metrics.httpErrors()), {
+        user: navUser(c),
+        path: '/status',
+      }),
+    );
   });
 
-  app.get('/', (c) => c.html(renderShell('Tak', '<h1>Tak</h1><p>The game hosting site.</p>')));
+  app.get('/', (c) => c.html(renderRoot(navUser(c))));
 
   app.get('/login', (c) => {
     const message = c.req.query('changed') ? 'Password changed — sign in again.' : undefined;
@@ -198,7 +237,7 @@ export function createApp(deps: AppDeps): App {
   });
 
   app.get('/account/password', requireUser, (c) => {
-    return c.html(renderChangePasswordPage({ forced: c.get('user').forcePasswordChange }));
+    return c.html(renderChangePasswordPage(c.get('user'), { forced: c.get('user').forcePasswordChange }));
   });
 
   app.post('/account/password', requireUser, formAction({
@@ -219,7 +258,7 @@ export function createApp(deps: AppDeps): App {
     },
     renderError: (c, e) =>
       c.html(
-        renderChangePasswordPage({ forced: c.get('user').forcePasswordChange, error: e.message }),
+        renderChangePasswordPage(c.get('user'), { forced: c.get('user').forcePasswordChange, error: e.message }),
         statusForAuthError(e),
       ),
   }));
@@ -318,7 +357,7 @@ export function createApp(deps: AppDeps): App {
         logger.log('error', 'unexpected reset result', { result: r });
         return c.json({ error: 'Internal Server Error' }, 500);
       }
-      return c.html(renderResetPasswordResult(r.username, r.password));
+      return c.html(renderResetPasswordResult(c.get('user'), r.username, r.password));
     },
     renderError: adminFormError,
   }));
