@@ -720,3 +720,102 @@ describe('sharing, hiding, and admin removal at the game screen', () => {
     expect(res.status).toBe(403);
   });
 });
+
+describe('exporting a record from the game screen', () => {
+  async function playedGame(): Promise<{ app: App; db: Database.Database; aoife: string; takashi: string }> {
+    const { app, db } = makeApp();
+    await insertUser(db, { id: 1, username: 'aoife', password: 'pw', displayName: 'Aoife Nolan' });
+    await insertUser(db, { id: 2, username: 'takashi', password: 'pw', displayName: 'Takashi Mori' });
+    const aoife = await signIn(app, 'aoife', 'pw');
+    const takashi = await signIn(app, 'takashi', 'pw');
+    await app.request('/games', withCookie(form({ board_size: '5', join_type: 'open' }), aoife));
+    await app.request('/games/1/join', withCookie(form({ from: 'find' }), takashi));
+    await app.request('/games/1/move', withCookie(form({ move: 'a1' }), aoife));
+    await app.request('/games/1/move', withCookie(form({ move: 'e5' }), takashi));
+    return { app, db, aoife, takashi };
+  }
+
+  it('offers PTN and TPS links against every move and the whole game', async () => {
+    const { app, aoife } = await playedGame();
+
+    const html = await (await app.request('/games/1', withCookie({}, aoife))).text();
+
+    // `&amp;` is the attribute form; the browser sends back a plain `&`.
+    expect(html).toContain('/games/1/export?format=ptn&amp;through=1');
+    expect(html).toContain('/games/1/export?format=tps&amp;through=1');
+    expect(html).toContain('/games/1/export?format=ptn&amp;through=2');
+    // The whole game carries no move number.
+    expect(html).toContain('href="/games/1/export?format=ptn"');
+  });
+
+  it('shows the full PTN, ready to copy', async () => {
+    const { app, aoife } = await playedGame();
+
+    const res = await app.request('/games/1/export?format=ptn', withCookie({}, aoife));
+
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain('[Size &quot;5&quot;]');
+    expect(html).toContain('[Player1 &quot;Aoife Nolan&quot;]');
+    expect(html).toContain('1. a1 e5');
+    expect(html).toContain('class="export-text"');
+    expect(html).toContain('Back to the game');
+  });
+
+  it('shows the TPS after a chosen move', async () => {
+    const { app, aoife } = await playedGame();
+
+    const res = await app.request('/games/1/export?format=tps&through=1', withCookie({}, aoife));
+
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    // One half-move played: player 2 to move, still on move 1.
+    expect(html).toContain('2 1</pre>');
+    expect(html).toContain('position after move 1 of 2');
+  });
+
+  it('reports an unwritable format on the game page', async () => {
+    const { app, aoife } = await playedGame();
+
+    const res = await app.request('/games/1/export?format=pgn', withCookie({}, aoife));
+
+    expect(res.status).toBe(400);
+    expect(await res.text()).toContain('Choose PTN or TPS');
+  });
+
+  it('reports a move number the game does not have', async () => {
+    const { app, aoife } = await playedGame();
+
+    const res = await app.request('/games/1/export?format=ptn&through=99', withCookie({}, aoife));
+
+    expect(res.status).toBe(400);
+    expect(await res.text()).toContain('choose one between 0 and 2');
+  });
+
+  it('hides an unshared game from a stranger', async () => {
+    const { app, db } = makeApp();
+    await insertUser(db, { id: 1, username: 'aoife', password: 'pw' });
+    await insertUser(db, { id: 2, username: 'takashi', password: 'pw' });
+    await insertUser(db, { id: 3, username: 'stranger', password: 'pw' });
+    const aoife = await signIn(app, 'aoife', 'pw');
+    await app.request(
+      '/games',
+      withCookie(form({ board_size: '5', join_type: 'invited', invited_display_name: 'takashi' }), aoife),
+    );
+    const stranger = await signIn(app, 'stranger', 'pw');
+
+    expect((await app.request('/games/1/export?format=ptn', withCookie({}, stranger))).status).toBe(404);
+  });
+
+  it('records the export in the activity trail', async () => {
+    const { app, db, aoife } = await playedGame();
+
+    await app.request('/games/1/export?format=ptn&through=1', withCookie({}, aoife));
+
+    const row = db
+      .prepare("SELECT user_id, game_id, payload FROM activity_trail WHERE event = 'game-exported'")
+      .get() as { user_id: number; game_id: number; payload: string };
+    expect(row).toMatchObject({ user_id: 1, game_id: 1 });
+    expect(JSON.parse(row.payload)).toMatchObject({ format: 'ptn', throughMove: 1, complete: false });
+  });
+});

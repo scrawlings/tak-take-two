@@ -3,7 +3,7 @@ import Database from 'better-sqlite3';
 import { runMigrations } from '../src/db.js';
 import { createPersistence, type Persistence } from '../src/persistence.js';
 import { createGames, type Games } from '../src/games.js';
-import { fromPtnText } from '@tak/core';
+import { fromPtnText, generateTps, parseTps, parsePtn } from '@tak/core';
 import type { SessionUser } from '../src/auth.js';
 
 /**
@@ -1531,5 +1531,253 @@ describe('games: admin delete and view', () => {
     expect(h.games.applyGame(h.root, { type: 'adminDelete', gameId: 404 })._unsafeUnwrapErr().code).toBe(
       'not-found',
     );
+  });
+});
+
+describe('games: export', () => {
+  /** An in-play open game between Aoife (seat 1) and Takashi (seat 2). */
+  function inPlay(h: Harness): number {
+    const r = h.games.applyGame(h.aoife, { type: 'propose', boardSize: 5, joinType: 'open' });
+    const gameId = (r._unsafeUnwrap() as { gameId: number }).gameId;
+    h.games.applyGame(h.takashi, { type: 'join', gameId });
+    return gameId;
+  }
+
+  /** Play `moves` alternately from seat 1, as a real game would run. */
+  function playAll(h: Harness, gameId: number, moves: readonly string[]): void {
+    moves.forEach((move, i) => {
+      const actor = i % 2 === 0 ? h.aoife : h.takashi;
+      const played = h.games.applyGame(actor, { type: 'playMove', gameId, move });
+      expect(played.isOk()).toBe(true);
+    });
+  }
+
+  function exported(
+    h: Harness,
+    actor: SessionUser,
+    gameId: number,
+    format: string,
+    throughMove?: number,
+  ): { text: string; throughMove: number; totalMoves: number } {
+    const r = h.games.applyGame(actor, { type: 'export', gameId, format, throughMove });
+    return r._unsafeUnwrap() as { text: string; throughMove: number; totalMoves: number };
+  }
+
+  it('exports the full game as PTN that re-imports and replays', () => {
+    const h = harness();
+    const gameId = inPlay(h);
+    playAll(h, gameId, ROAD_MOVES);
+
+    const out = exported(h, h.aoife, gameId, 'ptn');
+
+    expect(out.throughMove).toBe(ROAD_MOVES.length);
+    expect(out.totalMoves).toBe(ROAD_MOVES.length);
+    // The whole point of the record: it survives a round trip through import.
+    const reimported = fromPtnText(out.text);
+    expect(reimported.isOk()).toBe(true);
+    expect(reimported._unsafeUnwrap().history).toHaveLength(ROAD_MOVES.length);
+  });
+
+  it('names both players in the record, and the result once the game is finished', () => {
+    const h = harness();
+    const gameId = inPlay(h);
+    playAll(h, gameId, ROAD_MOVES); // a road win for seat 1
+
+    const out = exported(h, h.aoife, gameId, 'ptn');
+
+    const parsed = parsePtn(out.text)._unsafeUnwrap();
+    expect(parsed.tags.get('Player1')).toBe('Aoife Nolan');
+    expect(parsed.tags.get('Player2')).toBe('Takashi Mori');
+    expect(parsed.size).toBe(5);
+    expect(parsed.result).toBe('R-0');
+  });
+
+  it('exports a prefix that replays, and never claims a result the prefix has not reached', () => {
+    const h = harness();
+    const gameId = inPlay(h);
+    playAll(h, gameId, ROAD_MOVES); // finished, R-0
+
+    const out = exported(h, h.aoife, gameId, 'ptn', 4);
+
+    expect(out.throughMove).toBe(4);
+    expect(out.totalMoves).toBe(ROAD_MOVES.length);
+    const reimported = fromPtnText(out.text);
+    expect(reimported.isOk()).toBe(true);
+    expect(reimported._unsafeUnwrap().history).toHaveLength(4);
+    // The game was won at move 11; a prefix ending at 4 is still in play.
+    expect(out.text).not.toContain('R-0');
+    expect(parsePtn(out.text)._unsafeUnwrap().result).toBeNull();
+  });
+
+  it('exports the TPS of the position after a chosen move, and it round-trips', () => {
+    const h = harness();
+    const gameId = inPlay(h);
+    playAll(h, gameId, ROAD_MOVES.slice(0, 3));
+
+    const out = exported(h, h.aoife, gameId, 'tps', 2);
+
+    // Two half-moves played, so it is player 1's turn on move 2.
+    expect(out.text).toMatch(/ 1 2$/);
+    const parsed = parseTps(out.text);
+    expect(parsed.isOk()).toBe(true);
+    expect(generateTps(parsed._unsafeUnwrap())).toBe(out.text);
+  });
+
+  it('exports the starting position as TPS through move 0', () => {
+    const h = harness();
+    const gameId = inPlay(h);
+    playAll(h, gameId, ROAD_MOVES.slice(0, 2));
+
+    const out = exported(h, h.aoife, gameId, 'tps', 0);
+
+    expect(out.text).toBe('x5/x5/x5/x5/x5 1 1');
+    expect(parseTps(out.text).isOk()).toBe(true);
+  });
+
+  it('records an ending the moves cannot show, like a resignation', () => {
+    const h = harness();
+    const gameId = inPlay(h);
+    playAll(h, gameId, ROAD_MOVES.slice(0, 1));
+    h.games.applyGame(h.aoife, { type: 'resign', gameId });
+
+    const out = exported(h, h.aoife, gameId, 'ptn');
+
+    // A resignation lives in the game record, not in the position, so it can
+    // only reach the PTN from the stored result.
+    expect(parsePtn(out.text)._unsafeUnwrap().result).toBe('0-1');
+    expect(fromPtnText(out.text).isOk()).toBe(true);
+  });
+
+  it('records an agreed draw the same way', () => {
+    const h = harness();
+    const gameId = inPlay(h);
+    h.games.applyGame(h.aoife, { type: 'offerDraw', gameId });
+    h.games.applyGame(h.takashi, { type: 'acceptDraw', gameId });
+
+    const out = exported(h, h.aoife, gameId, 'ptn');
+
+    expect(parsePtn(out.text)._unsafeUnwrap().result).toBe('1/2-1/2');
+    expect(fromPtnText(out.text).isOk()).toBe(true);
+  });
+
+  it('exports a proposal nobody has joined, naming only the proposer', () => {
+    const h = harness();
+    const r = h.games.applyGame(h.aoife, { type: 'propose', boardSize: 5, joinType: 'open', ptn: OPENING_PTN });
+    const gameId = (r._unsafeUnwrap() as { gameId: number }).gameId;
+
+    const out = exported(h, h.aoife, gameId, 'ptn');
+
+    expect(out.totalMoves).toBe(4);
+    expect(parsePtn(out.text)._unsafeUnwrap().tags.has('Player2')).toBe(false);
+    expect(fromPtnText(out.text).isOk()).toBe(true);
+  });
+
+  it('exports an empty game as a valid record and its starting position', () => {
+    const h = harness();
+    const r = h.games.applyGame(h.aoife, { type: 'propose', boardSize: 6, joinType: 'open' });
+    const gameId = (r._unsafeUnwrap() as { gameId: number }).gameId;
+
+    expect(fromPtnText(exported(h, h.aoife, gameId, 'ptn').text).isOk()).toBe(true);
+    expect(exported(h, h.aoife, gameId, 'tps').text).toBe('x6/x6/x6/x6/x6/x6 1 1');
+  });
+
+  it('carries imported history into the export', () => {
+    const h = harness();
+    const r = h.games.applyGame(h.aoife, { type: 'propose', boardSize: 5, joinType: 'open', ptn: OPENING_PTN });
+    const gameId = (r._unsafeUnwrap() as { gameId: number }).gameId;
+    h.games.applyGame(h.takashi, { type: 'join', gameId });
+    h.games.applyGame(h.aoife, { type: 'playMove', gameId, move: 'b2' });
+
+    const out = exported(h, h.aoife, gameId, 'ptn');
+
+    // Four imported moves plus the one played here.
+    expect(out.totalMoves).toBe(5);
+    expect(fromPtnText(out.text)._unsafeUnwrap().history).toHaveLength(5);
+  });
+
+  it('writes a trail event naming what was exported', () => {
+    const h = harness();
+    const gameId = inPlay(h);
+    playAll(h, gameId, ROAD_MOVES.slice(0, 2));
+
+    h.games.applyGame(h.aoife, { type: 'export', gameId, format: 'tps', throughMove: 1 });
+
+    expect(trailEvents(h.db)).toContain('game-exported');
+    const payload = (
+      h.db.prepare("SELECT payload FROM activity_trail WHERE event = 'game-exported'").get() as {
+        payload: string;
+      }
+    ).payload;
+    expect(JSON.parse(payload)).toMatchObject({ format: 'tps', throughMove: 1 });
+  });
+
+  it('lets a spectator export a shared game', () => {
+    const h = harness();
+    const gameId = inPlay(h); // open games start shared
+    playAll(h, gameId, ROAD_MOVES.slice(0, 2));
+    const stranger = insertUser(h.db, { id: 9, username: 'stranger', displayName: 'Stranger' });
+
+    expect(h.games.applyGame(stranger, { type: 'export', gameId, format: 'ptn' }).isOk()).toBe(true);
+  });
+
+  it('hides an unshared game from a stranger, as the game view does', () => {
+    const h = harness();
+    const r = h.games.applyGame(h.aoife, {
+      type: 'propose',
+      boardSize: 5,
+      joinType: 'invited',
+      invitedDisplayName: 'Takashi Mori',
+    });
+    const gameId = (r._unsafeUnwrap() as { gameId: number }).gameId;
+    h.games.applyGame(h.takashi, { type: 'join', gameId });
+    const stranger = insertUser(h.db, { id: 9, username: 'stranger', displayName: 'Stranger' });
+
+    expect(
+      h.games.applyGame(stranger, { type: 'export', gameId, format: 'ptn' })._unsafeUnwrapErr().code,
+    ).toBe('not-found');
+  });
+
+  it('lets an admin export any game, shared or not', () => {
+    const h = harness();
+    const r = h.games.applyGame(h.aoife, {
+      type: 'propose',
+      boardSize: 5,
+      joinType: 'invited',
+      invitedDisplayName: 'Takashi Mori',
+    });
+    const gameId = (r._unsafeUnwrap() as { gameId: number }).gameId;
+    h.games.applyGame(h.takashi, { type: 'join', gameId });
+
+    expect(h.games.applyGame(h.root, { type: 'export', gameId, format: 'ptn' }).isOk()).toBe(true);
+  });
+
+  it('refuses a move number beyond the history, and a negative one', () => {
+    const h = harness();
+    const gameId = inPlay(h);
+    playAll(h, gameId, ROAD_MOVES.slice(0, 2));
+
+    expect(
+      h.games.applyGame(h.aoife, { type: 'export', gameId, format: 'ptn', throughMove: 3 })._unsafeUnwrapErr().code,
+    ).toBe('invalid-move-number');
+    expect(
+      h.games.applyGame(h.aoife, { type: 'export', gameId, format: 'ptn', throughMove: -1 })._unsafeUnwrapErr().code,
+    ).toBe('invalid-move-number');
+  });
+
+  it('refuses a format it does not write', () => {
+    const h = harness();
+    const gameId = inPlay(h);
+
+    expect(
+      h.games.applyGame(h.aoife, { type: 'export', gameId, format: 'pgn' })._unsafeUnwrapErr().code,
+    ).toBe('invalid-export-format');
+  });
+
+  it('reports an unknown game as not found', () => {
+    const h = harness();
+
+    expect(
+      h.games.applyGame(h.aoife, { type: 'export', gameId: 404, format: 'ptn' })._unsafeUnwrapErr().code,
+    ).toBe('not-found');
   });
 });

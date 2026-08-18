@@ -201,7 +201,8 @@ function stripMarks(token: string): string {
   return token.slice(0, end);
 }
 
-function isResultCode(token: string): token is ResultCode {
+/** Whether `token` is one of the PTN result codes (including the open `*`). */
+export function isResultCode(token: string): token is ResultCode {
   return (RESULT_CODES as readonly string[]).includes(token);
 }
 
@@ -346,6 +347,16 @@ export function formatMove(move: Move): string {
 }
 
 /**
+ * Escape a tag value the way `parseTags` reads one back: it unescapes `\x` to
+ * `x`, so a value carrying a quote or a backslash must arrive escaped or the
+ * record it lands in cannot be re-imported. Tag values hold names their owners
+ * choose, so these characters are input, not a corner case.
+ */
+function escapeTagValue(value: string): string {
+  return value.replace(/[\\"]/g, '\\$&');
+}
+
+/**
  * Generate PTN text for a game or a replayable prefix. The moves are replayed
  * from an empty board first, so an illegal sequence is rejected rather than
  * emitted. A prefix (any number of moves up to a chosen point) replays cleanly
@@ -363,7 +374,7 @@ export function generatePtn(
   for (const [key, value] of options.tags ?? []) {
     const lower = key.toLowerCase();
     if (lower === 'size' || lower === 'result') continue; // derived from the arguments
-    lines.push(`[${key} "${value}"]`);
+    lines.push(`[${key} "${escapeTagValue(value)}"]`);
   }
   if (options.result !== undefined) lines.push(`[Result "${options.result}"]`);
   lines.push('');

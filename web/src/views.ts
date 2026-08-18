@@ -1,6 +1,6 @@
 import { breadcrumb, escapeHtml, renderShell } from './html.js';
 import type { SessionUser } from './auth.js';
-import type { GameSummary, GameView } from './games.js';
+import type { ExportFormat, GameExport, GameSummary, GameView } from './games.js';
 import type { StoneKind } from '@tak/core';
 
 /**
@@ -668,21 +668,44 @@ function renderGameControls(game: GameView): string {
   return parts.join('');
 }
 
+/**
+ * The pair of export links offered at one point in the game (ticket 15): the
+ * PTN through that move, and the TPS of the position after it. `through`
+ * numbers the full history, so move 0 is the starting position.
+ */
+function exportLinks(gameId: number, through: number | null): string {
+  // `&amp;` because this is an HTML attribute, not a bare URL; the browser
+  // hands the server back a plain `&`.
+  const query = (format: string): string =>
+    `/games/${gameId}/export?format=${format}${through === null ? '' : `&amp;through=${through}`}`;
+  const at = through === null ? 'the whole game' : `move ${through}`;
+  // Every export is recorded in the activity trail, so keep crawlers from
+  // walking two links per move and filling it with exports nobody asked for.
+  const link = (format: string, title: string): string =>
+    `<a class="export-link" rel="nofollow" href="${query(format)}" title="${title}">${format.toUpperCase()}</a>`;
+  return (
+    link('ptn', `Copy the PTN through ${at}`) +
+    link('tps', `Copy the TPS of the position after ${at}`)
+  );
+}
+
 function renderHistory(game: GameView): string {
+  const whole = `<p class="hint">Copy the record: ${exportLinks(game.id, null)} for the whole game, or from any move below.</p>`;
   if (game.moves.length === 0) {
-    return `<div class="block"><h2>Moves</h2><p class="lede">No moves yet.</p></div>`;
+    // Even with no moves there is a position to copy — the empty board.
+    return `<div class="block"><h2>Moves</h2><p class="lede">No moves yet.</p>${whole}</div>`;
   }
   const lines: string[] = [];
   for (let i = 0; i < game.moves.length; i += 2) {
     const turn = i / 2 + 1;
     const cell = (m: GameView['moves'][number]): string =>
-      `<span class="mono">${escapeHtml(m.notation)}</span> <span class="dim">${escapeHtml(m.player.displayName)}</span>`;
+      `<span class="mono">${escapeHtml(m.notation)}</span> <span class="dim">${escapeHtml(m.player.displayName)}</span> ${exportLinks(game.id, m.number)}`;
     const second = game.moves[i + 1];
     lines.push(`<li><span class="mono">${turn}.</span> ${cell(game.moves[i]!)}${second ? ` ${cell(second)}` : ''}</li>`);
   }
   const imported = game.moves.some((m) => m.imported);
   const note = imported ? '<p class="hint">Imported moves are fixed history.</p>' : '';
-  return `<div class="block"><h2>Moves</h2><ol class="moves">${lines.join('')}</ol>${note}</div>`;
+  return `<div class="block"><h2>Moves</h2><ol class="moves">${lines.join('')}</ol>${note}${whole}</div>`;
 }
 
 function renderLegend(): string {
@@ -776,4 +799,62 @@ ${renderReserves(game)}
 ${renderHistory(game)}
 ${renderMoveSyntax()}`;
   return renderShell(`Game ${game.id}`, body, { user, path: '/games' });
+}
+
+/** Register the copy button as an Alpine component, as the board does. */
+const TAK_COPY_SCRIPT = `<script>
+document.addEventListener('alpine:init', () => {
+  Alpine.data('takCopy', () => ({
+    // The clipboard API is absent over plain HTTP away from localhost, and can
+    // still refuse at the point of use, so the button only shows where it
+    // works. The record stays selectable either way.
+    supported: Boolean(navigator.clipboard),
+    copied: false,
+    copy() {
+      navigator.clipboard.writeText(this.$refs.record.textContent).then(
+        () => {
+          this.copied = true;
+          setTimeout(() => { this.copied = false }, 1500);
+        },
+        () => { this.supported = false },
+      );
+    }
+  }));
+});
+</script>`;
+
+/**
+ * The copy-out page for one export (ticket 15). The record is selectable on
+ * its own (`user-select: all`), so copying works with scripting off; the Copy
+ * button is an enhancement that only appears where the clipboard API exists.
+ */
+export function renderExportPage(user: SessionUser, gameId: number, view: GameExport): string {
+  const whole = view.throughMove === view.totalMoves;
+  const other: ExportFormat = view.format === 'ptn' ? 'tps' : 'ptn';
+  const through = whole ? '' : `&amp;through=${view.throughMove}`;
+
+  const what =
+    view.format === 'ptn'
+      ? whole
+        ? 'The full game as Portable Tak Notation. Paste it anywhere that reads PTN — including this site, to carry the game in.'
+        : `The game as Portable Tak Notation up to and including move ${view.throughMove} of ${view.totalMoves}. It replays on its own.`
+      : whole
+        ? 'The final position as the Tak Positional System describes it.'
+        : `The position after move ${view.throughMove} of ${view.totalMoves}, as the Tak Positional System describes it.`;
+
+  const body = `
+${breadcrumb({ href: `/games/${gameId}`, label: `Game ${gameId}` }, view.format.toUpperCase())}
+<h1>${view.format.toUpperCase()}</h1>
+<p class="lede">${what}</p>
+${TAK_COPY_SCRIPT}
+<div x-data="takCopy">
+  <pre class="export-text" x-ref="record">${escapeHtml(view.text)}</pre>
+  <p class="actions">
+    <button type="button" class="btn" x-on:click="copy()" x-show="supported" x-cloak x-text="copied ? 'Copied' : 'Copy'">Copy</button>
+    <a class="btn btn-quiet" href="/games/${gameId}/export?format=${other}${through}">Show ${other.toUpperCase()} instead</a>
+    <a class="btn btn-quiet" href="/games/${gameId}">Back to the game</a>
+  </p>
+</div>
+<p class="hint">Select the record above to copy it by hand.</p>`;
+  return renderShell(`${view.format.toUpperCase()} — game ${gameId}`, body, { user, path: '/games' });
 }

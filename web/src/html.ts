@@ -386,6 +386,37 @@ p { margin: 0 0 1rem; }
 .moves { padding-left: 1.5rem; margin: 0; }
 .moves li { padding: 0.125rem 0; }
 
+/* Export handles sit beside every move, so they must stay quiet enough to read
+   past — a bordered pair of ticks, not a pair of buttons. */
+.export-link {
+  font-family: var(--record);
+  font-size: 0.625rem;
+  letter-spacing: 0.06em;
+  color: var(--slate-mid);
+  text-decoration: none;
+  border: 1px solid var(--rule);
+  padding: 0 0.25rem;
+}
+
+.export-link + .export-link { border-left: 0; }
+
+.export-link:hover { color: var(--slate); border-color: var(--stone); }
+
+/* The exported record, set as the artifact it is and selectable in one click. */
+.export-text {
+  font-family: var(--record);
+  font-size: 0.875rem;
+  line-height: 1.6;
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-left: 2px solid var(--stone);
+  border-radius: 3px;
+  padding: 1rem 1.25rem;
+  margin: 0 0 1.25rem;
+  overflow-x: auto;
+  user-select: all;
+}
+
 /* ---------- the record: notation set as the artifact it is ---------- */
 
 .record {

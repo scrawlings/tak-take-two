@@ -24,6 +24,7 @@ import {
   renderAdminUsersPage,
   renderChangeDisplayNamePage,
   renderChangePasswordPage,
+  renderExportPage,
   renderLoginPage,
   renderFindGamesPage,
   renderGamePage,
@@ -517,6 +518,45 @@ export function createApp(deps: AppDeps): App {
     onOk: (c) => c.redirect(`/games/${c.req.param('id')}`, 303),
     renderError: (c, e) => gameViewError(c, e),
   }));
+
+  /**
+   * Copying a record out is a read, so it is a GET and stays linkable — but the
+   * module audits it (CONTEXT.md lists exports in the activity trail), so it
+   * goes through `applyGame` like any other command.
+   */
+  app.get('/games/:id/export', requireUser, (c) => {
+    const actor = c.get('user');
+    const id = paramId(c, 'id', 'That game no longer exists.');
+    if (id.isErr()) {
+      return c.html(renderShell('Not found', renderNotFoundPage(), { user: actor }), 404);
+    }
+    const through = query(c, 'through');
+    return pageAction(c, actor, {
+      name: 'export game',
+      load: () =>
+        games.applyGame(actor, {
+          type: 'export',
+          gameId: id.value,
+          format: query(c, 'format') ?? '',
+          // Anything non-numeric lands as NaN, which the module refuses.
+          throughMove: through === undefined ? undefined : Number(through),
+        }),
+      render: (result) => {
+        if (result.type !== 'export') {
+          logger.log('error', 'unexpected export result', { result });
+          return c.json({ error: 'Internal Server Error' }, 500);
+        }
+        return c.html(renderExportPage(actor, id.value, result));
+      },
+      // A game they cannot see must read as absent; a bad format or move number
+      // is theirs to correct, so it is reported back on the game itself.
+      renderError: (e, status) =>
+        e.code === 'not-found'
+          ? c.html(renderShell('Not found', renderNotFoundPage(), { user: actor }), status)
+          : gameViewError(c, e),
+      statusOf: statusForGameError,
+    });
+  });
 
   app.post('/games/:id/share', requireUser, formAction({
     fields: ['on'],

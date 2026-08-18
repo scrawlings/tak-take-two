@@ -372,6 +372,20 @@ describe('generatePtn', () => {
   it('emits the result alone for an empty record', () => {
     expect(mustPtn(generatePtn([], 5, { result: 'R-0' }))).toBe('[Size "5"]\n[Result "R-0"]\n\nR-0');
   });
+
+  it('escapes quotes and backslashes in tag values so they read back', () => {
+    // Tag values carry names the site's users choose, so they can contain the
+    // very characters that delimit a tag. parsePtn unescapes `\"` and `\\`;
+    // generatePtn must write them that way or the record cannot be re-imported.
+    const generated = mustPtn(
+      generatePtn([], 5, { tags: [['Player1', 'Bo "The Wall" Ng'], ['Player2', 'C:\\Tak']] }),
+    );
+
+    expect(generated).toBe('[Size "5"]\n[Player1 "Bo \\"The Wall\\" Ng"]\n[Player2 "C:\\\\Tak"]\n');
+    const parsed = mustPtn(parsePtn(generated));
+    expect(parsed.tags.get('Player1')).toBe('Bo "The Wall" Ng');
+    expect(parsed.tags.get('Player2')).toBe('C:\\Tak');
+  });
 });
 
 describe('parseMove', () => {

@@ -3,15 +3,17 @@ import {
   createTakGame,
   formatMove,
   fromPtnText,
+  generatePtn,
   generateTps,
   isBoardFinished,
   isFinished,
+  isResultCode,
   parseMove,
   playMove as corePlayMove,
   resign as coreResign,
   resultCode,
 } from '@tak/core';
-import type { GameState, Player, StoneKind, TakGame } from '@tak/core';
+import type { GameState, Player, ResultCode, StoneKind, TakGame } from '@tak/core';
 import type {
   GameBoardSize,
   GameRecord,
@@ -57,6 +59,8 @@ export type GameErrorCode =
   | 'no-pending-request'
   | 'no-move-to-take-back'
   | 'already-removed'
+  | 'invalid-export-format'
+  | 'invalid-move-number'
   | 'persistence';
 
 export interface GameError {
@@ -206,13 +210,39 @@ export type GameCommand =
   | { readonly type: 'rejectDraw'; readonly gameId: number }
   | { readonly type: 'share'; readonly gameId: number; readonly on: boolean }
   | { readonly type: 'hide'; readonly gameId: number }
-  | { readonly type: 'adminDelete'; readonly gameId: number };
+  | { readonly type: 'adminDelete'; readonly gameId: number }
+  | {
+      readonly type: 'export';
+      readonly gameId: number;
+      /** `ptn` or `tps`; parsed here so routes stay dumb adapters. */
+      readonly format: string;
+      /**
+       * 1-based index into the full history (as `MoveView.number` numbers it):
+       * PTN up to and including it, or the TPS of the position after it. `0` is
+       * the starting position; absent means the whole game.
+       */
+      readonly throughMove?: number;
+    };
+
+/** What a game record may be copied out as (CONTEXT.md: Game record). */
+export type ExportFormat = 'ptn' | 'tps';
 
 /** One domain-shaped result per command; commands that only change state yield `{ type: 'ok' }`. */
 export type GameCommandResult =
   | { readonly type: 'ok' }
   | { readonly type: 'propose'; readonly gameId: number }
-  | { readonly type: 'join'; readonly gameId: number };
+  | { readonly type: 'join'; readonly gameId: number }
+  | {
+      readonly type: 'export';
+      readonly format: ExportFormat;
+      readonly text: string;
+      /** The move it runs through, and the history it was taken from. */
+      readonly throughMove: number;
+      readonly totalMoves: number;
+    };
+
+/** One generated record, as `applyGame` returns it and the export page renders it. */
+export type GameExport = Extract<GameCommandResult, { type: 'export' }>;
 
 export interface Games {
   /** Run one game command. Commands authorise themselves. */
@@ -319,6 +349,20 @@ function parseBoardSize(value: number): Result<GameBoardSize, GameError> {
 function parseJoinType(value: string): Result<JoinType, GameError> {
   if (value === 'open' || value === 'invited') return ok(value);
   return err({ code: 'invalid-join-type', message: 'Choose an open or an invited game.' });
+}
+
+function parseExportFormat(value: string): Result<ExportFormat, GameError> {
+  if (value === 'ptn' || value === 'tps') return ok(value);
+  return err({ code: 'invalid-export-format', message: 'Choose PTN or TPS.' });
+}
+
+/**
+ * The stored result as a core `ResultCode`. What counts as one is core's to
+ * say (ADR-0001), so this only guards the null column; anything unrecognised
+ * exports as no result rather than failing the export over it.
+ */
+function asResultCode(value: string | null): ResultCode | undefined {
+  return value !== null && isResultCode(value) ? value : undefined;
 }
 
 export function createGames(persistence: Persistence): Games {
@@ -1065,18 +1109,123 @@ export function createGames(persistence: Persistence): Games {
     return ok({ type: 'ok' });
   }
 
-  function gameView(actor: SessionUser, gameId: number): Result<GameView, GameError> {
-    // Ticket 13: an admin may view any game regardless of share state, so the
-    // visibility check below applies only to players.
-    const isAdmin = actor.role === 'admin';
-
+  /**
+   * Load a game the actor is allowed to look at. Ticket 13: an admin may see
+   * any game regardless of share state; everyone else goes through `visibleTo`.
+   * A game they may not see reads as absent, so share state never leaks.
+   */
+  function loadVisibleGame(actor: SessionUser, gameId: number): Result<GameRecord, GameError> {
     const found = persistence.findGameById(gameId);
     if (found.isErr()) return err(persistenceError(found.error));
     if (found.value === null) return err({ code: 'not-found', message: 'That game no longer exists.' });
     const game = found.value;
-    if (!isAdmin && !visibleTo(game, actor.id)) {
+    if (actor.role !== 'admin' && !visibleTo(game, actor.id)) {
       return err({ code: 'not-found', message: 'That game no longer exists.' });
     }
+    return ok(game);
+  }
+
+  /**
+   * The game as it stood after `through` moves of `full`'s history. Replaying
+   * from scratch is the only way back to an earlier position: the stored record
+   * is the moves, not a per-move snapshot of the board.
+   */
+  function gameAfter(game: GameRecord, full: TakGame, through: number): Result<TakGame, GameError> {
+    if (through === full.history.length) return ok(full);
+    let tak = createTakGame(game.boardSize);
+    for (const recorded of full.history.slice(0, through)) {
+      const played = corePlayMove(tak, recorded.move);
+      if (played.isErr()) {
+        return err(persistenceError(`game ${game.id} no longer replays to move ${through}: ${played.error.message}`));
+      }
+      tak = played.value;
+    }
+    return ok(tak);
+  }
+
+  /**
+   * Copy the record out as PTN or TPS (ticket 15). This is a read, but an
+   * audited one — CONTEXT.md lists exports among the activity trail's events —
+   * so it is a command rather than a query, and the trail write stays inside
+   * the module as ADR-0004 requires.
+   */
+  function exportGame(
+    actor: SessionUser,
+    command: Extract<GameCommand, { type: 'export' }>,
+  ): Result<GameCommandResult, GameError> {
+    const format = parseExportFormat(command.format);
+    if (format.isErr()) return err(format.error);
+
+    const loaded = loadVisibleGame(actor, command.gameId);
+    if (loaded.isErr()) return err(loaded.error);
+    const game = loaded.value;
+
+    const current = currentTakGame(game);
+    if (current.isErr()) return err(current.error);
+    const full = current.value;
+
+    const totalMoves = full.history.length;
+    const throughMove = command.throughMove ?? totalMoves;
+    if (!Number.isInteger(throughMove) || throughMove < 0 || throughMove > totalMoves) {
+      return err({
+        code: 'invalid-move-number',
+        message: `This game has ${totalMoves} moves; choose one between 0 and ${totalMoves}.`,
+      });
+    }
+
+    const prefix = gameAfter(game, full, throughMove);
+    if (prefix.isErr()) return err(prefix.error);
+
+    let text: string;
+    if (format.value === 'tps') {
+      text = generateTps(prefix.value.state);
+    } else {
+      // Who held each seat here. A record that does not name its players is a
+      // move list, not a game record (CONTEXT.md: PTN is tags, moves, result).
+      // Nothing else is claimed: an imported game's own tags are not this
+      // game's to restate.
+      const nameOf = nameResolver();
+      const proposer = nameOf(game.proposerId);
+      if (proposer.isErr()) return err(proposer.error);
+      const tags: Array<readonly [string, string]> = [['Player1', proposer.value.displayName]];
+      if (game.opponentId !== null) {
+        const opponent = nameOf(game.opponentId);
+        if (opponent.isErr()) return err(opponent.error);
+        tags.push(['Player2', opponent.value.displayName]);
+      }
+
+      // A prefix stops short of the ending, so it must not carry the result:
+      // the record would claim a finish those moves never reached.
+      const result = throughMove === totalMoves ? asResultCode(game.result) : undefined;
+      const generated = generatePtn(
+        prefix.value.history.map((recorded) => recorded.move),
+        game.boardSize,
+        { tags, result },
+      );
+      if (generated.isErr()) {
+        return err(persistenceError(`game ${game.id} did not generate valid PTN: ${generated.error.message}`));
+      }
+      text = generated.value;
+    }
+
+    const trail = persistence.appendActivityTrail({
+      userId: actor.id,
+      gameId: game.id,
+      event: 'game-exported',
+      payload: { format: format.value, throughMove, complete: throughMove === totalMoves },
+    });
+    if (trail.isErr()) return err(persistenceError(trail.error));
+
+    return ok({ type: 'export', format: format.value, text, throughMove, totalMoves });
+  }
+
+  function gameView(actor: SessionUser, gameId: number): Result<GameView, GameError> {
+    // Ticket 13: an admin may view any game regardless of share state.
+    const isAdmin = actor.role === 'admin';
+
+    const loaded = loadVisibleGame(actor, gameId);
+    if (loaded.isErr()) return err(loaded.error);
+    const game = loaded.value;
 
     const nameOf = nameResolver();
     const proposer = nameOf(game.proposerId);
@@ -1255,6 +1404,8 @@ export function createGames(persistence: Persistence): Games {
           return hide(actor, command);
         case 'adminDelete':
           return adminDelete(actor, command);
+        case 'export':
+          return exportGame(actor, command);
       }
     },
 
