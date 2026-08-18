@@ -1,12 +1,14 @@
 // The headless game aggregate: a playable Tak game with a full, immutable move
-// history (per-move timestamps), undo, resign, mutual draw, and finished state.
+// history (per-move timestamps), undo, resign, mutual draw, and finished state,
+// loaded from a new board, from PTN, or from a stored record (ADR-0005).
 // Pure module — no I/O, no framework dependencies, no exceptions.
 // Every failure path returns a neverthrow Result.
 
 import { err, ok } from 'neverthrow';
 import type { Result } from 'neverthrow';
-import { applyMove, createGame } from './game';
-import { generatePtn, parsePtn } from './ptn';
+import { applyMove, computeOutcome, createGame } from './game';
+import { generatePtn, isResultCode, parseMove, parsePtn } from './ptn';
+import { parseTps } from './tps';
 import { opponent } from './types';
 import type {
   BoardSize,
@@ -50,7 +52,14 @@ export interface TakGame {
   readonly result: GameEnd | null;
 }
 
-export type GameErrorCode = 'game-finished' | 'no-move-to-undo' | 'invalid-move';
+export type GameErrorCode =
+  | 'game-finished'
+  | 'no-move-to-undo'
+  | 'invalid-move'
+  /** A stored record no longer parses or replays: the data is corrupt, not the input. */
+  | 'corrupt-record'
+  /** A move number outside the record's history was asked for. */
+  | 'invalid-move-number';
 
 export interface GameError {
   readonly code: GameErrorCode;
@@ -136,6 +145,185 @@ export function fromPtnText(
   const parsed = parsePtn(text);
   if (parsed.isErr()) return err(parsed.error);
   return fromPtn(parsed.value, options);
+}
+
+/** One stored live move: what was played, when, and the position it produced. */
+export interface StoredMove {
+  /** The move as canonical PTN (`a1`, `Sa1`, `5b4>212`). */
+  readonly notation: string;
+  /** Epoch milliseconds when the move was played. */
+  readonly playedAt: number | null;
+  /** TPS of the position after this move — the read path. Null means replay. */
+  readonly position: string | null;
+}
+
+/**
+ * A stored game, as a store hands it back: the board size, the PTN it was
+ * imported from (if any), the live moves played since, and the result string
+ * recorded when it ended. `loadGame` folds this back into a playable game.
+ */
+export interface StoredGame {
+  readonly size: BoardSize;
+  /** The PTN this game was imported from, or null when it started empty. */
+  readonly importedPtn: string | null;
+  /** The live moves in play order, after any imported history. */
+  readonly moves: readonly StoredMove[];
+  /** The stored PTN result code, or null while the game is in play. */
+  readonly result: string | null;
+}
+
+function corrupt(reason: string): GameError {
+  return gameError('corrupt-record', reason);
+}
+
+/**
+ * The position a record starts its live moves from: the replayed import, or an
+ * empty board. The imported record's own result tag is dropped — the stored
+ * result string is the only word on how *this* game ended.
+ */
+function importedPrefix(record: StoredGame): Result<TakGame, GameError> {
+  if (record.importedPtn === null) return ok(createTakGame(record.size));
+  const loaded = fromPtnText(record.importedPtn);
+  if (loaded.isErr()) {
+    return err(corrupt(`the imported record no longer replays: ${loaded.error.message}`));
+  }
+  if (loaded.value.state.size !== record.size) {
+    return err(
+      corrupt(`the imported record is a ${loaded.value.state.size}x${loaded.value.state.size} game, not ${record.size}x${record.size}`),
+    );
+  }
+  return ok({ ...loaded.value, result: null });
+}
+
+/**
+ * Parse live move `index` of a record, naming its number in the full history
+ * when it fails. The numbering lives here so every caller says it the same way.
+ */
+function storedMove(record: StoredGame, fixedMoves: number, index: number): Result<Move, GameError> {
+  const parsed = parseMove(record.moves[index]!.notation);
+  if (parsed.isErr()) {
+    return err(corrupt(`stored move ${fixedMoves + index + 1} no longer parses: ${parsed.error.message}`));
+  }
+  return ok(parsed.value);
+}
+
+/** The end a stored result string records, or null while the game is in play. */
+function storedEnd(result: string | null): Result<GameEnd | null, GameError> {
+  if (result === null) return ok(null);
+  if (!isResultCode(result)) return err(corrupt(`stored result "${result}" is not a PTN result code`));
+  return ok(endFromCode(result));
+}
+
+/**
+ * Restore a stored position: parse the TPS, then recover the engine's verdict,
+ * which TPS does not carry. `last` is the move that reached the position — its
+ * mover is whoever is not to move, and only a placement can exhaust a reserve.
+ */
+function restoreState(position: string, size: BoardSize, last: Move): Result<GameState, GameError> {
+  const parsed = parseTps(position);
+  if (parsed.isErr()) {
+    return err(corrupt(`stored position "${position}" no longer parses: ${parsed.error.message}`));
+  }
+  const state = parsed.value;
+  if (state.size !== size) {
+    return err(corrupt(`stored position "${position}" is a ${state.size}x${state.size} board, not ${size}x${size}`));
+  }
+  const outcome = computeOutcome(state, opponent(state.playerToMove), last.type === 'place');
+  return ok({ ...state, outcome });
+}
+
+/**
+ * The state after the first `count` live moves — the snapshot of move `count`
+ * when it has one, else a replay of those moves from the post-import position.
+ * `count` is at least 1.
+ */
+function liveState(base: TakGame, record: StoredGame, count: number): Result<GameState, GameError> {
+  const position = record.moves[count - 1]!.position;
+  if (position !== null) {
+    return storedMove(record, base.fixedMoves, count - 1).andThen((move) =>
+      restoreState(position, record.size, move),
+    );
+  }
+  let state = base.state;
+  for (let i = 0; i < count; i++) {
+    const move = storedMove(record, base.fixedMoves, i);
+    if (move.isErr()) return err(move.error);
+    const applied = applyMove(state, move.value);
+    if (applied.isErr()) {
+      return err(corrupt(`stored move ${base.fixedMoves + i + 1} no longer replays: ${applied.error.message}`));
+    }
+    state = applied.value;
+  }
+  return ok(state);
+}
+
+/**
+ * Materialize a stored game as a playable one (ADR-0005). Pure: the record
+ * goes in, a `TakGame` comes out. Reads trust the write seam — the last live
+ * move's stored position *is* the state, and full replay is only the fallback
+ * for what no snapshot covers. A record that no longer parses or replays is
+ * `corrupt-record`; the reason never names a game id, which is the store's to
+ * compose.
+ */
+export function loadGame(record: StoredGame): Result<TakGame, GameError> {
+  const prefix = importedPrefix(record);
+  if (prefix.isErr()) return err(prefix.error);
+  const base = prefix.value;
+
+  const result = storedEnd(record.result);
+  if (result.isErr()) return err(result.error);
+
+  const live: RecordedMove[] = [];
+  for (const [i, row] of record.moves.entries()) {
+    const move = storedMove(record, base.fixedMoves, i);
+    if (move.isErr()) return err(move.error);
+    live.push({ move: move.value, playedAt: row.playedAt });
+  }
+
+  const state =
+    record.moves.length === 0 ? ok<GameState, GameError>(base.state) : liveState(base, record, record.moves.length);
+  if (state.isErr()) return err(state.error);
+
+  return ok({
+    state: state.value,
+    history: [...base.history, ...live],
+    fixedMoves: base.fixedMoves,
+    // The stored string is authoritative — resign and draw exist nowhere else.
+    // Where it says nothing, a decided position still ended the game, which is
+    // what a full replay reports and what keeps `isFinished` and the board from
+    // disagreeing.
+    result: result.value ?? boardEnd(state.value),
+  });
+}
+
+/**
+ * The state after move `n` of a stored record's full history: the empty board
+ * at 0, the stored snapshot inside the live moves, and a replay when `n` cuts
+ * inside imported history, which no snapshot covers.
+ */
+export function stateAfter(record: StoredGame, n: number): Result<GameState, GameError> {
+  if (!Number.isInteger(n) || n < 0) {
+    return err(gameError('invalid-move-number', `move number ${n} is not a move in this record`));
+  }
+  if (n === 0) return ok(createGame(record.size));
+
+  const prefix = importedPrefix(record);
+  if (prefix.isErr()) return err(prefix.error);
+  const base = prefix.value;
+
+  const totalMoves = base.fixedMoves + record.moves.length;
+  if (n > totalMoves) {
+    return err(gameError('invalid-move-number', `this record has ${totalMoves} moves; ${n} is beyond it`));
+  }
+  if (n === base.fixedMoves) return ok(base.state);
+  if (n < base.fixedMoves) {
+    const replayed = replay(record.size, base.history.slice(0, n).map((r) => r.move));
+    if (replayed.isErr()) {
+      return err(corrupt(`the imported record no longer replays to move ${n}: ${replayed.error.message}`));
+    }
+    return ok(replayed.value);
+  }
+  return liveState(base, record, n - base.fixedMoves);
 }
 
 /** Play a move, recording it with a timestamp. */

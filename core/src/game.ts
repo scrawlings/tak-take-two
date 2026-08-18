@@ -304,7 +304,13 @@ function offsetSquare(sq: Square, dir: Direction, steps: number): Square | null 
   return [f, r] as unknown as Square;
 }
 
-function computeOutcome(state: GameState, mover: Player, placed: boolean): Outcome | null {
+/**
+ * The engine's verdict on a position just reached by `mover` — a road, a flat
+ * count, or nothing yet. `placed` says whether the move was a placement, which
+ * is what can exhaust a reserve. Exported for the loader, which recovers the
+ * verdict from a stored position instead of replaying to it.
+ */
+export function computeOutcome(state: GameState, mover: Player, placed: boolean): Outcome | null {
   const road1 = hasRoad(state.board, state.size, 1);
   const road2 = hasRoad(state.board, state.size, 2);
   if (road1 && road2) return { type: 'road', winner: mover };

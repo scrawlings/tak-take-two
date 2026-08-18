@@ -49,7 +49,7 @@ tak-take-two/
 
 **PTN.** Parse → validate by full replay from an empty board → typed move list; generate the full game or a replayable prefix from any move.
 
-**TPS.** Generate from any position; parse/validate structurally and by material consistency. The parser is kept (it seeds future puzzle/training work) but *starting games from TPS is deferred*.
+**TPS.** Generate from any position; parse/validate structurally and by material consistency. The parser is on the read path — a stored game's per-move snapshot is how it materializes without replay (ADR-0005) — but *starting games from TPS is deferred*.
 
 **Failure.** `Result` for every failure path; no exceptions.
 

@@ -1909,3 +1909,62 @@ describe('games: export', () => {
     ).toBe('not-found');
   });
 });
+
+describe('games: a corrupt record', () => {
+  /** An in-play open game between Aoife (seat 1) and Takashi (seat 2). */
+  function inPlay(h: Harness): number {
+    const r = h.games.applyGame(h.aoife, { type: 'propose', boardSize: 5, joinType: 'open' });
+    const gameId = (r._unsafeUnwrap() as { gameId: number }).gameId;
+    h.games.applyGame(h.takashi, { type: 'join', gameId });
+    ['a1', 'a5', 'c3', 'c4'].forEach((move, i) => {
+      const actor = i % 2 === 0 ? h.aoife : h.takashi;
+      expect(h.games.applyGame(actor, { type: 'playMove', gameId, move }).isOk()).toBe(true);
+    });
+    return gameId;
+  }
+
+  function wreck(h: Harness, gameId: number, moveNumber: number, column: 'notation' | 'position'): void {
+    h.db
+      .prepare(`UPDATE game_records SET ${column} = 'nonsense' WHERE game_id = ? AND move_number = ?`)
+      .run(gameId, moveNumber);
+  }
+
+  it('reports a record that no longer parses as corrupt, naming the game', () => {
+    const h = harness();
+    const gameId = inPlay(h);
+    wreck(h, gameId, 2, 'notation');
+
+    const error = h.games.getGame(h.aoife, gameId)._unsafeUnwrapErr();
+    expect(error.code).toBe('corrupt-record');
+    expect(error.message).toContain(`game ${gameId}`);
+    expect(error.message).toContain('stored move 2');
+  });
+
+  it('reads the last position rather than replaying: an earlier snapshot is never touched', () => {
+    const h = harness();
+    const gameId = inPlay(h);
+    wreck(h, gameId, 2, 'position');
+
+    const view = h.games.getGame(h.aoife, gameId)._unsafeUnwrap();
+    expect(view.moves).toHaveLength(4);
+    expect(view.toMove).toEqual({ id: 1, displayName: 'Aoife Nolan' });
+  });
+
+  it('still catches a wrecked position when it is the one the read path reads', () => {
+    const h = harness();
+    const gameId = inPlay(h);
+    wreck(h, gameId, 4, 'position');
+
+    expect(h.games.getGame(h.aoife, gameId)._unsafeUnwrapErr().code).toBe('corrupt-record');
+  });
+
+  it('refuses a move on a corrupt record instead of playing onto a guess', () => {
+    const h = harness();
+    const gameId = inPlay(h);
+    wreck(h, gameId, 1, 'notation');
+
+    expect(
+      h.games.applyGame(h.aoife, { type: 'playMove', gameId, move: 'e1' })._unsafeUnwrapErr().code,
+    ).toBe('corrupt-record');
+  });
+});

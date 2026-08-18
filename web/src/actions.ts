@@ -25,12 +25,21 @@ function formField(value: unknown): string | null {
 }
 
 /**
- * What the adapter needs of a module's error: a code to branch `persistence`
- * on and a message to log. Both `AuthError` and `GameError` satisfy it.
+ * What the adapter needs of a module's error: a code to branch the internal
+ * faults on and a message to log. Both `AuthError` and `GameError` satisfy it.
  */
 export interface ActionError {
   readonly code: string;
   readonly message: string;
+}
+
+/**
+ * Our fault, not the user's: nothing the request can be re-rendered to fix, so
+ * it is logged and answered 500. A failed query (`persistence`) and stored data
+ * gone bad (`corrupt-record`, ADR-0005) are distinct faults that land here alike.
+ */
+function isInternal(error: ActionError): boolean {
+  return error.code === 'persistence' || error.code === 'corrupt-record';
 }
 
 export interface FormActionSpec<E extends Env, R, X extends ActionError = AuthError> {
@@ -40,9 +49,9 @@ export interface FormActionSpec<E extends Env, R, X extends ActionError = AuthEr
   run(c: Context<E>, fields: FormFields): Promise<Result<R, X>> | Result<R, X>;
   onOk(c: Context<E>, result: R): Response;
   /**
-   * Called with every error except `persistence` (the adapter short-circuits
-   * that). The submitted fields come back too, so a re-rendered form can put
-   * the user's own input back rather than blanking it.
+   * Called with every error except the internal ones (the adapter
+   * short-circuits those). The submitted fields come back too, so a
+   * re-rendered form can put the user's own input back rather than blanking it.
    */
   renderError(c: Context<E>, error: X, fields: FormFields): Response;
 }
@@ -62,7 +71,7 @@ export function createFormAction<E extends Env>(
       if (result.isOk()) return spec.onOk(c, result.value);
 
       const error = result.error;
-      if (error.code === 'persistence') {
+      if (isInternal(error)) {
         logger.log('error', 'form action failed', { error });
         return c.json({ error: 'Internal Server Error' }, 500);
       }
@@ -97,9 +106,9 @@ export interface PageActionSpec<D, X extends ActionError> {
   /** The page's success render; always status 200. */
   render(data: D): Response;
   /**
-   * The page's own error state, for errors beyond forbidden/persistence —
-   * the find page keeps its filters and clears the list; the game view will
-   * want its own. Absent, an unexpected code is logged and answered 500.
+   * The page's own error state, for errors beyond forbidden and the internal
+   * faults — the find page keeps its filters and clears the list; the game
+   * view will want its own. Absent, an unexpected code is logged and 500.
    */
   renderError?(error: X, status: ContentfulStatusCode): Response;
   /** Maps the module error to an HTTP status for `renderError`. */
@@ -120,7 +129,7 @@ export function createPageAction<E extends Env>(
 
     const error = result.error;
     if (error.code === 'forbidden') return forbiddenPage(c, actor);
-    if (error.code === 'persistence' || spec.renderError === undefined) {
+    if (isInternal(error) || spec.renderError === undefined) {
       logger.log('error', spec.name, { error });
       return c.json({ error: 'Internal Server Error' }, 500);
     }
@@ -170,6 +179,7 @@ export function createPageError<E extends Env>(
 export function statusForGameError(error: GameError): ContentfulStatusCode {
   switch (error.code) {
     case 'persistence':
+    case 'corrupt-record':
       return 500;
     // `not-invited` is a visible game that simply designates someone else;
     // a game the actor may not see is reported as `not-found` instead.

@@ -1,6 +1,5 @@
 import { err, ok, type Result } from 'neverthrow';
 import {
-  createTakGame,
   formatMove,
   fromPtnText,
   generatePtn,
@@ -8,12 +7,22 @@ import {
   isBoardFinished,
   isFinished,
   isResultCode,
+  loadGame,
   parseMove,
   playMove as corePlayMove,
   resign as coreResign,
   resultCode,
+  stateAfter,
 } from '@tak/core';
-import type { GameState, Player, ResultCode, StoneKind, TakGame } from '@tak/core';
+import type {
+  GameError as CoreGameError,
+  GameState,
+  Player,
+  ResultCode,
+  StoneKind,
+  StoredGame,
+  TakGame,
+} from '@tak/core';
 import type {
   GameBoardSize,
   GameRecord,
@@ -62,6 +71,8 @@ export type GameErrorCode =
   | 'already-removed'
   | 'invalid-export-format'
   | 'invalid-move-number'
+  /** The stored record no longer parses or replays (ADR-0005); internal, like `persistence`. */
+  | 'corrupt-record'
   | 'persistence';
 
 export interface GameError {
@@ -635,37 +646,46 @@ export function createGames(persistence: Persistence): Games {
   }
 
   /**
-   * The playable game a record has reached — the one load path every command
-   * and view uses. Imported history replays from the stored record; played
-   * moves replay from their canonical notation. Only records that already
-   * replayed cleanly are stored, so a failure here is corruption, not input.
+   * The stored game as the core loader wants it: the record's own columns plus
+   * the move rows, unchanged. Reading the rows is this module's job; folding
+   * them into a playable game is the core's (ADR-0005).
    */
-  function currentTakGame(game: GameRecord): Result<TakGame, GameError> {
-    let tak: TakGame;
-    if (game.importedPtn !== null) {
-      const loaded = fromPtnText(game.importedPtn);
-      if (loaded.isErr()) {
-        return err(persistenceError(`stored record for game ${game.id} no longer replays: ${loaded.error.message}`));
-      }
-      tak = loaded.value;
-    } else {
-      tak = createTakGame(game.boardSize);
-    }
-
+  function storedGame(game: GameRecord): Result<StoredGame, GameError> {
     const rows = persistence.listMoves(game.id);
     if (rows.isErr()) return err(persistenceError(rows.error));
-    for (const row of rows.value) {
-      const parsed = parseMove(row.notation);
-      if (parsed.isErr()) {
-        return err(persistenceError(`stored move ${row.moveNumber} for game ${game.id} no longer parses: ${parsed.error.message}`));
-      }
-      const played = corePlayMove(tak, parsed.value, Date.parse(row.playedAt));
-      if (played.isErr()) {
-        return err(persistenceError(`stored move ${row.moveNumber} for game ${game.id} no longer replays: ${played.error.message}`));
-      }
-      tak = played.value;
-    }
-    return ok(tak);
+    return ok({
+      size: game.boardSize,
+      importedPtn: game.importedPtn,
+      result: game.result,
+      moves: rows.value.map((row) => ({
+        notation: row.notation,
+        playedAt: Date.parse(row.playedAt),
+        position: row.position,
+      })),
+    });
+  }
+
+  /**
+   * A core loader fault, named for the caller: the core reports what is wrong
+   * with the record, this module says which game it belongs to. `corrupt-record`
+   * is stored data gone bad, not a failed query — it is answered 500 all the
+   * same. The loader's only other fault is a move number outside the record,
+   * which the export range-checks before asking, so it should not arrive.
+   */
+  function recordError(gameId: number, error: CoreGameError): GameError {
+    if (error.code !== 'corrupt-record') return { code: 'invalid-move-number', message: error.message };
+    return { code: 'corrupt-record', message: `game ${gameId}: ${error.message}` };
+  }
+
+  /**
+   * The playable game a record has reached — the one load path every command
+   * and view uses. The core materializes it from the stored rows, reading the
+   * last move's position snapshot rather than replaying the game (ADR-0005).
+   */
+  function loadTakGame(game: GameRecord): Result<TakGame, GameError> {
+    return storedGame(game).andThen((record) =>
+      loadGame(record).mapErr((error) => recordError(game.id, error)),
+    );
   }
 
   /**
@@ -726,7 +746,7 @@ export function createGames(persistence: Persistence): Games {
       return err({ code: 'request-pending', message: `${what} is pending; accept or reject it first.` });
     }
 
-    const current = currentTakGame(game);
+    const current = loadTakGame(game);
     if (current.isErr()) return err(current.error);
     if (seatOf(game, current.value.state.playerToMove) !== actor.id) {
       return err({ code: 'not-your-turn', message: 'It is not your turn.' });
@@ -799,7 +819,7 @@ export function createGames(persistence: Persistence): Games {
       return err({ code: 'forbidden', message: 'You cannot resign against yourself.' });
     }
 
-    const current = currentTakGame(game);
+    const current = loadTakGame(game);
     if (current.isErr()) return err(current.error);
     const seat = seatOfActor(game, actor.id);
     if (seat === null) {
@@ -898,7 +918,7 @@ export function createGames(persistence: Persistence): Games {
     const requester = checkPending(game.value, 'draw', actor, 'draw offer');
     if (requester.isErr()) return err(requester.error);
 
-    const current = currentTakGame(game.value);
+    const current = loadTakGame(game.value);
     if (current.isErr()) return err(current.error);
 
     const persisted = persistence.transaction((): Result<void, string> => {
@@ -956,7 +976,7 @@ export function createGames(persistence: Persistence): Games {
     }
 
     // A take-back needs a live move of yours, played since the opponent moved.
-    const current = currentTakGame(game.value);
+    const current = loadTakGame(game.value);
     if (current.isErr()) return err(current.error);
     const tak = current.value;
     if (tak.history.length <= tak.fixedMoves) {
@@ -1182,24 +1202,6 @@ export function createGames(persistence: Persistence): Games {
   }
 
   /**
-   * The game as it stood after `through` moves of `full`'s history. Replaying
-   * from scratch is the only way back to an earlier position: the stored record
-   * is the moves, not a per-move snapshot of the board.
-   */
-  function gameAfter(game: GameRecord, full: TakGame, through: number): Result<TakGame, GameError> {
-    if (through === full.history.length) return ok(full);
-    let tak = createTakGame(game.boardSize);
-    for (const recorded of full.history.slice(0, through)) {
-      const played = corePlayMove(tak, recorded.move);
-      if (played.isErr()) {
-        return err(persistenceError(`game ${game.id} no longer replays to move ${through}: ${played.error.message}`));
-      }
-      tak = played.value;
-    }
-    return ok(tak);
-  }
-
-  /**
    * Copy the record out as PTN or TPS (ticket 15). This is a read, but an
    * audited one — CONTEXT.md lists exports among the activity trail's events —
    * so it is a command rather than a query, and the trail write stays inside
@@ -1216,7 +1218,9 @@ export function createGames(persistence: Persistence): Games {
     if (loaded.isErr()) return err(loaded.error);
     const game = loaded.value;
 
-    const current = currentTakGame(game);
+    const record = storedGame(game);
+    if (record.isErr()) return err(record.error);
+    const current = loadGame(record.value).mapErr((error) => recordError(game.id, error));
     if (current.isErr()) return err(current.error);
     const full = current.value;
 
@@ -1229,12 +1233,13 @@ export function createGames(persistence: Persistence): Games {
       });
     }
 
-    const prefix = gameAfter(game, full, throughMove);
-    if (prefix.isErr()) return err(prefix.error);
-
     let text: string;
     if (format.value === 'tps') {
-      text = generateTps(prefix.value.state);
+      // A position needs the board, so the export asks the core for the state
+      // after that move — one snapshot read, not a replay.
+      const position = stateAfter(record.value, throughMove).mapErr((error) => recordError(game.id, error));
+      if (position.isErr()) return err(position.error);
+      text = generateTps(position.value);
     } else {
       // Who held each seat here. A record that does not name its players is a
       // move list, not a game record (CONTEXT.md: PTN is tags, moves, result).
@@ -1260,7 +1265,7 @@ export function createGames(persistence: Persistence): Games {
       // the record would claim a finish those moves never reached.
       const result = throughMove === totalMoves ? asResultCode(game.result) : undefined;
       const generated = generatePtn(
-        prefix.value.history.map((recorded) => recorded.move),
+        full.history.slice(0, throughMove).map((recorded) => recorded.move),
         game.boardSize,
         { tags, result },
       );
@@ -1295,7 +1300,7 @@ export function createGames(persistence: Persistence): Games {
     const opponent = game.opponentId === null ? ok(null) : nameOf(game.opponentId);
     if (opponent.isErr()) return err(opponent.error);
 
-    const current = currentTakGame(game);
+    const current = loadTakGame(game);
     if (current.isErr()) return err(current.error);
     const tak = current.value;
 
@@ -1393,7 +1398,7 @@ export function createGames(persistence: Persistence): Games {
 
     let toMove: PlayerRef | null = null;
     if (game.state === 'in_play') {
-      const position = currentTakGame(game);
+      const position = loadTakGame(game);
       if (position.isErr()) return err(position.error);
       const seat = seatOf(game, position.value.state.playerToMove);
       if (seat !== null) {

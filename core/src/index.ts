@@ -8,10 +8,12 @@ export {
   fromPtnText,
   isBoardFinished,
   isFinished,
+  loadGame,
   mutualDraw,
   playMove,
   resign,
   resultCode,
+  stateAfter,
   toPtn,
   undo,
 } from './aggregate';
@@ -21,5 +23,7 @@ export type {
   GameError,
   GameErrorCode,
   RecordedMove,
+  StoredGame,
+  StoredMove,
   TakGame,
 } from './aggregate';

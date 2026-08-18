@@ -125,6 +125,35 @@ describe('createFormAction', () => {
     expect(renderErrorCalled).toBe(false);
     expect(calls).toHaveLength(1);
   });
+
+  it('treats a corrupt record as internal too: no form to re-render fixes it', async () => {
+    const calls: Array<{ level: string; message: string }> = [];
+    const logger: Logger = {
+      log(level, message) {
+        calls.push({ level, message });
+      },
+    };
+    const app = new Hono<Env>();
+    const formAction = createFormAction<Env>(logger);
+    let renderErrorCalled = false;
+    app.post(
+      '/test',
+      formAction({
+        fields: [],
+        run: async () => err({ code: 'corrupt-record', message: 'game 7: stored move 2 no longer parses' }),
+        onOk: (c) => c.text('ok'),
+        renderError: (c) => {
+          renderErrorCalled = true;
+          return c.text('never', 400);
+        },
+      }),
+    );
+
+    const res = await app.request('/test', { method: 'POST' });
+    expect(res.status).toBe(500);
+    expect(renderErrorCalled).toBe(false);
+    expect(calls).toHaveLength(1);
+  });
 });
 
 describe('pageAction', () => {
@@ -436,6 +465,8 @@ describe('statusForGameError', () => {
   it('maps every code to the right HTTP status', () => {
     const e = (code: GameError['code']): GameError => ({ code, message: 'x' });
     expect(statusForGameError(e('persistence'))).toBe(500);
+    // Stored data gone bad is our fault too, and answered the same way.
+    expect(statusForGameError(e('corrupt-record'))).toBe(500);
     expect(statusForGameError(e('forbidden'))).toBe(403);
     expect(statusForGameError(e('not-found'))).toBe(404);
     expect(statusForGameError(e('invalid-board-size'))).toBe(400);
