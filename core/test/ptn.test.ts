@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Result } from 'neverthrow';
-import { createGame, generatePtn, getStack, parsePtn } from '../src/index';
+import { createGame, formatMove, generatePtn, getStack, parseMove, parsePtn } from '../src/index';
 import type { BoardSize, GameState, Move, ResultCode } from '../src/index';
 import { must, play, place, sq } from './helpers';
 
@@ -371,5 +371,77 @@ describe('generatePtn', () => {
 
   it('emits the result alone for an empty record', () => {
     expect(mustPtn(generatePtn([], 5, { result: 'R-0' }))).toBe('[Size "5"]\n[Result "R-0"]\n\nR-0');
+  });
+});
+
+describe('parseMove', () => {
+  it('parses a bare flat place', () => {
+    expect(mustPtn(parseMove('a1'))).toEqual({ type: 'place', square: sq('a1'), stone: 'flat' });
+  });
+
+  it('parses standing and capstone places', () => {
+    expect(mustPtn(parseMove('Sd3'))).toEqual({ type: 'place', square: sq('d3'), stone: 'standing' });
+    expect(mustPtn(parseMove('Cb4'))).toEqual({ type: 'place', square: sq('b4'), stone: 'capstone' });
+  });
+
+  it('parses a stack move with explicit drops', () => {
+    expect(mustPtn(parseMove('5b4>212'))).toEqual({
+      type: 'move',
+      square: sq('b4'),
+      direction: '>',
+      drops: [2, 1, 2],
+    });
+  });
+
+  it('parses an omitted-lift stack move as lifting one, all onto the adjacent square', () => {
+    expect(mustPtn(parseMove('a2+'))).toEqual({
+      type: 'move',
+      square: sq('a2'),
+      direction: '+',
+      drops: [1],
+    });
+  });
+
+  it('parses arrow directions into the canonical form', () => {
+    expect(mustPtn(parseMove('5b4→212'))).toEqual({
+      type: 'move',
+      square: sq('b4'),
+      direction: '>',
+      drops: [2, 1, 2],
+    });
+    expect(mustPtn(parseMove('5b4↑212'))).toEqual({
+      type: 'move',
+      square: sq('b4'),
+      direction: '+',
+      drops: [2, 1, 2],
+    });
+  });
+
+  it('rejects move numbers, tags, results, and multi-token input', () => {
+    for (const bad of ['1. a1', '[Size "5"]', 'R-0', 'a1 e5', '']) {
+      expect(parseMove(bad).isErr()).toBe(true);
+    }
+  });
+
+  it('rejects a drop-count mismatch', () => {
+    const r = parseMove('5b4>22');
+    expect(r.isErr()).toBe(true);
+    if (r.isErr()) expect(r.error.code).toBe('ptn-drops-mismatch');
+  });
+});
+
+describe('formatMove', () => {
+  it('formats each move shape canonically and round-trips through parseMove', () => {
+    const cases: readonly Move[] = [
+      { type: 'place', square: sq('a1'), stone: 'flat' },
+      { type: 'place', square: sq('d3'), stone: 'standing' },
+      { type: 'place', square: sq('b4'), stone: 'capstone' },
+      { type: 'move', square: sq('b4'), direction: '>', drops: [2, 1, 2] },
+      { type: 'move', square: sq('a2'), direction: '+', drops: [1] },
+    ];
+    for (const m of cases) {
+      const text = formatMove(m);
+      expect(mustPtn(parseMove(text))).toEqual(m);
+    }
   });
 });

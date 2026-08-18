@@ -825,3 +825,221 @@ describe('games: searchProposed', () => {
     expect(h.games.searchProposed(h.root)._unsafeUnwrapErr().code).toBe('forbidden');
   });
 });
+
+/** A road win for the proposer, played one place at a time (11 half-moves). */
+const ROAD_MOVES = ['a1', 'a5', 'a3', 'a2', 'b3', 'a4', 'c3', 'b4', 'd3', 'b2', 'e3'];
+
+describe('games: play', () => {
+  function propose(h: Harness, actor: SessionUser, extra: { ptn?: string } = {}): number {
+    const r = h.games.applyGame(actor, {
+      type: 'propose',
+      boardSize: 5,
+      joinType: 'open',
+      ptn: extra.ptn,
+    });
+    return (r._unsafeUnwrap() as { gameId: number }).gameId;
+  }
+
+  function play(h: Harness, actor: SessionUser, gameId: number, move: string) {
+    return h.games.applyGame(actor, { type: 'playMove', gameId, move });
+  }
+
+  function gameStats(db: Database.Database, gameId: number): Record<string, unknown> | undefined {
+    return db.prepare('SELECT * FROM game_stats WHERE game_id = ?').get(gameId) as
+      | Record<string, unknown>
+      | undefined;
+  }
+
+  it('records a legal move with its notation, position, and turn tracking', () => {
+    const h = harness();
+    const gameId = propose(h, h.aoife);
+    h.games.applyGame(h.takashi, { type: 'join', gameId });
+
+    const result = play(h, h.aoife, gameId, 'a1');
+
+    expect(result.isOk()).toBe(true);
+    const moves = h.persistence.listMoves(gameId)._unsafeUnwrap();
+    expect(moves).toHaveLength(1);
+    expect(moves[0]).toMatchObject({ gameId, moveNumber: 1, playerId: 1, notation: 'a1' });
+    expect(moves[0]?.position).toMatch(/ 2 1$/); // TPS: player 2 to move, move counter 1
+
+    // The turn has passed to the opponent.
+    const view = h.games.getGame(h.aoife, gameId)._unsafeUnwrap();
+    expect(view.toMove).toEqual({ id: 2, displayName: 'Takashi Mori' });
+    expect(view.canMove).toBe(false);
+  });
+
+  it('rejects a move when it is not your turn', () => {
+    const h = harness();
+    const gameId = propose(h, h.aoife);
+    h.games.applyGame(h.takashi, { type: 'join', gameId });
+
+    const result = play(h, h.takashi, gameId, 'a1');
+    expect(result._unsafeUnwrapErr().code).toBe('not-your-turn');
+  });
+
+  it('rejects a spectator of a shared game, and an admin', () => {
+    const h = harness();
+    const gameId = propose(h, h.aoife);
+    h.games.applyGame(h.takashi, { type: 'join', gameId });
+    const stranger = insertUser(h.db, { id: 9, username: 'stranger', displayName: 'Stranger' });
+
+    // A shared open game is visible to a stranger, but they may not move.
+    expect(h.games.getGame(stranger, gameId).isOk()).toBe(true);
+    expect(play(h, stranger, gameId, 'a1')._unsafeUnwrapErr().code).toBe('forbidden');
+
+    // An admin never plays.
+    expect(play(h, h.root, gameId, 'a1')._unsafeUnwrapErr().code).toBe('forbidden');
+  });
+
+  it('rejects an illegal move with a clear message', () => {
+    const h = harness();
+    const gameId = propose(h, h.aoife);
+    h.games.applyGame(h.takashi, { type: 'join', gameId });
+
+    // The opening move must be a flat place, not a standing stone.
+    const result = play(h, h.aoife, gameId, 'Sa1');
+    expect(result._unsafeUnwrapErr().code).toBe('invalid-move');
+    expect(result._unsafeUnwrapErr().message).toContain('opening move must place a flat stone');
+  });
+
+  it('detects a road win, finishes the game, and writes stats and trail', () => {
+    const h = harness();
+    const gameId = propose(h, h.aoife);
+    h.games.applyGame(h.takashi, { type: 'join', gameId });
+
+    for (const [i, move] of ROAD_MOVES.entries()) {
+      const actor = i % 2 === 0 ? h.aoife : h.takashi;
+      const result = play(h, actor, gameId, move);
+      expect(result.isOk()).toBe(true);
+    }
+
+    const game = h.persistence.findGameById(gameId)._unsafeUnwrap();
+    expect(game).toMatchObject({ state: 'finished', result: 'R-0' });
+    expect(h.persistence.listMoves(gameId)._unsafeUnwrap()).toHaveLength(11);
+    expect(gameStats(h.db, gameId)).toMatchObject({
+      board_size: 5,
+      move_count: 11,
+      result: 'R-0',
+    });
+    expect(trailEvents(h.db)).toContain('game-finished');
+    expect(trailEvents(h.db).filter((e) => e === 'move-played')).toHaveLength(11);
+  });
+
+  it('refuses a move on a finished game', () => {
+    const h = harness();
+    const gameId = propose(h, h.aoife);
+    h.games.applyGame(h.takashi, { type: 'join', gameId });
+    h.games.applyGame(h.aoife, { type: 'resign', gameId });
+
+    expect(play(h, h.takashi, gameId, 'a1')._unsafeUnwrapErr().code).toBe('not-in-play');
+  });
+});
+
+describe('games: resign and draw', () => {
+  function inPlay(h: Harness): number {
+    const r = h.games.applyGame(h.aoife, { type: 'propose', boardSize: 5, joinType: 'open' });
+    const gameId = (r._unsafeUnwrap() as { gameId: number }).gameId;
+    h.games.applyGame(h.takashi, { type: 'join', gameId });
+    return gameId;
+  }
+
+  function stats(db: Database.Database, gameId: number): Record<string, unknown> | undefined {
+    return db.prepare('SELECT * FROM game_stats WHERE game_id = ?').get(gameId) as
+      | Record<string, unknown>
+      | undefined;
+  }
+
+  it('resign ends the game with the opponent winning', () => {
+    const h = harness();
+    const gameId = inPlay(h);
+
+    const result = h.games.applyGame(h.aoife, { type: 'resign', gameId });
+
+    expect(result.isOk()).toBe(true);
+    const game = h.persistence.findGameById(gameId)._unsafeUnwrap();
+    expect(game).toMatchObject({ state: 'finished', result: '0-1' });
+    expect(stats(h.db, gameId)).toMatchObject({ move_count: 0, result: '0-1' });
+    expect(trailEvents(h.db)).toContain('game-finished');
+  });
+
+  it('mutual draw ends the game as a draw', () => {
+    const h = harness();
+    const gameId = inPlay(h);
+
+    const result = h.games.applyGame(h.takashi, { type: 'mutualDraw', gameId });
+
+    expect(result.isOk()).toBe(true);
+    const game = h.persistence.findGameById(gameId)._unsafeUnwrap();
+    expect(game).toMatchObject({ state: 'finished', result: '1/2-1/2' });
+    expect(stats(h.db, gameId)).toMatchObject({ result: '1/2-1/2' });
+  });
+
+  it('refuses a resign on a game not in play', () => {
+    const h = harness();
+    const gameId = inPlay(h);
+    h.games.applyGame(h.aoife, { type: 'resign', gameId });
+
+    expect(h.games.applyGame(h.takashi, { type: 'resign', gameId })._unsafeUnwrapErr().code).toBe('not-in-play');
+  });
+});
+
+describe('games: game view', () => {
+  it('renders imported history as fixed and played moves as live', () => {
+    const h = harness();
+    const r = h.games.applyGame(h.aoife, { type: 'propose', boardSize: 5, joinType: 'open', ptn: OPENING_PTN });
+    const gameId = (r._unsafeUnwrap() as { gameId: number }).gameId;
+    h.games.applyGame(h.takashi, { type: 'join', gameId });
+
+    const before = h.games.getGame(h.aoife, gameId)._unsafeUnwrap();
+    expect(before.moves).toHaveLength(4);
+    expect(before.moves.every((m) => m.imported)).toBe(true);
+    expect(before.board).toHaveLength(5);
+    expect(before.board[0]).toHaveLength(5);
+
+    h.games.applyGame(h.aoife, { type: 'playMove', gameId, move: 'b2' });
+
+    const after = h.games.getGame(h.aoife, gameId)._unsafeUnwrap();
+    expect(after.moves).toHaveLength(5);
+    expect(after.moves[4]).toMatchObject({
+      number: 5,
+      seat: 1,
+      notation: 'b2',
+      imported: false,
+      player: { id: 1, displayName: 'Aoife Nolan' },
+    });
+  });
+
+  it('marks the viewer seat and whether they may move', () => {
+    const h = harness();
+    const r = h.games.applyGame(h.aoife, { type: 'propose', boardSize: 5, joinType: 'open' });
+    const gameId = (r._unsafeUnwrap() as { gameId: number }).gameId;
+    h.games.applyGame(h.takashi, { type: 'join', gameId });
+
+    const aoifeView = h.games.getGame(h.aoife, gameId)._unsafeUnwrap();
+    expect(aoifeView.viewerSeat).toBe(1);
+    expect(aoifeView.canMove).toBe(true);
+    expect(aoifeView.canEnd).toBe(true);
+
+    const takashiView = h.games.getGame(h.takashi, gameId)._unsafeUnwrap();
+    expect(takashiView.viewerSeat).toBe(2);
+    expect(takashiView.canMove).toBe(false);
+    expect(takashiView.canEnd).toBe(true);
+  });
+
+  it('reports not-found for a game the viewer cannot see, and for a stranger to a shared game gives no seat', () => {
+    const h = harness();
+    const r = h.games.applyGame(h.aoife, {
+      type: 'propose',
+      boardSize: 5,
+      joinType: 'invited',
+      invitedDisplayName: 'Takashi Mori',
+    });
+    const gameId = (r._unsafeUnwrap() as { gameId: number }).gameId;
+    h.games.applyGame(h.takashi, { type: 'join', gameId });
+    const stranger = insertUser(h.db, { id: 9, username: 'stranger', displayName: 'Stranger' });
+
+    // Invited games start unshared, so the stranger cannot see it at all.
+    expect(h.games.getGame(stranger, gameId)._unsafeUnwrapErr().code).toBe('not-found');
+  });
+});

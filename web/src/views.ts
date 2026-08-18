@@ -1,6 +1,7 @@
 import { breadcrumb, escapeHtml, renderShell } from './html.js';
 import type { SessionUser } from './auth.js';
-import type { GameSummary } from './games.js';
+import type { GameSummary, GameView } from './games.js';
+import type { StoneKind } from '@tak/core';
 
 /**
  * Server-rendered auth/admin views. Keep the markup thin: these pages only
@@ -271,6 +272,9 @@ function gameActions(game: GameSummary, from: GameListPage): string {
     game.canDelete
       ? `<form method="post" action="/games/${game.id}/delete"><button type="submit" class="btn btn-danger btn-sm">Delete</button></form>`
       : '',
+    game.state === 'in_play'
+      ? `<a class="btn btn-sm" href="/games/${game.id}">Open</a>`
+      : '',
   ].filter(Boolean);
   return `<div class="row-actions">${buttons.join('')}</div>`;
 }
@@ -462,4 +466,225 @@ export function renderResetPasswordResult(actor: SessionUser, username: string, 
   <p class="hint">This is shown once. Pass it to the user out of band — they must change it at their next sign-in.</p>
 </div>`;
   return renderShell('Password reset', body, { user: actor, path: '/admin/users' });
+}
+
+/** A page for a game the viewer cannot see or that no longer exists. */
+export function renderNotFoundPage(): string {
+  return `<div class="narrow">
+  <h1>Not found</h1>
+  <p class="lede">There is no game here — it may have been deleted, or it is not shared with you.</p>
+  <p class="actions"><a class="btn btn-quiet" href="/games">Your games</a></p>
+</div>`;
+}
+
+/** The board glyph for one stone. P1 fills; P2 outlines. */
+function stoneGlyph(player: 1 | 2, kind: StoneKind): string {
+  if (kind === 'flat') return player === 1 ? '●' : '○';
+  if (kind === 'standing') return player === 1 ? '▲' : '△';
+  return player === 1 ? '■' : '□';
+}
+
+function playerColor(seat: 1 | 2): string {
+  return seat === 1 ? '●' : '○';
+}
+
+export interface GameViewPageView {
+  error?: string;
+}
+
+/** Register the board's click builder as an Alpine component. */
+const TAK_BOARD_SCRIPT = `<script>
+document.addEventListener('alpine:init', () => {
+  Alpine.data('takBoard', (config) => ({
+    move: '', stone: 'flat', source: null,
+    canMove: config.canMove, viewerSeat: config.viewerSeat, size: config.size,
+    cellClick(el) {
+      if (!this.canMove) return;
+      const sq = el.dataset.square;
+      const height = Number(el.dataset.height);
+      const top = el.dataset.top;
+      const mine = top !== '' && top[0] === String(this.viewerSeat);
+      if (this.source === null) {
+        if (height === 0) {
+          const prefix = this.stone === 'standing' ? 'S' : this.stone === 'capstone' ? 'C' : '';
+          this.move = prefix + sq;
+        } else if (mine) {
+          this.source = { sq, height };
+        }
+        return;
+      }
+      if (this.source.sq === sq) { this.source = null; return; }
+      const sf = this.source.sq[0], sr = Number(this.source.sq[1]);
+      const df = sq[0], dr = Number(sq[1]);
+      if (sf !== df && sr !== dr) return;
+      let dir, dist;
+      if (sf === df) { dir = dr > sr ? '+' : '-'; dist = Math.abs(dr - sr); }
+      else { dir = df > sf ? '>' : '<'; dist = Math.abs(df.charCodeAt(0) - sf.charCodeAt(0)); }
+      const lift = Math.min(this.source.height, this.size);
+      if (lift < dist) return;
+      const drops = new Array(dist).fill(1);
+      drops[dist - 1] = lift - (dist - 1);
+      this.move = lift + this.source.sq + dir + drops.join('');
+      this.source = null;
+    }
+  }));
+});
+</script>`;
+
+function renderBoard(game: GameView): string {
+  const files = ['a', 'b', 'c', 'd', 'e', 'f'].slice(0, game.boardSize);
+  const top = `<span class="axis"></span>${files.map((f) => `<span class="axis">${f}</span>`).join('')}`;
+  const rows: string[] = [];
+  for (const row of game.board) {
+    const rank = row[0]!.rank;
+    const cells = row
+      .map((cell) => {
+        const topStone = cell.stack.length === 0 ? null : cell.stack[cell.stack.length - 1]!;
+        const glyph = topStone === null ? '·' : stoneGlyph(topStone.player, topStone.kind);
+        const topAttr = topStone === null ? '' : `${topStone.player}|${topStone.kind}`;
+        const height = cell.stack.length > 1 ? `<span class="cell-height">${cell.stack.length}</span>` : '';
+        const stackTip =
+          cell.stack.length === 0
+            ? ''
+            : `<span class="stack-tip">${[...cell.stack]
+                .reverse()
+                .map((s) => `<span>${stoneGlyph(s.player, s.kind)}</span>`)
+                .join('')}</span>`;
+        return `<button type="button" class="cell" data-square="${cell.file}${cell.rank}" data-height="${cell.stack.length}" data-top="${topAttr}" x-on:click="cellClick($el)" :class="{ 'is-source': source !== null && source.sq === '${cell.file}${cell.rank}' }" aria-label="${cell.file}${cell.rank}">${glyph}${height}${stackTip}</button>`;
+      })
+      .join('');
+    rows.push(`<span class="axis">${rank}</span>${cells}`);
+  }
+  return `<div class="board" style="grid-template-columns: auto repeat(${game.boardSize}, 2.75rem)">${top}${rows.join('')}</div>`;
+}
+
+function renderGameStatus(game: GameView): string {
+  if (game.state === 'proposed') {
+    return `<p class="lede">Proposed by ${escapeHtml(game.proposer.displayName)}${game.imported ? ', starting from an imported record' : ''}. Waiting for an opponent.</p>`;
+  }
+  if (game.state === 'finished') {
+    return `<p class="lede">${escapeHtml(game.resultText ?? 'Finished')}.</p>`;
+  }
+  const youPlay =
+    game.viewerSeat === null
+      ? ''
+      : `You play ${playerColor(game.viewerSeat)} (${game.viewerSeat === 1 ? 'filled' : 'open'}). `;
+  let turn: string;
+  if (game.canMove && game.viewerSeat !== null && !game.opened[game.viewerSeat]) {
+    // The opening move places an opponent stone, so the player's first turn is
+    // played in the other colour.
+    const placing = game.viewerSeat === 1 ? 'open' : 'filled';
+    turn = `Your turn — your opening move places your opponent's stone (${placing}).`;
+  } else if (game.canMove) {
+    turn = 'Your turn.';
+  } else {
+    turn = `${game.toMove ? escapeHtml(game.toMove.displayName) : '—'} to move.`;
+  }
+  return `<p class="lede">${escapeHtml(game.proposer.displayName)} vs ${escapeHtml(game.opponent?.displayName ?? '—')}. ${youPlay}${turn}</p>`;
+}
+
+function renderGameControls(game: GameView): string {
+  if (game.state === 'finished') return '';
+  const parts: string[] = [];
+  if (game.canMove) {
+    parts.push(`
+<form class="panel" method="post" action="/games/${game.id}/move">
+  <div class="field">
+    <label for="move">Your move</label>
+    <input id="move" name="move" x-model="move" placeholder="a1, Sa1, or 5b4&gt;212" autocomplete="off" spellcheck="false">
+    <p class="hint">Type Portable Tak Notation, or build it by clicking the board above.</p>
+  </div>
+  <div class="field">
+    <label for="stone">Stone to place</label>
+    <select id="stone" x-model="stone">
+      <option value="flat">flat</option>
+      <option value="standing">standing</option>
+      <option value="capstone">capstone</option>
+    </select>
+    <p class="hint" x-show="source !== null">Moving from <span x-text="source ? source.sq : ''"></span> — click a square in a straight line, or the source again to cancel.</p>
+  </div>
+  <p class="actions"><button type="submit" class="btn">Play move</button></p>
+</form>`);
+  }
+  if (game.canEnd) {
+    parts.push(`
+<div class="actions">
+  <form method="post" action="/games/${game.id}/resign"><button type="submit" class="btn btn-quiet">Resign</button></form>
+  <form method="post" action="/games/${game.id}/draw"><button type="submit" class="btn btn-quiet">Draw by agreement</button></form>
+</div>`);
+  }
+  return parts.join('');
+}
+
+function renderHistory(game: GameView): string {
+  if (game.moves.length === 0) {
+    return `<div class="block"><h2>Moves</h2><p class="lede">No moves yet.</p></div>`;
+  }
+  const lines: string[] = [];
+  for (let i = 0; i < game.moves.length; i += 2) {
+    const turn = i / 2 + 1;
+    const cell = (m: GameView['moves'][number]): string =>
+      `<span class="mono">${escapeHtml(m.notation)}</span> <span class="dim">${escapeHtml(m.player.displayName)}</span>`;
+    const second = game.moves[i + 1];
+    lines.push(`<li><span class="mono">${turn}.</span> ${cell(game.moves[i]!)}${second ? ` ${cell(second)}` : ''}</li>`);
+  }
+  const imported = game.moves.some((m) => m.imported);
+  const note = imported ? '<p class="hint">Imported moves are fixed history.</p>' : '';
+  return `<div class="block"><h2>Moves</h2><ol class="moves">${lines.join('')}</ol>${note}</div>`;
+}
+
+function renderLegend(): string {
+  return `<p class="hint">● flat (filled) · ○ flat (open) · ▲ wall · ■ capstone — hover a square to read its stack.</p>`;
+}
+
+function renderReserves(game: GameView): string {
+  if (game.state === 'proposed') return '';
+  const you = game.viewerSeat;
+  const label = (seat: 1 | 2, name: string): string => `${escapeHtml(name)}${you === seat ? ' (you)' : ''}`;
+  const p1 = game.reserves[1];
+  const p2 = game.reserves[2];
+  return `<div class="block">
+  <h2>Stones left</h2>
+  <div class="table-scroll">
+    <table class="data">
+      <thead><tr><th>Player</th><th>Colour</th><th>Flats</th><th>Capstones</th></tr></thead>
+      <tbody>
+        <tr><td>${label(1, game.proposer.displayName)}</td><td>● filled</td><td class="num">${p1.stones}</td><td class="num">${p1.capstones}</td></tr>
+        <tr><td>${label(2, game.opponent?.displayName ?? 'Opponent')}</td><td>○ open</td><td class="num">${p2.stones}</td><td class="num">${p2.capstones}</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>`;
+}
+
+function renderMoveSyntax(): string {
+  return `<div class="block">
+  <h2>Move syntax</h2>
+  <ul class="moves">
+    <li><span class="mono">a1</span> — place a flat stone on a1</li>
+    <li><span class="mono">Sa1</span> — place a standing stone (wall)</li>
+    <li><span class="mono">Ca1</span> — place a capstone</li>
+    <li><span class="mono">5b4&gt;212</span> — lift 5 from b4, move right, drop 2, 1, 2</li>
+    <li>Directions: <span class="mono">&lt;</span> left · <span class="mono">&gt;</span> right · <span class="mono">+</span> up · <span class="mono">-</span> down</li>
+  </ul>
+</div>`;
+}
+
+export function renderGamePage(user: SessionUser, game: GameView, view: GameViewPageView = {}): string {
+  const error = view.error ? `<p class="error">${escapeHtml(view.error)}</p>` : '';
+  const body = `
+${breadcrumb({ href: '/games', label: 'Games' }, `Game ${game.id}`)}
+<h1>Game ${game.id}</h1>
+${renderGameStatus(game)}
+${error}
+${renderLegend()}
+${TAK_BOARD_SCRIPT}
+<div x-data="takBoard(${escapeHtml(JSON.stringify({ canMove: game.canMove, viewerSeat: game.viewerSeat, size: game.boardSize }))})" x-cloak>
+  ${renderBoard(game)}
+  ${renderGameControls(game)}
+</div>
+${renderReserves(game)}
+${renderHistory(game)}
+${renderMoveSyntax()}`;
+  return renderShell(`Game ${game.id}`, body, { user, path: '/games' });
 }

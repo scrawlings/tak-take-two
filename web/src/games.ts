@@ -1,6 +1,18 @@
 import { err, ok, type Result } from 'neverthrow';
-import { createTakGame, fromPtnText, isBoardFinished } from '@tak/core';
-import type { Player, TakGame } from '@tak/core';
+import {
+  createTakGame,
+  formatMove,
+  fromPtnText,
+  generateTps,
+  isBoardFinished,
+  isFinished,
+  mutualDraw as coreMutualDraw,
+  parseMove,
+  playMove as corePlayMove,
+  resign as coreResign,
+  resultCode,
+} from '@tak/core';
+import type { GameState, Player, StoneKind, TakGame } from '@tak/core';
 import type {
   GameBoardSize,
   GameRecord,
@@ -38,6 +50,9 @@ export type GameErrorCode =
   | 'already-joined'
   | 'not-invited'
   | 'not-proposed'
+  | 'not-in-play'
+  | 'not-your-turn'
+  | 'invalid-move'
   | 'persistence';
 
 export interface GameError {
@@ -73,6 +88,63 @@ export interface GameSummary {
   readonly toMove: PlayerRef | null;
 }
 
+/** One stone as the board view shows it. */
+export interface StoneView {
+  readonly player: 1 | 2;
+  readonly kind: StoneKind;
+}
+
+/** One square of the rendered board, with its stack bottom-to-top. */
+export interface BoardSquareView {
+  readonly file: string;
+  readonly rank: number;
+  readonly stack: readonly StoneView[];
+}
+
+/** One move of the full history (imported first, then played). */
+export interface MoveView {
+  /** 1-based index in the full history. */
+  readonly number: number;
+  /** 1 (proposer) or 2 (joiner). */
+  readonly seat: 1 | 2;
+  readonly player: PlayerRef;
+  /** Canonical PTN (`a1`, `Sa1`, `5b4>212`). */
+  readonly notation: string;
+  /** Imported (fixed) rather than played on this site. */
+  readonly imported: boolean;
+}
+
+/** The full game view — every rule the template needs already decided. */
+export interface GameView {
+  readonly id: number;
+  readonly boardSize: GameBoardSize;
+  readonly state: GameLifecycleState;
+  readonly joinType: JoinType;
+  readonly proposer: PlayerRef;
+  readonly opponent: PlayerRef | null;
+  readonly imported: boolean;
+  /** 1 or 2, or null when the viewer is a spectator. */
+  readonly viewerSeat: 1 | 2 | null;
+  /** Full history, imported first then played. */
+  readonly moves: readonly MoveView[];
+  /** Rows top-down; each row files left-to-right. */
+  readonly board: readonly (readonly BoardSquareView[])[];
+  /** Whose turn it is, or null while not in play. */
+  readonly toMove: PlayerRef | null;
+  /** 1 or 2, or null while not in play. */
+  readonly toMoveSeat: 1 | 2 | null;
+  /** The viewer may play a move right now. */
+  readonly canMove: boolean;
+  /** The viewer is a participant and may resign or declare a draw. */
+  readonly canEnd: boolean;
+  /** Human-readable result, or null while in play. */
+  readonly resultText: string | null;
+  /** Remaining stones and capstones per seat. */
+  readonly reserves: Readonly<Record<1 | 2, { readonly stones: number; readonly capstones: number }>>;
+  /** Whether each seat has made its opening (first) move. */
+  readonly opened: Readonly<Record<1 | 2, boolean>>;
+}
+
 /** What a player may narrow a proposal search by. All optional; blanks mean "any". */
 export interface ProposedSearch {
   readonly boardSize?: number;
@@ -93,7 +165,10 @@ export type GameCommand =
       readonly ptn?: string;
     }
   | { readonly type: 'deleteProposal'; readonly gameId: number }
-  | { readonly type: 'join'; readonly gameId: number };
+  | { readonly type: 'join'; readonly gameId: number }
+  | { readonly type: 'playMove'; readonly gameId: number; readonly move: string }
+  | { readonly type: 'resign'; readonly gameId: number }
+  | { readonly type: 'mutualDraw'; readonly gameId: number };
 
 /** One domain-shaped result per command; commands that only change state yield `{ type: 'ok' }`. */
 export type GameCommandResult =
@@ -104,6 +179,8 @@ export type GameCommandResult =
 export interface Games {
   /** Run one game command. Commands authorise themselves. */
   applyGame(actor: SessionUser, command: GameCommand): Result<GameCommandResult, GameError>;
+  /** The full view of one game, for the game screen. */
+  getGame(actor: SessionUser, gameId: number): Result<GameView, GameError>;
   /** The actor's own proposals and games in play, newest first. */
   listMyGames(actor: SessionUser): Result<GameSummary[], GameError>;
   /** Proposals the actor could join: open ones, plus invitations to them. */
@@ -395,20 +472,280 @@ export function createGames(persistence: Persistence): Games {
     return ok({ type: 'join', gameId: game.id });
   }
 
+  /** The seat (1/2) an actor holds in a game, or null when not a participant. */
+  function seatOfActor(game: GameRecord, actorId: number): 1 | 2 | null {
+    if (game.proposerId === actorId) return 1;
+    if (game.opponentId === actorId) return 2;
+    return null;
+  }
+
   /**
-   * The position a game has reached. Today that is the imported record alone —
-   * no moves can be played until ticket 11, which extends this with the moves
-   * recorded against the game.
+   * The playable game a record has reached — the one load path every command
+   * and view uses. Imported history replays from the stored record; played
+   * moves replay from their canonical notation. Only records that already
+   * replayed cleanly are stored, so a failure here is corruption, not input.
    */
-  function positionOf(game: GameRecord): Result<TakGame, GameError> {
-    if (game.importedPtn === null) return ok(createTakGame(game.boardSize));
-    const loaded = fromPtnText(game.importedPtn);
-    if (loaded.isErr()) {
-      // Only records that already replayed cleanly are ever stored, so this is
-      // corruption rather than bad input.
-      return err(persistenceError(`stored record for game ${game.id} no longer replays: ${loaded.error.message}`));
+  function currentTakGame(game: GameRecord): Result<TakGame, GameError> {
+    let tak: TakGame;
+    if (game.importedPtn !== null) {
+      const loaded = fromPtnText(game.importedPtn);
+      if (loaded.isErr()) {
+        return err(persistenceError(`stored record for game ${game.id} no longer replays: ${loaded.error.message}`));
+      }
+      tak = loaded.value;
+    } else {
+      tak = createTakGame(game.boardSize);
     }
-    return ok(loaded.value);
+
+    const rows = persistence.listMoves(game.id);
+    if (rows.isErr()) return err(persistenceError(rows.error));
+    for (const row of rows.value) {
+      const parsed = parseMove(row.notation);
+      if (parsed.isErr()) {
+        return err(persistenceError(`stored move ${row.moveNumber} for game ${game.id} no longer parses: ${parsed.error.message}`));
+      }
+      const played = corePlayMove(tak, parsed.value, Date.parse(row.playedAt));
+      if (played.isErr()) {
+        return err(persistenceError(`stored move ${row.moveNumber} for game ${game.id} no longer replays: ${played.error.message}`));
+      }
+      tak = played.value;
+    }
+    return ok(tak);
+  }
+
+  /**
+   * The atomic finish: mark the game finished with its result code, write the
+   * derived game stats, and record the `game-finished` trail event.
+   */
+  function finishGameTransaction(
+    actor: SessionUser,
+    game: GameRecord,
+    played: TakGame,
+    result: string,
+    how: string,
+  ): Result<void, string> {
+    const finished = persistence.finishGame(game.id, result);
+    if (finished.isErr()) return finished;
+    const durationSeconds = Math.max(0, Math.floor((Date.now() - Date.parse(game.createdAt)) / 1000));
+    const stats = persistence.writeGameStats({
+      gameId: game.id,
+      boardSize: game.boardSize,
+      moveCount: played.history.length,
+      durationSeconds,
+      result,
+    });
+    if (stats.isErr()) return stats;
+    return persistence.appendActivityTrail({
+      userId: actor.id,
+      gameId: game.id,
+      event: 'game-finished',
+      payload: { result, how },
+    });
+  }
+
+  function playMove(
+    actor: SessionUser,
+    command: Extract<GameCommand, { type: 'playMove' }>,
+  ): Result<GameCommandResult, GameError> {
+    const player = requirePlayer(actor);
+    if (player.isErr()) return err(player.error);
+
+    const found = persistence.findGameById(command.gameId);
+    if (found.isErr()) return err(persistenceError(found.error));
+    if (found.value === null) return err({ code: 'not-found', message: 'That game no longer exists.' });
+    const game = found.value;
+
+    if (!visibleTo(game, actor.id)) {
+      return err({ code: 'not-found', message: 'That game no longer exists.' });
+    }
+    if (!isParticipant(game, actor.id)) {
+      return err({ code: 'forbidden', message: 'Only the two players may move in a game.' });
+    }
+    if (game.state !== 'in_play') {
+      return err({ code: 'not-in-play', message: 'This game is not being played right now.' });
+    }
+
+    const current = currentTakGame(game);
+    if (current.isErr()) return err(current.error);
+    if (seatOf(game, current.value.state.playerToMove) !== actor.id) {
+      return err({ code: 'not-your-turn', message: 'It is not your turn.' });
+    }
+
+    const parsed = parseMove(command.move);
+    if (parsed.isErr()) {
+      return err({ code: 'invalid-move', message: `That is not a legal move: ${parsed.error.message}` });
+    }
+    const played = corePlayMove(current.value, parsed.value);
+    if (played.isErr()) {
+      return err({ code: 'invalid-move', message: `That move is illegal: ${played.error.message}` });
+    }
+
+    const notation = formatMove(parsed.value);
+    const moveNumber = played.value.history.length;
+    const finishedResult = isFinished(played.value) ? resultCode(played.value) : null;
+
+    const persisted = persistence.transaction((): Result<void, string> => {
+      const appended = persistence.appendMove({
+        gameId: game.id,
+        moveNumber,
+        playerId: actor.id,
+        notation,
+        position: generateTps(played.value.state),
+      });
+      if (appended.isErr()) return err(appended.error);
+      const trail = persistence.appendActivityTrail({
+        userId: actor.id,
+        gameId: game.id,
+        event: 'move-played',
+        payload: { moveNumber, notation, result: finishedResult },
+      });
+      if (trail.isErr()) return trail;
+      if (finishedResult !== null) {
+        // Only a move can finish the board, so a non-null result here is a road or flat win.
+        const how = played.value.result?.kind === 'board' ? played.value.result.outcome.type : 'board';
+        const fin = finishGameTransaction(actor, game, played.value, finishedResult, how);
+        if (fin.isErr()) return fin;
+      }
+      return ok(undefined);
+    });
+    if (persisted.isErr()) return err(persistenceError(persisted.error));
+
+    return ok({ type: 'ok' });
+  }
+
+  function resign(
+    actor: SessionUser,
+    command: Extract<GameCommand, { type: 'resign' }>,
+  ): Result<GameCommandResult, GameError> {
+    const player = requirePlayer(actor);
+    if (player.isErr()) return err(player.error);
+
+    const found = persistence.findGameById(command.gameId);
+    if (found.isErr()) return err(persistenceError(found.error));
+    if (found.value === null) return err({ code: 'not-found', message: 'That game no longer exists.' });
+    const game = found.value;
+
+    if (!visibleTo(game, actor.id)) {
+      return err({ code: 'not-found', message: 'That game no longer exists.' });
+    }
+    if (!isParticipant(game, actor.id)) {
+      return err({ code: 'forbidden', message: 'Only the two players may end a game.' });
+    }
+    if (game.state !== 'in_play') {
+      return err({ code: 'not-in-play', message: 'This game is not being played right now.' });
+    }
+
+    const current = currentTakGame(game);
+    if (current.isErr()) return err(current.error);
+    const seat: 1 | 2 = actor.id === game.proposerId ? 1 : 2;
+    const done = coreResign(current.value, seat);
+    if (done.isErr()) return err({ code: 'not-in-play', message: done.error.message });
+    const result = resultCode(done.value)!;
+
+    const persisted = persistence.transaction(() =>
+      finishGameTransaction(actor, game, done.value, result, 'resign'),
+    );
+    if (persisted.isErr()) return err(persistenceError(persisted.error));
+
+    return ok({ type: 'ok' });
+  }
+
+  function mutualDraw(
+    actor: SessionUser,
+    command: Extract<GameCommand, { type: 'mutualDraw' }>,
+  ): Result<GameCommandResult, GameError> {
+    const player = requirePlayer(actor);
+    if (player.isErr()) return err(player.error);
+
+    const found = persistence.findGameById(command.gameId);
+    if (found.isErr()) return err(persistenceError(found.error));
+    if (found.value === null) return err({ code: 'not-found', message: 'That game no longer exists.' });
+    const game = found.value;
+
+    if (!visibleTo(game, actor.id)) {
+      return err({ code: 'not-found', message: 'That game no longer exists.' });
+    }
+    if (!isParticipant(game, actor.id)) {
+      return err({ code: 'forbidden', message: 'Only the two players may end a game.' });
+    }
+    if (game.state !== 'in_play') {
+      return err({ code: 'not-in-play', message: 'This game is not being played right now.' });
+    }
+
+    const current = currentTakGame(game);
+    if (current.isErr()) return err(current.error);
+    const done = coreMutualDraw(current.value);
+    if (done.isErr()) return err({ code: 'not-in-play', message: done.error.message });
+    const result = resultCode(done.value)!;
+
+    const persisted = persistence.transaction(() =>
+      finishGameTransaction(actor, game, done.value, result, 'mutual-draw'),
+    );
+    if (persisted.isErr()) return err(persistenceError(persisted.error));
+
+    return ok({ type: 'ok' });
+  }
+
+  function gameView(actor: SessionUser, gameId: number): Result<GameView, GameError> {
+    const player = requirePlayer(actor);
+    if (player.isErr()) return err(player.error);
+
+    const found = persistence.findGameById(gameId);
+    if (found.isErr()) return err(persistenceError(found.error));
+    if (found.value === null) return err({ code: 'not-found', message: 'That game no longer exists.' });
+    const game = found.value;
+    if (!visibleTo(game, actor.id)) {
+      return err({ code: 'not-found', message: 'That game no longer exists.' });
+    }
+
+    const nameOf = nameResolver();
+    const proposer = nameOf(game.proposerId);
+    if (proposer.isErr()) return err(proposer.error);
+    const opponent = game.opponentId === null ? ok(null) : nameOf(game.opponentId);
+    if (opponent.isErr()) return err(opponent.error);
+
+    const current = currentTakGame(game);
+    if (current.isErr()) return err(current.error);
+    const tak = current.value;
+
+    const viewerSeat = seatOfActor(game, actor.id);
+    const toMoveSeat: 1 | 2 | null = game.state === 'in_play' ? tak.state.playerToMove : null;
+    const toMove = toMoveSeat === null ? null : toMoveSeat === 1 ? proposer.value : opponent.value;
+
+    const moves: MoveView[] = [];
+    for (let i = 0; i < tak.history.length; i++) {
+      const rec = tak.history[i]!;
+      const seat: 1 | 2 = i % 2 === 0 ? 1 : 2;
+      const ref = seat === 1 ? proposer.value : opponent.value;
+      if (ref === null) continue; // moves exist only after a join, so the joiner is known
+      moves.push({
+        number: i + 1,
+        seat,
+        player: ref,
+        notation: formatMove(rec.move),
+        imported: i < tak.fixedMoves,
+      });
+    }
+
+    return ok({
+      id: game.id,
+      boardSize: game.boardSize,
+      state: game.state,
+      joinType: game.joinType,
+      proposer: proposer.value,
+      opponent: opponent.value,
+      imported: game.importedPtn !== null,
+      viewerSeat,
+      moves,
+      board: buildBoard(tak.state),
+      toMove,
+      toMoveSeat,
+      canMove: game.state === 'in_play' && viewerSeat !== null && viewerSeat === toMoveSeat,
+      canEnd: game.state === 'in_play' && viewerSeat !== null,
+      resultText: resultTextOf(game.result, proposer.value, opponent.value),
+      reserves: tak.state.reserves,
+      opened: tak.state.opened,
+    });
   }
 
   /** Build the view of one game for `actor`, resolving names through `nameOf`. */
@@ -430,7 +767,7 @@ export function createGames(persistence: Persistence): Games {
 
     let toMove: PlayerRef | null = null;
     if (game.state === 'in_play') {
-      const position = positionOf(game);
+      const position = currentTakGame(game);
       if (position.isErr()) return err(position.error);
       const seat = seatOf(game, position.value.state.playerToMove);
       if (seat !== null) {
@@ -485,7 +822,17 @@ export function createGames(persistence: Persistence): Games {
           return deleteProposal(actor, command.gameId);
         case 'join':
           return join(actor, command.gameId);
+        case 'playMove':
+          return playMove(actor, command);
+        case 'resign':
+          return resign(actor, command);
+        case 'mutualDraw':
+          return mutualDraw(actor, command);
       }
+    },
+
+    getGame(actor, gameId): Result<GameView, GameError> {
+      return gameView(actor, gameId);
     },
 
     listMyGames(actor: SessionUser): Result<GameSummary[], GameError> {
@@ -544,4 +891,43 @@ function parseSearch(search: ProposedSearch): Result<ProposedGameFilters, GameEr
   if (name) filters.proposerDisplayName = name;
 
   return ok(filters);
+}
+
+const FILES = ['a', 'b', 'c', 'd', 'e', 'f'] as const;
+
+/** The board as display rows (top-down), each square carrying its stack. */
+function buildBoard(state: GameState): readonly (readonly BoardSquareView[])[] {
+  const rows: BoardSquareView[][] = [];
+  for (let rank = state.size; rank >= 1; rank--) {
+    const row: BoardSquareView[] = [];
+    for (let fi = 0; fi < state.size; fi++) {
+      const file = FILES[fi]!;
+      const stack = state.board.grid[fi]?.[rank - 1] ?? [];
+      row.push({ file, rank, stack: stack.map((s) => ({ player: s.player, kind: s.kind })) });
+    }
+    rows.push(row);
+  }
+  return rows;
+}
+
+/** The human-readable result, or null while in play. */
+function resultTextOf(result: string | null, p1: PlayerRef, p2: PlayerRef | null): string | null {
+  switch (result) {
+    case 'R-0':
+      return `Road win for ${p1.displayName}`;
+    case '0-R':
+      return p2 ? `Road win for ${p2.displayName}` : 'Road win for player 2';
+    case 'F-0':
+      return `Flat win for ${p1.displayName}`;
+    case '0-F':
+      return p2 ? `Flat win for ${p2.displayName}` : 'Flat win for player 2';
+    case '1-0':
+      return `${p1.displayName} wins by resignation`;
+    case '0-1':
+      return p2 ? `${p2.displayName} wins by resignation` : 'Player 2 wins by resignation';
+    case '1/2-1/2':
+      return 'Draw by agreement';
+    default:
+      return null;
+  }
 }

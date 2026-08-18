@@ -314,11 +314,29 @@ export function parsePtn(text: string): Result<PtnGame, PtnError> {
   return ok({ tags: tags.value.tags, size: size.value, moves, result });
 }
 
+/**
+ * Parse a single PTN move token (a place or stack move) into a typed `Move`.
+ * No move numbers, tags, or result codes — this is the move-entry validator:
+ * the web parses a submitted move with it, then the engine checks legality.
+ */
+export function parseMove(text: string): Result<Move, PtnError> {
+  const stripped = stripComments(text);
+  if (stripped.isErr()) return err(stripped.error);
+  const token = stripMarks(stripped.value.trim());
+  if (token === '' || /\s/.test(token)) {
+    return err(
+      ptnError('ptn-invalid-token', `"${text.trim()}" is not a single PTN move`, { token: text.trim() }),
+    );
+  }
+  return parseMoveToken(token);
+}
+
 function formatSquare(sq: Square): string {
   return `${sq[0]}${sq[1]}`;
 }
 
-function formatMove(move: Move): string {
+/** Format a single move as canonical PTN (`a1`, `Sa1`, `Ca1`, `5b4>212`). */
+export function formatMove(move: Move): string {
   if (move.type === 'place') {
     const stone = move.stone === 'flat' ? '' : move.stone === 'standing' ? 'S' : 'C';
     return `${stone}${formatSquare(move.square)}`;

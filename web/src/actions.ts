@@ -182,10 +182,13 @@ export function statusForGameError(error: GameError): ContentfulStatusCode {
     case 'invalid-join-type':
     case 'invalid-invite':
     case 'invalid-ptn':
+    case 'invalid-move':
       return 400;
     // The request was well formed; the game had moved on.
     case 'already-joined':
     case 'not-proposed':
+    case 'not-in-play':
+    case 'not-your-turn':
       return 409;
   }
 }

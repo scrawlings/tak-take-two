@@ -425,3 +425,127 @@ describe('navigation between the two game lists', () => {
     expect(mine).not.toContain('href="/games/find" aria-current="page"');
   });
 });
+
+describe('the game screen', () => {
+  async function inPlayGame(): Promise<{
+    app: App;
+    db: Database.Database;
+    aoife: string;
+    takashi: string;
+    gameId: number;
+  }> {
+    const { app, db } = makeApp();
+    await insertUser(db, { id: 1, username: 'aoife', password: 'pw', displayName: 'Aoife Nolan' });
+    await insertUser(db, { id: 2, username: 'takashi', password: 'pw', displayName: 'Takashi Mori' });
+    const aoife = await signIn(app, 'aoife', 'pw');
+    const takashi = await signIn(app, 'takashi', 'pw');
+    await app.request('/games', withCookie(form({ board_size: '5', join_type: 'open' }), aoife));
+    await app.request('/games/1/join', withCookie(form({ from: 'find' }), takashi));
+    return { app, db, aoife, takashi, gameId: 1 };
+  }
+
+  it('renders the board and history for a participant', async () => {
+    const { app, aoife, gameId } = await inPlayGame();
+
+    const res = await app.request(`/games/${gameId}`, withCookie({}, aoife));
+
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain('Game 1');
+    expect(html).toContain('data-square="a1"');
+    // The x-data JSON is HTML-escaped so its quotes do not break the attribute.
+    expect(html).toContain('x-data="takBoard({&quot;');
+    expect(html).toContain('Your move');
+    expect(html).toContain('Aoife Nolan');
+    // Axes: files across the top, ranks down the side.
+    expect(html).toContain('<span class="axis">a</span>');
+    expect(html).toContain('<span class="axis">5</span>');
+    // Your colour and the opening-turn colour.
+    expect(html).toContain('You play ● (filled)');
+    expect(html).toContain('your opening move places your opponent');
+    // Stones left and the move-syntax summary.
+    expect(html).toContain('Stones left');
+    expect(html).toContain('Move syntax');
+  });
+
+  it('records a move and redirects back to the game screen', async () => {
+    const { app, aoife, gameId } = await inPlayGame();
+
+    const res = await app.request(`/games/${gameId}/move`, withCookie(form({ move: 'a1' }), aoife));
+
+    expect(res.status).toBe(303);
+    expect(res.headers.get('location')).toBe(`/games/${gameId}`);
+  });
+
+  it('numbers turns in PTN style, both halves under the same full move', async () => {
+    const { app, aoife, takashi, gameId } = await inPlayGame();
+
+    await app.request(`/games/${gameId}/move`, withCookie(form({ move: 'a1' }), aoife));
+    await app.request(`/games/${gameId}/move`, withCookie(form({ move: 'e5' }), takashi));
+
+    const html = await (await app.request(`/games/${gameId}`, withCookie({}, aoife))).text();
+
+    // Both halves of the first full move sit behind the one "1." marker.
+    expect(html).toContain('1.</span>');
+    expect(html).toContain('a1');
+    expect(html).toContain('e5');
+    expect(html).not.toContain('2.</span>');
+    // The hover stack tooltip renders the glyph column.
+    expect(html).toContain('class="stack-tip"');
+  });
+
+  it('rejects an illegal move with a clear message', async () => {
+    const { app, aoife, gameId } = await inPlayGame();
+
+    const res = await app.request(`/games/${gameId}/move`, withCookie(form({ move: 'Sa1' }), aoife));
+
+    expect(res.status).toBe(400);
+    const html = await res.text();
+    expect(html).toContain('opening move must place a flat stone');
+  });
+
+  it('rejects a move when it is not your turn', async () => {
+    const { app, takashi, gameId } = await inPlayGame();
+
+    const res = await app.request(`/games/${gameId}/move`, withCookie(form({ move: 'a1' }), takashi));
+
+    expect(res.status).toBe(409);
+    expect(await res.text()).toContain('not your turn');
+  });
+
+  it('finishes the game on resignation', async () => {
+    const { app, aoife, db, gameId } = await inPlayGame();
+
+    const res = await app.request(`/games/${gameId}/resign`, withCookie(form({}), aoife));
+
+    expect(res.status).toBe(303);
+    const game = db.prepare('SELECT state, result FROM games WHERE id = ?').get(gameId);
+    expect(game).toEqual({ state: 'finished', result: '0-1' });
+  });
+
+  it('hides a game the visitor cannot see', async () => {
+    const { app, db } = makeApp();
+    await insertUser(db, { id: 1, username: 'aoife', password: 'pw' });
+    await insertUser(db, { id: 2, username: 'takashi', password: 'pw' });
+    await insertUser(db, { id: 3, username: 'stranger', password: 'pw' });
+    const aoife = await signIn(app, 'aoife', 'pw');
+    const stranger = await signIn(app, 'stranger', 'pw');
+    // Invited games start unshared, so a stranger cannot see it at all.
+    await app.request(
+      '/games',
+      withCookie(form({ board_size: '5', join_type: 'invited', invited_display_name: 'takashi' }), aoife),
+    );
+
+    const res = await app.request('/games/1', withCookie({}, stranger));
+
+    expect(res.status).toBe(404);
+  });
+
+  it('returns 404 for a game that does not exist', async () => {
+    const { app, aoife } = await inPlayGame();
+
+    const res = await app.request('/games/404', withCookie({}, aoife));
+
+    expect(res.status).toBe(404);
+  });
+});

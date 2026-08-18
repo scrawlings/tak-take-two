@@ -1,6 +1,6 @@
 export * from './types';
 export { applyMove, createGame, getStack } from './game';
-export { generatePtn, parsePtn } from './ptn';
+export { generatePtn, parsePtn, parseMove, formatMove } from './ptn';
 export { generateTps, parseTps } from './tps';
 export {
   createTakGame,

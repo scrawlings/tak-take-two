@@ -98,6 +98,39 @@ export interface ProposedGameFilters {
   readonly proposerDisplayName?: string;
 }
 
+/** A game_records row — one played (live) move, attributed to a user. */
+export interface MoveRecord {
+  readonly id: number;
+  readonly gameId: number;
+  /** 1-based index in the full move history (imported moves come first). */
+  readonly moveNumber: number;
+  readonly playerId: number;
+  /** The move as canonical PTN (`a1`, `Sa1`, `5b4>212`). */
+  readonly notation: string;
+  /** TPS of the position after this move, for export without replay. */
+  readonly position: string | null;
+  /** ISO timestamp. */
+  readonly playedAt: string;
+}
+
+/** Input for recording one played move. */
+export interface AppendMoveInput {
+  readonly gameId: number;
+  readonly moveNumber: number;
+  readonly playerId: number;
+  readonly notation: string;
+  readonly position: string | null;
+}
+
+/** Input for the game_stats row written at finish. */
+export interface GameStatsInput {
+  readonly gameId: number;
+  readonly boardSize: GameBoardSize;
+  readonly moveCount: number;
+  readonly durationSeconds: number | null;
+  readonly result: string;
+}
+
 /** Input for creating a user row. */
 export interface CreateUserInput {
   readonly username: string;
@@ -155,6 +188,15 @@ export interface Persistence {
    * racing joins cannot both succeed.
    */
   joinGame(gameId: number, opponentId: number): Result<boolean, string>;
+
+  /** Record one played move. */
+  appendMove(input: AppendMoveInput): Result<MoveRecord, string>;
+  /** The played moves of a game, in play order (imported history is not here). */
+  listMoves(gameId: number): Result<MoveRecord[], string>;
+  /** Mark a game finished with its PTN result code and a timestamp. */
+  finishGame(gameId: number, result: string): Result<void, string>;
+  /** Write the derived game-stats row at finish. */
+  writeGameStats(input: GameStatsInput): Result<void, string>;
 
   /** Insert a session with a caller-chosen id (the auth module owns id generation). */
   createSession(userId: number, id: string): Result<SessionRecord, string>;
@@ -432,6 +474,65 @@ export function createPersistence(db: Db): Persistence {
       }
     },
 
+    appendMove(input: AppendMoveInput): Result<MoveRecord, string> {
+      try {
+        const info = db
+          .prepare(
+            `INSERT INTO game_records (game_id, move_number, player_id, notation, position)
+             VALUES (?, ?, ?, ?, ?)`,
+          )
+          .run(input.gameId, input.moveNumber, input.playerId, input.notation, input.position);
+        const row = db
+          .prepare('SELECT * FROM game_records WHERE id = ?')
+          .get(info.lastInsertRowid) as MoveRow | undefined;
+        if (!row) return err('inserted move row not found');
+        return ok(mapMove(row));
+      } catch (e) {
+        return err(e instanceof Error ? e.message : String(e));
+      }
+    },
+
+    listMoves(gameId: number): Result<MoveRecord[], string> {
+      try {
+        const rows = db
+          .prepare('SELECT * FROM game_records WHERE game_id = ? ORDER BY move_number')
+          .all(gameId) as MoveRow[];
+        return ok(rows.map(mapMove));
+      } catch (e) {
+        return err(e instanceof Error ? e.message : String(e));
+      }
+    },
+
+    finishGame(gameId: number, result: string): Result<void, string> {
+      try {
+        db.prepare(
+          `UPDATE games SET state = 'finished', result = ?, finished_at = (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+           WHERE id = ?`,
+        ).run(result, gameId);
+        return ok(undefined);
+      } catch (e) {
+        return err(e instanceof Error ? e.message : String(e));
+      }
+    },
+
+    writeGameStats(input: GameStatsInput): Result<void, string> {
+      try {
+        db.prepare(
+          `INSERT INTO game_stats (game_id, board_size, move_count, duration_seconds, result)
+           VALUES (?, ?, ?, ?, ?)`,
+        ).run(
+          input.gameId,
+          input.boardSize,
+          input.moveCount,
+          input.durationSeconds,
+          input.result,
+        );
+        return ok(undefined);
+      } catch (e) {
+        return err(e instanceof Error ? e.message : String(e));
+      }
+    },
+
     createSession(userId: number, id: string): Result<SessionRecord, string> {
       try {
         db.prepare('INSERT INTO sessions (id, user_id) VALUES (?, ?)').run(id, userId);
@@ -540,6 +641,16 @@ interface GameRow {
   finished_at: string | null;
 }
 
+interface MoveRow {
+  id: number;
+  game_id: number;
+  move_number: number;
+  player_id: number;
+  notation: string;
+  position: string | null;
+  played_at: string;
+}
+
 function mapGame(row: GameRow): GameRecord {
   return {
     id: row.id,
@@ -555,6 +666,18 @@ function mapGame(row: GameRow): GameRecord {
     result: row.result,
     createdAt: row.created_at,
     finishedAt: row.finished_at,
+  };
+}
+
+function mapMove(row: MoveRow): MoveRecord {
+  return {
+    id: row.id,
+    gameId: row.game_id,
+    moveNumber: row.move_number,
+    playerId: row.player_id,
+    notation: row.notation,
+    position: row.position,
+    playedAt: row.played_at,
   };
 }
 

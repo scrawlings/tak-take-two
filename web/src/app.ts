@@ -26,12 +26,15 @@ import {
   renderChangePasswordPage,
   renderLoginPage,
   renderFindGamesPage,
+  renderGamePage,
   renderMyGamesPage,
+  renderNotFoundPage,
   renderResetPasswordResult,
   renderRoot,
   renderStatusPageBody,
   type AdminUsersView,
   type FindGamesView,
+  type GameViewPageView,
   type MyGamesView,
 } from './views.js';
 
@@ -200,6 +203,26 @@ export function createApp(deps: AppDeps): App {
         reload: () => games.searchProposed(c.get('user')),
         render: (data, view: FindGamesView, status) => c.html(renderFindGamesPage(c.get('user'), data, view), status),
         view: (e): FindGamesView => ({ error: e.message }),
+        statusOf: statusForGameError,
+      },
+      error,
+    );
+  };
+
+  /** A refused game command on the game screen is reported there, re-read fresh. */
+  const gameViewError = (c: Context<{ Variables: Variables }>, error: GameError): Response => {
+    const id = paramId(c, 'id', 'That game no longer exists.');
+    if (id.isErr()) {
+      return c.html(renderShell('Not found', renderNotFoundPage(), { user: c.get('user') }), 404);
+    }
+    return pageError(
+      c,
+      c.get('user'),
+      {
+        name: 'game view',
+        reload: () => games.getGame(c.get('user'), id.value),
+        render: (data, view: GameViewPageView, status) => c.html(renderGamePage(c.get('user'), data, view), status),
+        view: (e): GameViewPageView => ({ error: e.message }),
         statusOf: statusForGameError,
       },
       error,
@@ -398,6 +421,51 @@ export function createApp(deps: AppDeps): App {
       ),
     onOk: (c) => c.redirect('/games', 303),
     renderError: (c, e) => myGamesError(c, e),
+  }));
+
+  app.get('/games/:id', requireUser, (c) => {
+    const actor = c.get('user');
+    const id = paramId(c, 'id', 'That game no longer exists.');
+    if (id.isErr()) {
+      return c.html(renderShell('Not found', renderNotFoundPage(), { user: actor }), 404);
+    }
+    return pageAction(c, actor, {
+      name: 'game view',
+      load: () => games.getGame(actor, id.value),
+      render: (view) => c.html(renderGamePage(actor, view)),
+      renderError: (e, status) => c.html(renderShell('Not found', renderNotFoundPage(), { user: actor }), status),
+      statusOf: statusForGameError,
+    });
+  });
+
+  app.post('/games/:id/move', requireUser, formAction({
+    fields: ['move'],
+    run: (c, f) =>
+      paramId(c, 'id', 'That game no longer exists.').andThen((id) =>
+        games.applyGame(c.get('user'), { type: 'playMove', gameId: id, move: f.move ?? '' }),
+      ),
+    onOk: (c) => c.redirect(`/games/${c.req.param('id')}`, 303),
+    renderError: (c, e) => gameViewError(c, e),
+  }));
+
+  app.post('/games/:id/resign', requireUser, formAction({
+    fields: [],
+    run: (c) =>
+      paramId(c, 'id', 'That game no longer exists.').andThen((id) =>
+        games.applyGame(c.get('user'), { type: 'resign', gameId: id }),
+      ),
+    onOk: (c) => c.redirect(`/games/${c.req.param('id')}`, 303),
+    renderError: (c, e) => gameViewError(c, e),
+  }));
+
+  app.post('/games/:id/draw', requireUser, formAction({
+    fields: [],
+    run: (c) =>
+      paramId(c, 'id', 'That game no longer exists.').andThen((id) =>
+        games.applyGame(c.get('user'), { type: 'mutualDraw', gameId: id }),
+      ),
+    onOk: (c) => c.redirect(`/games/${c.req.param('id')}`, 303),
+    renderError: (c, e) => gameViewError(c, e),
   }));
 
   app.get('/admin', requireUser, (c) => c.redirect('/admin/users', 303));

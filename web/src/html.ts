@@ -165,6 +165,8 @@ export function siteCss(): string {
 
 *, *::before, *::after { box-sizing: border-box; }
 
+[x-cloak] { display: none; }
+
 html { color-scheme: light; }
 
 body {
@@ -307,6 +309,82 @@ p { margin: 0 0 1rem; }
 }
 
 .crumbs a { color: var(--slate-mid); }
+
+/* ---------- the board ---------- */
+
+.board {
+  display: grid;
+  gap: 2px;
+  width: fit-content;
+  margin: 0 0 1.5rem;
+}
+
+.cell {
+  position: relative;
+  width: 2.75rem;
+  height: 2.75rem;
+  border: 1px solid var(--rule);
+  background: var(--panel);
+  color: var(--slate);
+  font-family: var(--record);
+  font-size: 1.25rem;
+  line-height: 1;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  overflow: visible;
+}
+
+.cell:hover { border-color: var(--stone); }
+
+.cell.is-source { outline: 2px solid var(--stone); outline-offset: -2px; }
+
+.cell-height {
+  position: absolute;
+  top: 1px;
+  right: 3px;
+  font-size: 0.6rem;
+  color: var(--slate-mid);
+}
+
+/* The hover stack: a vertical column of glyphs, top stone first. */
+.stack-tip {
+  position: absolute;
+  bottom: calc(100% + 3px);
+  left: 50%;
+  transform: translateX(-50%);
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  padding: 4px 6px;
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  box-shadow: 0 1px 5px rgba(22, 35, 43, 0.25);
+  font-family: var(--record);
+  font-size: 0.8125rem;
+  line-height: 1.15;
+  z-index: 10;
+}
+
+.cell:hover .stack-tip {
+  display: flex;
+}
+
+.axis {
+  font-family: var(--record);
+  font-size: 0.6875rem;
+  color: var(--slate-mid);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.moves { padding-left: 1.5rem; margin: 0; }
+.moves li { padding: 0.125rem 0; }
 
 /* ---------- the record: notation set as the artifact it is ---------- */
 
