@@ -70,7 +70,10 @@ export function statusForGameError(error: GameError): ContentfulStatusCode {
   switch (error.code) {
     case 'persistence':
       return 500;
+    // `not-invited` is a visible game that simply designates someone else;
+    // a game the actor may not see is reported as `not-found` instead.
     case 'forbidden':
+    case 'not-invited':
       return 403;
     case 'not-found':
       return 404;

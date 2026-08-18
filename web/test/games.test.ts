@@ -487,3 +487,323 @@ describe('games: listMyGames', () => {
     });
   });
 });
+
+describe('games: join', () => {
+  function propose(
+    h: Harness,
+    actor: SessionUser,
+    extra: { joinType?: string; invitedDisplayName?: string; ptn?: string; boardSize?: number } = {},
+  ): number {
+    const r = h.games.applyGame(actor, {
+      type: 'propose',
+      boardSize: extra.boardSize ?? 5,
+      joinType: extra.joinType ?? 'open',
+      invitedDisplayName: extra.invitedDisplayName,
+      ptn: extra.ptn,
+    });
+    return (r._unsafeUnwrap() as { gameId: number }).gameId;
+  }
+
+  it('lets a player join an open game, starting play', () => {
+    const h = harness();
+    const gameId = propose(h, h.aoife);
+
+    const result = h.games.applyGame(h.takashi, { type: 'join', gameId });
+
+    expect(result._unsafeUnwrap()).toMatchObject({ type: 'join', gameId });
+    expect(h.persistence.findGameById(gameId)._unsafeUnwrap()).toMatchObject({
+      state: 'in_play',
+      opponentId: 2,
+    });
+  });
+
+  it('starts an open game already shared, because joining implies sharing', () => {
+    const h = harness();
+    const gameId = propose(h, h.aoife);
+
+    h.games.applyGame(h.takashi, { type: 'join', gameId });
+
+    expect(h.persistence.findGameById(gameId)._unsafeUnwrap()).toMatchObject({
+      proposerShared: true,
+      opponentShared: true,
+    });
+  });
+
+  it('keeps an invited game private to its two players', () => {
+    const h = harness();
+    const gameId = propose(h, h.aoife, { joinType: 'invited', invitedDisplayName: 'Takashi Mori' });
+
+    h.games.applyGame(h.takashi, { type: 'join', gameId });
+
+    expect(h.persistence.findGameById(gameId)._unsafeUnwrap()).toMatchObject({
+      state: 'in_play',
+      proposerShared: false,
+      opponentShared: false,
+    });
+  });
+
+  it('lets the designated player join an invited game', () => {
+    const h = harness();
+    const gameId = propose(h, h.aoife, { joinType: 'invited', invitedDisplayName: 'Takashi Mori' });
+
+    expect(h.games.applyGame(h.takashi, { type: 'join', gameId }).isOk()).toBe(true);
+  });
+
+  it('refuses a player the invited game does not name', () => {
+    const h = harness();
+    insertUser(h.db, { id: 4, username: 'wren', displayName: 'Wren Alvarez' });
+    const wren: SessionUser = {
+      id: 4, username: 'wren', displayName: 'Wren Alvarez', role: 'player',
+      forcePasswordChange: false, blocked: false,
+    };
+    const gameId = propose(h, h.aoife, { joinType: 'invited', invitedDisplayName: 'Takashi Mori' });
+
+    // Wren cannot even see it, so it must read as absent rather than refused.
+    expect(h.games.applyGame(wren, { type: 'join', gameId })._unsafeUnwrapErr().code).toBe('not-found');
+    expect(h.persistence.findGameById(gameId)._unsafeUnwrap()?.opponentId).toBeNull();
+  });
+
+  it('refuses the proposer of a game invited to someone else', () => {
+    const h = harness();
+    const gameId = propose(h, h.aoife, { joinType: 'invited', invitedDisplayName: 'Takashi Mori' });
+
+    // Aoife can see her own proposal, so this is a refusal, not a disappearance.
+    expect(h.games.applyGame(h.aoife, { type: 'join', gameId })._unsafeUnwrapErr().code).toBe('not-invited');
+  });
+
+  it('lets a player join their own open game, for study', () => {
+    const h = harness();
+    const gameId = propose(h, h.aoife);
+
+    expect(h.games.applyGame(h.aoife, { type: 'join', gameId }).isOk()).toBe(true);
+    expect(h.persistence.findGameById(gameId)._unsafeUnwrap()).toMatchObject({
+      proposerId: 1,
+      opponentId: 1,
+      state: 'in_play',
+    });
+  });
+
+  it('lets a player join a game they invited themselves to', () => {
+    const h = harness();
+    const gameId = propose(h, h.aoife, { joinType: 'invited', invitedDisplayName: 'Aoife Nolan' });
+
+    expect(h.games.applyGame(h.aoife, { type: 'join', gameId }).isOk()).toBe(true);
+  });
+
+  it('cannot be joined twice', () => {
+    const h = harness();
+    const gameId = propose(h, h.aoife);
+    h.games.applyGame(h.takashi, { type: 'join', gameId });
+
+    insertUser(h.db, { id: 4, username: 'wren', displayName: 'Wren Alvarez' });
+    const wren: SessionUser = {
+      id: 4, username: 'wren', displayName: 'Wren Alvarez', role: 'player',
+      forcePasswordChange: false, blocked: false,
+    };
+    const second = h.games.applyGame(wren, { type: 'join', gameId });
+
+    expect(second._unsafeUnwrapErr().code).toBe('not-proposed');
+    expect(h.persistence.findGameById(gameId)._unsafeUnwrap()?.opponentId).toBe(2);
+  });
+
+  it('refuses an admin account', () => {
+    const h = harness();
+    const gameId = propose(h, h.aoife);
+
+    expect(h.games.applyGame(h.root, { type: 'join', gameId })._unsafeUnwrapErr().code).toBe('forbidden');
+  });
+
+  it('reports an unknown game as not found', () => {
+    const h = harness();
+
+    expect(h.games.applyGame(h.aoife, { type: 'join', gameId: 404 })._unsafeUnwrapErr().code).toBe('not-found');
+  });
+
+  it('decides what a stranger may see from the share toggles, not the join type', () => {
+    const h = harness();
+    insertUser(h.db, { id: 4, username: 'wren', displayName: 'Wren Alvarez' });
+    const wren: SessionUser = {
+      id: 4, username: 'wren', displayName: 'Wren Alvarez', role: 'player',
+      forcePasswordChange: false, blocked: false,
+    };
+    const gameId = propose(h, h.aoife, { joinType: 'invited', invitedDisplayName: 'Takashi Mori' });
+
+    // Private by default (ADR-0003): a stranger cannot tell it exists.
+    expect(h.games.applyGame(wren, { type: 'join', gameId })._unsafeUnwrapErr().code).toBe('not-found');
+
+    // Turning both toggles on makes it visible, so the refusal becomes honest.
+    // This is what ticket 13 will do, and it must not need a change here.
+    h.db.prepare('UPDATE games SET proposer_shared = 1, opponent_shared = 1 WHERE id = ?').run(gameId);
+    expect(h.games.applyGame(wren, { type: 'join', gameId })._unsafeUnwrapErr().code).toBe('not-invited');
+  });
+
+  it('writes a game-joined trail event, and none when refused', () => {
+    const h = harness();
+    const gameId = propose(h, h.aoife);
+
+    h.games.applyGame(h.takashi, { type: 'join', gameId });
+    expect(trailEvents(h.db)).toEqual(['game-proposed', 'game-joined']);
+
+    h.games.applyGame(h.takashi, { type: 'join', gameId });
+    expect(trailEvents(h.db)).toEqual(['game-proposed', 'game-joined']);
+  });
+
+  describe('the first player to move', () => {
+    it('is the proposer on an empty board', () => {
+      const h = harness();
+      const gameId = propose(h, h.aoife);
+      h.games.applyGame(h.takashi, { type: 'join', gameId });
+
+      const game = h.games.listMyGames(h.aoife)._unsafeUnwrap()[0];
+      expect(game?.toMove).toEqual({ id: 1, displayName: 'Aoife Nolan' });
+    });
+
+    it('follows the imported record when the history is odd', () => {
+      const h = harness();
+      // Three half-moves played, so it is player 2's turn — the opponent.
+      const gameId = propose(h, h.aoife, { ptn: '[Size "5"]\n1. a1 e5\n2. c3' });
+      h.games.applyGame(h.takashi, { type: 'join', gameId });
+
+      const game = h.games.listMyGames(h.aoife)._unsafeUnwrap()[0];
+      expect(game?.toMove).toEqual({ id: 2, displayName: 'Takashi Mori' });
+    });
+
+    it('is nobody while the game is still a proposal', () => {
+      const h = harness();
+      propose(h, h.aoife);
+
+      expect(h.games.listMyGames(h.aoife)._unsafeUnwrap()[0]?.toMove).toBeNull();
+    });
+  });
+});
+
+describe('games: searchProposed', () => {
+  function propose(
+    h: Harness,
+    actor: SessionUser,
+    extra: { joinType?: string; invitedDisplayName?: string; boardSize?: number } = {},
+  ): number {
+    const r = h.games.applyGame(actor, {
+      type: 'propose',
+      boardSize: extra.boardSize ?? 5,
+      joinType: extra.joinType ?? 'open',
+      invitedDisplayName: extra.invitedDisplayName,
+    });
+    return (r._unsafeUnwrap() as { gameId: number }).gameId;
+  }
+
+  it('lists open proposals, including the searcher’s own', () => {
+    const h = harness();
+    const mine = propose(h, h.aoife);
+    const theirs = propose(h, h.takashi);
+
+    const found = h.games.searchProposed(h.aoife)._unsafeUnwrap();
+
+    expect(found.map((g) => g.id).sort()).toEqual([mine, theirs].sort());
+    expect(found.every((g) => g.canJoin)).toBe(true);
+  });
+
+  it('shows an invited game only to the player it names', () => {
+    const h = harness();
+    insertUser(h.db, { id: 4, username: 'wren', displayName: 'Wren Alvarez' });
+    const wren: SessionUser = {
+      id: 4, username: 'wren', displayName: 'Wren Alvarez', role: 'player',
+      forcePasswordChange: false, blocked: false,
+    };
+    const invited = propose(h, h.aoife, { joinType: 'invited', invitedDisplayName: 'Takashi Mori' });
+
+    expect(h.games.searchProposed(h.takashi)._unsafeUnwrap().map((g) => g.id)).toContain(invited);
+    // A stranger must not see it, and neither must the proposer: this page is
+    // for games you can take up, and Aoife's own invitation is not one.
+    expect(h.games.searchProposed(wren)._unsafeUnwrap().map((g) => g.id)).not.toContain(invited);
+    expect(h.games.searchProposed(h.aoife)._unsafeUnwrap().map((g) => g.id)).not.toContain(invited);
+  });
+
+  it('offers everything it lists as joinable', () => {
+    const h = harness();
+    propose(h, h.aoife);
+    propose(h, h.aoife, { joinType: 'invited', invitedDisplayName: 'Takashi Mori' });
+
+    const found = h.games.searchProposed(h.takashi)._unsafeUnwrap();
+
+    expect(found).toHaveLength(2);
+    expect(found.every((g) => g.canJoin)).toBe(true);
+  });
+
+  it('omits games that have been joined', () => {
+    const h = harness();
+    const gameId = propose(h, h.aoife);
+    h.games.applyGame(h.takashi, { type: 'join', gameId });
+
+    expect(h.games.searchProposed(h.aoife)._unsafeUnwrap()).toEqual([]);
+  });
+
+  it('filters by board size', () => {
+    const h = harness();
+    propose(h, h.aoife, { boardSize: 5 });
+    const six = propose(h, h.aoife, { boardSize: 6 });
+
+    const found = h.games.searchProposed(h.takashi, { boardSize: 6 })._unsafeUnwrap();
+
+    expect(found.map((g) => g.id)).toEqual([six]);
+  });
+
+  it('filters by join type', () => {
+    const h = harness();
+    const open = propose(h, h.aoife);
+    propose(h, h.aoife, { joinType: 'invited', invitedDisplayName: 'Takashi Mori' });
+
+    const found = h.games.searchProposed(h.takashi, { joinType: 'open' })._unsafeUnwrap();
+
+    expect(found.map((g) => g.id)).toEqual([open]);
+  });
+
+  it('filters by part of the proposer’s display name, ignoring case', () => {
+    const h = harness();
+    const aoifes = propose(h, h.aoife);
+    propose(h, h.takashi);
+
+    const found = h.games.searchProposed(h.takashi, { proposerDisplayName: 'nolan' })._unsafeUnwrap();
+
+    expect(found.map((g) => g.id)).toEqual([aoifes]);
+  });
+
+  it('treats a blank name filter as no filter', () => {
+    const h = harness();
+    propose(h, h.aoife);
+    propose(h, h.takashi);
+
+    expect(h.games.searchProposed(h.takashi, { proposerDisplayName: '  ' })._unsafeUnwrap()).toHaveLength(2);
+  });
+
+  it('matches a name containing LIKE wildcards literally', () => {
+    const h = harness();
+    insertUser(h.db, { id: 4, username: 'pct', displayName: '100% Tak' });
+    const odd: SessionUser = {
+      id: 4, username: 'pct', displayName: '100% Tak', role: 'player',
+      forcePasswordChange: false, blocked: false,
+    };
+    const oddGame = propose(h, odd);
+    propose(h, h.aoife);
+
+    expect(h.games.searchProposed(h.aoife, { proposerDisplayName: '0% T' })._unsafeUnwrap().map((g) => g.id))
+      .toEqual([oddGame]);
+    // A bare '%' is a literal percent sign, not "match everything": it finds
+    // the one name that contains one, and not Aoife's.
+    expect(h.games.searchProposed(h.aoife, { proposerDisplayName: '%' })._unsafeUnwrap().map((g) => g.id))
+      .toEqual([oddGame]);
+  });
+
+  it('rejects a nonsense filter rather than ignoring it', () => {
+    const h = harness();
+
+    expect(h.games.searchProposed(h.aoife, { boardSize: 7 })._unsafeUnwrapErr().code).toBe('invalid-board-size');
+    expect(h.games.searchProposed(h.aoife, { joinType: 'secret' })._unsafeUnwrapErr().code).toBe('invalid-join-type');
+  });
+
+  it('refuses an admin account', () => {
+    const h = harness();
+
+    expect(h.games.searchProposed(h.root)._unsafeUnwrapErr().code).toBe('forbidden');
+  });
+});

@@ -46,8 +46,10 @@ describe('runMigrations', () => {
 
     expect(runMigrations(db).isOk()).toBe(true);
 
-    expect(versions(db)).toEqual([1, 2]);
-    expect(columns(db, 'games')).toContain('imported_ptn');
+    expect(versions(db)).toEqual([1, 2, 3]);
+    expect(columns(db, 'games')).toEqual(
+      expect.arrayContaining(['imported_ptn', 'proposer_shared', 'opponent_shared']),
+    );
   });
 
   it('is idempotent: re-running applies nothing', () => {
@@ -57,7 +59,7 @@ describe('runMigrations', () => {
 
     expect(runMigrations(db).isOk()).toBe(true);
 
-    expect(versions(db)).toEqual([1, 2]);
+    expect(versions(db)).toEqual([1, 2, 3]);
   });
 
   it('upgrades an existing database without disturbing its rows', () => {
@@ -66,13 +68,22 @@ describe('runMigrations', () => {
 
     expect(runMigrations(db).isOk()).toBe(true);
 
-    expect(versions(db)).toEqual([1, 2]);
-    // The existing game survives and simply has no imported record.
-    expect(db.prepare('SELECT id, board_size, proposer_id, imported_ptn FROM games').get()).toEqual({
+    expect(versions(db)).toEqual([1, 2, 3]);
+    // The existing game survives, gaining an empty record and both share
+    // toggles off — the private default, never a silent opening-up.
+    expect(
+      db
+        .prepare(
+          'SELECT id, board_size, proposer_id, imported_ptn, proposer_shared, opponent_shared FROM games',
+        )
+        .get(),
+    ).toEqual({
       id: 7,
       board_size: 6,
       proposer_id: 3,
       imported_ptn: null,
+      proposer_shared: 0,
+      opponent_shared: 0,
     });
   });
 });

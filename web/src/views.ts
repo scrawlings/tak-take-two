@@ -259,6 +259,22 @@ function opponentCell(game: GameSummary): string {
   return '<span class="dim">waiting for anyone</span>';
 }
 
+/** Which list a game action was taken from, so a refusal returns there. */
+export type GameListPage = 'games' | 'find';
+
+/** The actions a viewer may take on a game, as the module decided them. */
+function gameActions(game: GameSummary, from: GameListPage): string {
+  const buttons = [
+    game.canJoin
+      ? `<form method="post" action="/games/${game.id}/join"><input type="hidden" name="from" value="${from}"><button type="submit" class="btn btn-sm">Join</button></form>`
+      : '',
+    game.canDelete
+      ? `<form method="post" action="/games/${game.id}/delete"><button type="submit" class="btn btn-danger btn-sm">Delete</button></form>`
+      : '',
+  ].filter(Boolean);
+  return `<div class="row-actions">${buttons.join('')}</div>`;
+}
+
 export function renderMyGamesPage(
   user: SessionUser,
   games: readonly GameSummary[],
@@ -270,18 +286,16 @@ export function renderMyGamesPage(
   const joinSelected = (kind: string): string => (submitted.joinType === kind ? ' selected' : '');
 
   const rows = games
-    .map((game) => {
-      const del = game.canDelete
-        ? `<form method="post" action="/games/${game.id}/delete"><button type="submit" class="btn btn-danger btn-sm">Delete</button></form>`
-        : '';
-      return `<tr>
+    .map(
+      (game) => `<tr>
   <td class="num">${game.boardSize}×${game.boardSize}</td>
   <td>${gameStatusTag(game)}</td>
   <td>${opponentCell(game)}</td>
+  <td>${game.toMove === null ? '<span class="dim">—</span>' : escapeHtml(game.toMove.displayName)}</td>
   <td>${game.imported ? '<span class="tag">imported</span>' : '<span class="dim">empty board</span>'}</td>
-  <td><div class="row-actions">${del}</div></td>
-</tr>`;
-    })
+  <td>${gameActions(game, 'games')}</td>
+</tr>`,
+    )
     .join('');
 
   const table =
@@ -289,7 +303,7 @@ export function renderMyGamesPage(
       ? `<p class="lede">No games yet. Propose one below and it will appear here.</p>`
       : `<div class="table-scroll">
     <table class="data">
-      <thead><tr><th>Board</th><th>State</th><th>Opponent</th><th>Started from</th><th>Actions</th></tr></thead>
+      <thead><tr><th>Board</th><th>State</th><th>Opponent</th><th>To move</th><th>Started from</th><th>Actions</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
   </div>`;
@@ -340,6 +354,102 @@ ${error}
   </form>
 </div>`;
   return renderShell('Your games', body, { user, path: '/games' });
+}
+
+/**
+ * Who a proposal is for. The find page lists only proposals the viewer can
+ * join, so an invited one here is always addressed to them.
+ */
+function proposalKind(game: GameSummary): string {
+  return game.joinType === 'open'
+    ? '<span class="tag">open to anyone</span>'
+    : '<span class="tag">invited to you</span>';
+}
+
+export interface FindGamesView {
+  error?: string;
+  /** The filters as submitted, so the form comes back the way it was left. */
+  filters?: {
+    boardSize?: string | null;
+    joinType?: string | null;
+    proposerDisplayName?: string | null;
+  };
+}
+
+export function renderFindGamesPage(
+  user: SessionUser,
+  games: readonly GameSummary[],
+  view: FindGamesView = {},
+): string {
+  const error = view.error ? `<p class="error">${escapeHtml(view.error)}</p>` : '';
+  const filters = view.filters ?? {};
+  const filtered = Boolean(filters.boardSize || filters.joinType || filters.proposerDisplayName);
+  const selected = (value: string | null | undefined, option: string): string =>
+    value === option ? ' selected' : '';
+
+  const rows = games
+    .map(
+      (game) => `<tr>
+  <td class="num">${game.boardSize}×${game.boardSize}</td>
+  <td>${proposalKind(game)}</td>
+  <td>${escapeHtml(game.proposer.displayName)}</td>
+  <td>${game.imported ? '<span class="tag">imported</span>' : '<span class="dim">empty board</span>'}</td>
+  <td>${gameActions(game, 'find')}</td>
+</tr>`,
+    )
+    .join('');
+
+  const results =
+    games.length === 0
+      ? `<p class="lede">${
+          filtered
+            ? 'No proposals match those filters. Try widening them.'
+            : 'Nobody is waiting for an opponent right now. Propose a game and someone can join it.'
+        }</p>`
+      : `<div class="table-scroll">
+    <table class="data">
+      <thead><tr><th>Board</th><th>Kind</th><th>Proposed by</th><th>Started from</th><th>Actions</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  </div>`;
+
+  const body = `
+<h1>Find a game</h1>
+<p class="lede">Games you can take up: every open proposal, plus any invitation addressed to you. Invitations to other players stay private.</p>
+${error}
+<form class="panel" method="get" action="/games/find">
+  <div class="field-grid">
+    <div class="field">
+      <label for="board_size">Board</label>
+      <select id="board_size" name="board_size">
+        <option value=""${selected(filters.boardSize, '')}>any</option>
+        <option value="5"${selected(filters.boardSize, '5')}>5×5</option>
+        <option value="6"${selected(filters.boardSize, '6')}>6×6</option>
+      </select>
+    </div>
+    <div class="field">
+      <label for="join_type">Kind</label>
+      <select id="join_type" name="join_type">
+        <option value=""${selected(filters.joinType, '')}>any</option>
+        <option value="open"${selected(filters.joinType, 'open')}>open to anyone</option>
+        <option value="invited"${selected(filters.joinType, 'invited')}>invitations to me</option>
+      </select>
+    </div>
+  </div>
+  <div class="field">
+    <label for="proposer">Proposed by</label>
+    <input id="proposer" name="proposer" autocomplete="off" value="${escapeHtml(filters.proposerDisplayName ?? '')}" placeholder="any part of a display name">
+  </div>
+  <p class="actions">
+    <button type="submit" class="btn">Search</button>
+    ${filtered ? '<a class="btn btn-quiet" href="/games/find">Clear</a>' : ''}
+  </p>
+</form>
+<div class="block">
+  <h2>${filtered ? 'Matching proposals' : 'Waiting for an opponent'}</h2>
+  ${results}
+</div>`;
+  return renderShell('Find a game', body, { user, path: '/games/find' });
 }
 
 export function renderResetPasswordResult(actor: SessionUser, username: string, password: string): string {

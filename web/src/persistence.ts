@@ -71,6 +71,9 @@ export interface GameRecord {
   readonly invitedPlayerId: number | null;
   /** The PTN record this game was imported from, or null when proposed from scratch. */
   readonly importedPtn: string | null;
+  /** ADR-0003 share toggles; a game is viewable by non-participants iff both are on. */
+  readonly proposerShared: boolean;
+  readonly opponentShared: boolean;
   readonly result: string | null;
   readonly createdAt: string;
   readonly finishedAt: string | null;
@@ -83,6 +86,16 @@ export interface CreateGameInput {
   readonly proposerId: number;
   readonly invitedPlayerId?: number | null;
   readonly importedPtn?: string | null;
+  readonly proposerShared: boolean;
+  readonly opponentShared: boolean;
+}
+
+/** Column filters for browsing proposals. Visibility is the Game module's rule, not a filter. */
+export interface ProposedGameFilters {
+  readonly boardSize?: GameBoardSize;
+  readonly joinType?: JoinType;
+  /** Case-insensitive substring of the proposer's display name. */
+  readonly proposerDisplayName?: string;
 }
 
 /** Input for creating a user row. */
@@ -134,6 +147,14 @@ export interface Persistence {
    * `states`, newest first.
    */
   listGamesForUser(userId: number, states: readonly GameLifecycleState[]): Result<GameRecord[], string>;
+  /** Every game still `proposed` and unjoined, newest first, narrowed by `filters`. */
+  listProposedGames(filters: ProposedGameFilters): Result<GameRecord[], string>;
+  /**
+   * Claim a proposal as its opponent and start play. Returns false — changing
+   * nothing — when the game is no longer an unjoined proposal, so that two
+   * racing joins cannot both succeed.
+   */
+  joinGame(gameId: number, opponentId: number): Result<boolean, string>;
 
   /** Insert a session with a caller-chosen id (the auth module owns id generation). */
   createSession(userId: number, id: string): Result<SessionRecord, string>;
@@ -307,8 +328,9 @@ export function createPersistence(db: Db): Persistence {
       try {
         const info = db
           .prepare(
-            `INSERT INTO games (board_size, state, join_type, proposer_id, invited_player_id, imported_ptn)
-             VALUES (?, 'proposed', ?, ?, ?, ?)`,
+            `INSERT INTO games (board_size, state, join_type, proposer_id, invited_player_id, imported_ptn,
+                              proposer_shared, opponent_shared)
+             VALUES (?, 'proposed', ?, ?, ?, ?, ?, ?)`,
           )
           .run(
             input.boardSize,
@@ -316,6 +338,8 @@ export function createPersistence(db: Db): Persistence {
             input.proposerId,
             input.invitedPlayerId ?? null,
             input.importedPtn ?? null,
+            input.proposerShared ? 1 : 0,
+            input.opponentShared ? 1 : 0,
           );
         const row = db.prepare('SELECT * FROM games WHERE id = ?').get(info.lastInsertRowid) as
           | GameRow
@@ -362,6 +386,52 @@ export function createPersistence(db: Db): Persistence {
       }
     },
 
+    listProposedGames(filters: ProposedGameFilters): Result<GameRecord[], string> {
+      try {
+        const where = ["g.state = 'proposed'", 'g.opponent_id IS NULL'];
+        const params: Array<string | number> = [];
+        if (filters.boardSize !== undefined) {
+          where.push('g.board_size = ?');
+          params.push(filters.boardSize);
+        }
+        if (filters.joinType !== undefined) {
+          where.push('g.join_type = ?');
+          params.push(filters.joinType);
+        }
+        if (filters.proposerDisplayName !== undefined) {
+          // LIKE is case-insensitive for ASCII in SQLite by default. ESCAPE is
+          // required for the backslashes escapeLike adds to mean anything.
+          where.push("u.display_name LIKE ? ESCAPE '\\'");
+          params.push(`%${escapeLike(filters.proposerDisplayName)}%`);
+        }
+        const rows = db
+          .prepare(
+            `SELECT g.* FROM games g
+             JOIN users u ON u.id = g.proposer_id
+             WHERE ${where.join(' AND ')}
+             ORDER BY g.created_at DESC, g.id DESC`,
+          )
+          .all(...params) as GameRow[];
+        return ok(rows.map(mapGame));
+      } catch (e) {
+        return err(e instanceof Error ? e.message : String(e));
+      }
+    },
+
+    joinGame(gameId: number, opponentId: number): Result<boolean, string> {
+      try {
+        const info = db
+          .prepare(
+            `UPDATE games SET opponent_id = ?, state = 'in_play'
+             WHERE id = ? AND state = 'proposed' AND opponent_id IS NULL`,
+          )
+          .run(opponentId, gameId);
+        return ok(info.changes === 1);
+      } catch (e) {
+        return err(e instanceof Error ? e.message : String(e));
+      }
+    },
+
     createSession(userId: number, id: string): Result<SessionRecord, string> {
       try {
         db.prepare('INSERT INTO sessions (id, user_id) VALUES (?, ?)').run(id, userId);
@@ -400,6 +470,11 @@ export function createPersistence(db: Db): Persistence {
       }
     },
   };
+}
+
+/** Neutralise LIKE wildcards so a searched name is matched literally. */
+function escapeLike(value: string): string {
+  return value.replace(/[\\%_]/g, '\\$&');
 }
 
 function countTable(db: Db, table: string): number {
@@ -458,6 +533,8 @@ interface GameRow {
   opponent_id: number | null;
   invited_player_id: number | null;
   imported_ptn: string | null;
+  proposer_shared: number;
+  opponent_shared: number;
   result: string | null;
   created_at: string;
   finished_at: string | null;
@@ -473,6 +550,8 @@ function mapGame(row: GameRow): GameRecord {
     opponentId: row.opponent_id,
     invitedPlayerId: row.invited_player_id,
     importedPtn: row.imported_ptn,
+    proposerShared: row.proposer_shared !== 0,
+    opponentShared: row.opponent_shared !== 0,
     result: row.result,
     createdAt: row.created_at,
     finishedAt: row.finished_at,

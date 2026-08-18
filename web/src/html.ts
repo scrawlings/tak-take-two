@@ -42,15 +42,33 @@ function navItems(user: NavUser | undefined): NavItem[] {
   const items: NavItem[] =
     user.role === 'admin'
       ? [{ href: '/admin/users', label: 'Users' }]
-      : [{ href: '/games', label: 'Games' }];
+      : [
+          { href: '/games', label: 'Games' },
+          { href: '/games/find', label: 'Find' },
+        ];
   items.push({ href: '/account', label: 'Account' }, { href: '/status', label: 'Status' });
   return items;
 }
 
-/** A destination is current when it is the path itself or an ancestor of it. */
-function isCurrent(href: string, path: string | undefined): boolean {
-  if (!path) return false;
+/** A destination covers a path when it is the path itself or an ancestor of it. */
+function covers(href: string, path: string): boolean {
   return path === href || path.startsWith(`${href}/`);
+}
+
+/**
+ * The item to mark as current: the one covering the path most closely. Plain
+ * prefix matching would light up both `/games` and `/games/find` on the find
+ * page; the longest match is the honest answer.
+ */
+function currentHref(items: readonly NavItem[], path: string | undefined): string | null {
+  if (!path) return null;
+  let best: string | null = null;
+  for (const item of items) {
+    if (covers(item.href, path) && (best === null || item.href.length > best.length)) {
+      best = item.href;
+    }
+  }
+  return best;
 }
 
 function masthead(ctx: PageContext): string {
@@ -59,11 +77,13 @@ function masthead(ctx: PageContext): string {
   // only bounce back here would be a dead end. Show the way out instead.
   const gated = user?.forcePasswordChange === true;
 
+  const items = navItems(user);
+  const here = currentHref(items, path);
   const links = gated
     ? ''
-    : navItems(user)
+    : items
         .map((item) => {
-          const current = isCurrent(item.href, path);
+          const current = item.href === here;
           return `<a class="navlink${current ? ' is-current' : ''}" href="${item.href}"${
             current ? ' aria-current="page"' : ''
           }>${item.label}</a>`;

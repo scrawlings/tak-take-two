@@ -237,11 +237,191 @@ describe('games navigation', () => {
     const player = await signIn(app, 'aoife', 'a good password');
     const playerHtml = await (await app.request('/account', withCookie({}, player))).text();
     expect(playerHtml).toContain('href="/games"');
+    expect(playerHtml).toContain('href="/games/find"');
     expect(playerHtml).not.toContain('href="/admin/users"');
 
     const admin = await signIn(app, 'root', 'a good password');
     const adminHtml = await (await app.request('/account', withCookie({}, admin))).text();
     expect(adminHtml).toContain('href="/admin/users"');
     expect(adminHtml).not.toContain('href="/games"');
+  });
+});
+
+describe('GET /games/find', () => {
+  it('redirects a signed-out visitor to sign in', async () => {
+    const { app } = makeApp();
+    const res = await app.request('/games/find');
+    expect(res.status).toBe(303);
+    expect(res.headers.get('location')).toBe('/login');
+  });
+
+  it('shows another player’s open proposal', async () => {
+    const { app, db } = makeApp();
+    await insertUser(db, { id: 1, username: 'aoife', password: 'a good password', displayName: 'Aoife Nolan' });
+    await insertUser(db, { id: 2, username: 'takashi', password: 'a good password', displayName: 'Takashi Mori' });
+    const aoife = await signIn(app, 'aoife', 'a good password');
+    await app.request('/games', withCookie(form({ board_size: '6', join_type: 'open' }), aoife));
+
+    const takashi = await signIn(app, 'takashi', 'a good password');
+    const html = await (await app.request('/games/find', withCookie({}, takashi))).text();
+
+    expect(html).toContain('Aoife Nolan');
+    expect(html).toContain('6×6');
+    expect(html).toContain('action="/games/1/join"');
+  });
+
+  it('says so plainly when nothing is on offer', async () => {
+    const { app, session } = await playerApp();
+
+    const html = await (await app.request('/games/find', withCookie({}, session))).text();
+
+    expect(html).toContain('Nobody is waiting for an opponent');
+  });
+
+  it('narrows by the filters in the query string', async () => {
+    const { app, session } = await playerApp();
+    await app.request('/games', withCookie(form({ board_size: '5', join_type: 'open' }), session));
+    await app.request('/games', withCookie(form({ board_size: '6', join_type: 'open' }), session));
+
+    const html = await (await app.request('/games/find?board_size=6', withCookie({}, session))).text();
+
+    // The board filter itself lists both sizes, so assert on the results.
+    expect(html).toContain('action="/games/2/join"');
+    expect(html).not.toContain('action="/games/1/join"');
+    expect(html).toContain('Matching proposals');
+  });
+
+  it('treats blank filters as no filter at all', async () => {
+    const { app, session } = await playerApp();
+    await app.request('/games', withCookie(form({ board_size: '5', join_type: 'open' }), session));
+
+    const res = await app.request('/games/find?board_size=&join_type=&proposer=', withCookie({}, session));
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain('Waiting for an opponent');
+  });
+
+  it('keeps the form and explains when a filter is nonsense', async () => {
+    const { app, session } = await playerApp();
+
+    const res = await app.request('/games/find?board_size=7', withCookie({}, session));
+
+    expect(res.status).toBe(400);
+    const html = await res.text();
+    expect(html).toContain('Board size must be 5 or 6');
+    expect(html).toContain('action="/games/find"');
+  });
+
+  it('hides another player’s invitation entirely', async () => {
+    const { app, db } = makeApp();
+    await insertUser(db, { id: 1, username: 'aoife', password: 'a good password', displayName: 'Aoife Nolan' });
+    await insertUser(db, { id: 2, username: 'takashi', password: 'a good password', displayName: 'Takashi Mori' });
+    await insertUser(db, { id: 3, username: 'wren', password: 'a good password', displayName: 'Wren Alvarez' });
+    const aoife = await signIn(app, 'aoife', 'a good password');
+    await app.request(
+      '/games',
+      withCookie(form({ board_size: '5', join_type: 'invited', invited_display_name: 'Takashi Mori' }), aoife),
+    );
+
+    const wren = await signIn(app, 'wren', 'a good password');
+    expect(await (await app.request('/games/find', withCookie({}, wren))).text()).not.toContain('Aoife Nolan');
+
+    const takashi = await signIn(app, 'takashi', 'a good password');
+    expect(await (await app.request('/games/find', withCookie({}, takashi))).text()).toContain('Aoife Nolan');
+  });
+
+  it('refuses an admin account', async () => {
+    const { app, db } = makeApp();
+    await insertUser(db, { id: 1, username: 'root', password: 'a good password', role: 'admin' });
+    const session = await signIn(app, 'root', 'a good password');
+
+    expect((await app.request('/games/find', withCookie({}, session))).status).toBe(403);
+  });
+});
+
+describe('POST /games/:id/join', () => {
+  async function twoPlayers() {
+    const { app, db } = makeApp();
+    await insertUser(db, { id: 1, username: 'aoife', password: 'a good password', displayName: 'Aoife Nolan' });
+    await insertUser(db, { id: 2, username: 'takashi', password: 'a good password', displayName: 'Takashi Mori' });
+    const aoife = await signIn(app, 'aoife', 'a good password');
+    const takashi = await signIn(app, 'takashi', 'a good password');
+    return { app, db, aoife, takashi };
+  }
+
+  it('joins an open game and lands on the player’s games', async () => {
+    const { app, db, aoife, takashi } = await twoPlayers();
+    await app.request('/games', withCookie(form({ board_size: '5', join_type: 'open' }), aoife));
+
+    const res = await app.request('/games/1/join', withCookie({ method: 'POST' }, takashi));
+
+    expect(res.status).toBe(303);
+    expect(res.headers.get('location')).toBe('/games');
+    expect(db.prepare('SELECT state, opponent_id FROM games').get()).toEqual({
+      state: 'in_play',
+      opponent_id: 2,
+    });
+  });
+
+  it('reports a second join as a conflict', async () => {
+    const { app, db, aoife, takashi } = await twoPlayers();
+    await app.request('/games', withCookie(form({ board_size: '5', join_type: 'open' }), aoife));
+    await app.request('/games/1/join', withCookie({ method: 'POST' }, takashi));
+
+    const res = await app.request('/games/1/join', withCookie({ method: 'POST' }, aoife));
+
+    expect(res.status).toBe(409);
+    expect(db.prepare('SELECT opponent_id FROM games').get()).toEqual({ opponent_id: 2 });
+  });
+
+  it('treats an invitation to someone else as absent', async () => {
+    const { app, db } = makeApp();
+    await insertUser(db, { id: 1, username: 'aoife', password: 'a good password', displayName: 'Aoife Nolan' });
+    await insertUser(db, { id: 2, username: 'takashi', password: 'a good password', displayName: 'Takashi Mori' });
+    await insertUser(db, { id: 3, username: 'wren', password: 'a good password', displayName: 'Wren Alvarez' });
+    const aoife = await signIn(app, 'aoife', 'a good password');
+    await app.request(
+      '/games',
+      withCookie(form({ board_size: '5', join_type: 'invited', invited_display_name: 'Takashi Mori' }), aoife),
+    );
+
+    const wren = await signIn(app, 'wren', 'a good password');
+    const res = await app.request('/games/1/join', withCookie({ method: 'POST' }, wren));
+
+    expect(res.status).toBe(404);
+    expect(db.prepare('SELECT opponent_id FROM games').get()).toEqual({ opponent_id: null });
+  });
+
+  it('reports a refused join on the page the button was on', async () => {
+    const { app, aoife, takashi } = await twoPlayers();
+    await app.request('/games', withCookie(form({ board_size: '5', join_type: 'open' }), aoife));
+    await app.request('/games/1/join', withCookie({ method: 'POST' }, takashi));
+
+    const res = await app.request('/games/1/join', withCookie(form({ from: 'find' }), aoife));
+
+    expect(res.status).toBe(409);
+    const html = await res.text();
+    expect(html).toContain('Find a game');
+    expect(html).toContain('This game has already started');
+  });
+
+  it('reports an unknown game as not found', async () => {
+    const { app, takashi } = await twoPlayers();
+
+    expect((await app.request('/games/404/join', withCookie({ method: 'POST' }, takashi))).status).toBe(404);
+  });
+});
+
+describe('navigation between the two game lists', () => {
+  it('marks only the page you are on, not both /games and /games/find', async () => {
+    const { app, session } = await playerApp();
+
+    const find = await (await app.request('/games/find', withCookie({}, session))).text();
+    expect(find).toContain('href="/games/find" aria-current="page"');
+    expect(find).not.toContain('href="/games" aria-current="page"');
+
+    const mine = await (await app.request('/games', withCookie({}, session))).text();
+    expect(mine).toContain('href="/games" aria-current="page"');
+    expect(mine).not.toContain('href="/games/find" aria-current="page"');
   });
 });

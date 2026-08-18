@@ -155,12 +155,21 @@ describe('persistence', () => {
   });
 
   describe('games', () => {
+    /** An open proposal: ADR-0003 has open games start shared. */
+    const openGame = (proposerId: number, boardSize: 5 | 6 = 5) => ({
+      boardSize,
+      joinType: 'open' as const,
+      proposerId,
+      proposerShared: true,
+      opponentShared: true,
+    });
+
     it('creates a proposed open game and reads it back', () => {
       const db = makeDb();
       insertUser(db, 1, 'aoife');
       const p = createPersistence(db);
 
-      const created = p.createGame({ boardSize: 5, joinType: 'open', proposerId: 1 });
+      const created = p.createGame(openGame(1));
       expect(created.isOk()).toBe(true);
       const game = created._unsafeUnwrap();
       expect(game).toMatchObject({
@@ -189,6 +198,9 @@ describe('persistence', () => {
           proposerId: 1,
           invitedPlayerId: 2,
           importedPtn: '[Size "6"]\n1. a1 f6',
+          // ADR-0003: an invited game starts private.
+          proposerShared: false,
+          opponentShared: false,
         })
         ._unsafeUnwrap();
 
@@ -209,7 +221,7 @@ describe('persistence', () => {
       const db = makeDb();
       insertUser(db, 1, 'aoife');
       const p = createPersistence(db);
-      const game = p.createGame({ boardSize: 5, joinType: 'open', proposerId: 1 })._unsafeUnwrap();
+      const game = p.createGame(openGame(1))._unsafeUnwrap();
 
       expect(p.deleteGame(game.id).isOk()).toBe(true);
       expect(p.findGameById(game.id)._unsafeUnwrap()).toBeNull();
@@ -222,9 +234,9 @@ describe('persistence', () => {
       insertUser(db, 3, 'wren');
       const p = createPersistence(db);
 
-      const mine = p.createGame({ boardSize: 5, joinType: 'open', proposerId: 1 })._unsafeUnwrap();
-      const joined = p.createGame({ boardSize: 5, joinType: 'open', proposerId: 2 })._unsafeUnwrap();
-      const theirs = p.createGame({ boardSize: 5, joinType: 'open', proposerId: 3 })._unsafeUnwrap();
+      const mine = p.createGame(openGame(1))._unsafeUnwrap();
+      const joined = p.createGame(openGame(2))._unsafeUnwrap();
+      const theirs = p.createGame(openGame(3))._unsafeUnwrap();
       db.prepare("UPDATE games SET opponent_id = 1, state = 'in_play' WHERE id = ?").run(joined.id);
       db.prepare("UPDATE games SET state = 'finished' WHERE id = ?").run(theirs.id);
 
@@ -239,7 +251,7 @@ describe('persistence', () => {
       const db = makeDb();
       insertUser(db, 1, 'aoife');
       const p = createPersistence(db);
-      const game = p.createGame({ boardSize: 5, joinType: 'open', proposerId: 1 })._unsafeUnwrap();
+      const game = p.createGame(openGame(1))._unsafeUnwrap();
       db.prepare("UPDATE games SET state = 'finished' WHERE id = ?").run(game.id);
 
       expect(p.listGamesForUser(1, ['proposed', 'in_play'])._unsafeUnwrap()).toEqual([]);
@@ -252,7 +264,7 @@ describe('persistence', () => {
       insertUser(db, 1, 'aoife');
       const p = createPersistence(db);
       db.close();
-      expect(p.createGame({ boardSize: 5, joinType: 'open', proposerId: 1 }).isErr()).toBe(true);
+      expect(p.createGame(openGame(1)).isErr()).toBe(true);
       expect(p.findGameById(1).isErr()).toBe(true);
       expect(p.deleteGame(1).isErr()).toBe(true);
       expect(p.listGamesForUser(1, ['proposed']).isErr()).toBe(true);

@@ -69,6 +69,11 @@ const MIGRATIONS: readonly string[] = [
   // move to a user. The core aggregate makes the same split: `fromPtnText` loads
   // this text as `fixedMoves`, and moves played here replay on top.
   `ALTER TABLE games ADD COLUMN imported_ptn TEXT;`,
+  // ADR-0003: visibility is one share toggle per player, and a game is viewable
+  // by non-participants iff both are on. Both default off; proposing an open
+  // game turns them on, because joining an open game implies sharing.
+  `ALTER TABLE games ADD COLUMN proposer_shared INTEGER NOT NULL DEFAULT 0;
+   ALTER TABLE games ADD COLUMN opponent_shared INTEGER NOT NULL DEFAULT 0;`,
 ];
 
 export function openDatabase(path: string): Result<Db, string> {

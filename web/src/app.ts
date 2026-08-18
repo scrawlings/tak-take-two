@@ -18,6 +18,7 @@ import {
   renderChangeDisplayNamePage,
   renderChangePasswordPage,
   renderLoginPage,
+  renderFindGamesPage,
   renderMyGamesPage,
   renderResetPasswordResult,
   renderRoot,
@@ -307,7 +308,74 @@ export function createApp(deps: AppDeps): App {
     return myGamesPage(c, c.get('user'), { ...view, error: error.message }, statusForGameError(error));
   };
 
+  /**
+   * A refused join is reported on whichever list offered the button, so the
+   * player stays where they were and can pick another game. The form says which
+   * list that was; anything but the one known value falls back to their games.
+   */
+  const gameJoinError = (
+    c: Context<{ Variables: Variables }>,
+    error: GameError,
+    from: string | null | undefined,
+  ): Response => {
+    if (error.code === 'forbidden') return forbiddenPage(c);
+    if (from !== 'find') return gameFormError(c, error);
+
+    const actor = c.get('user');
+    const found = games.searchProposed(actor);
+    if (found.isErr()) {
+      logger.log('error', 'failed to search games', { error: found.error });
+      return c.json({ error: 'Internal Server Error' }, 500);
+    }
+    return c.html(
+      renderFindGamesPage(actor, found.value, { error: error.message }),
+      statusForGameError(error),
+    );
+  };
+
+  /** A query parameter, or undefined when absent or blank ("any"). */
+  const query = (c: Context<{ Variables: Variables }>, name: string): string | undefined => {
+    const value = c.req.query(name);
+    return value === undefined || value.trim() === '' ? undefined : value;
+  };
+
+  const findGamesPage = (
+    c: Context<{ Variables: Variables }>,
+    actor: SessionUser,
+    status: ContentfulStatusCode = 200,
+  ): Response => {
+    const boardSize = query(c, 'board_size');
+    const joinType = query(c, 'join_type');
+    const proposer = query(c, 'proposer');
+    const filters = {
+      boardSize: boardSize ?? null,
+      joinType: joinType ?? null,
+      proposerDisplayName: proposer ?? null,
+    };
+
+    const found = games.searchProposed(actor, {
+      boardSize: boardSize === undefined ? undefined : Number(boardSize),
+      joinType,
+      proposerDisplayName: proposer,
+    });
+    if (found.isErr()) {
+      if (found.error.code === 'forbidden') return forbiddenPage(c);
+      if (found.error.code === 'persistence') {
+        logger.log('error', 'failed to search games', { error: found.error });
+        return c.json({ error: 'Internal Server Error' }, 500);
+      }
+      // A bad filter is the user's to fix, so keep the form and say what is wrong.
+      return c.html(
+        renderFindGamesPage(actor, [], { error: found.error.message, filters }),
+        statusForGameError(found.error),
+      );
+    }
+    return c.html(renderFindGamesPage(actor, found.value, { filters }), status);
+  };
+
   app.get('/games', requireUser, (c) => myGamesPage(c, c.get('user')));
+
+  app.get('/games/find', requireUser, (c) => findGamesPage(c, c.get('user')));
 
   app.post('/games', requireUser, formAction({
     fields: ['board_size', 'join_type', 'invited_display_name', 'ptn'],
@@ -329,6 +397,17 @@ export function createApp(deps: AppDeps): App {
           ptn: f.ptn,
         },
       }),
+  }));
+
+  app.post('/games/:id/join', requireUser, formAction({
+    fields: ['from'],
+    run: (c) => {
+      const id = idFrom(c);
+      if (id === null) return err({ code: 'not-found' as const, message: 'That game no longer exists.' });
+      return games.applyGame(c.get('user'), { type: 'join', gameId: id });
+    },
+    onOk: (c) => c.redirect('/games', 303),
+    renderError: (c, e, f) => gameJoinError(c, e, f.from),
   }));
 
   app.post('/games/:id/delete', requireUser, formAction({
