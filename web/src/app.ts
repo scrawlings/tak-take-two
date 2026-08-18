@@ -19,6 +19,8 @@ import {
   renderLoginPage,
   renderResetPasswordResult,
   renderRoot,
+  renderStatusPageBody,
+  renderForbiddenPage,
 } from './views.js';
 
 export interface AppDeps {
@@ -51,14 +53,7 @@ function renderStatusPage(snapshot: PersistenceSnapshot, httpErrors: number): st
   const body = rows
     .map(([key, value]) => `<tr><td class="key">${escapeHtml(key)}</td><td class="num">${escapeHtml(value)}</td></tr>`)
     .join('');
-  return `<h1>Status</h1>
-<p class="lede">Live figures for this server. The same numbers are available to Prometheus at <span class="mono">/metrics</span>.</p>
-<div class="table-scroll">
-  <table class="data">
-    <thead><tr><th>Measure</th><th>Value</th></tr></thead>
-    <tbody>${body}</tbody>
-  </table>
-</div>`;
+  return renderStatusPageBody(body);
 }
 
 /** A form field coerced to a string, or null when absent/non-textual. */
@@ -137,11 +132,7 @@ export function createApp(deps: AppDeps): App {
     c.html(
       renderShell(
         'Forbidden',
-        `<div class="narrow">
-  <h1>Forbidden</h1>
-  <p class="lede">This page is for admins. Your account can't open it.</p>
-  <p class="actions"><a class="btn btn-quiet" href="/account">Go to your account</a></p>
-</div>`,
+        renderForbiddenPage(),
         { user: navUser(c) },
       ),
       403,

@@ -9,6 +9,26 @@ import type { SessionUser } from './auth.js';
 const ACCOUNT = { href: '/account', label: 'Account' };
 const USERS = { href: '/admin/users', label: 'Users' };
 
+
+export function renderStatusPageBody(body: string): string {
+    return `<h1>Status</h1>
+<p class="lede">Live figures for this server. The same numbers are available to Prometheus at <span class="mono">/metrics</span>.</p>
+<div class="table-scroll">
+  <table class="data">
+    <thead><tr><th>Measure</th><th>Value</th></tr></thead>
+    <tbody>${body}</tbody>
+  </table>
+</div>`;
+}
+
+export function renderForbiddenPage(): string {
+  return `<div class="narrow">
+  <h1>Forbidden</h1>
+  <p class="lede">This page is for admins. Your account can't open it.</p>
+  <p class="actions"><a class="btn btn-quiet" href="/account">Go to your account</a></p>
+</div>`;
+}
+
 export function renderRoot(user?: SessionUser): string {
   const action = user
     ? `<a class="btn" href="/account">Go to your account</a>`
