@@ -51,6 +51,40 @@ export interface SessionRecord {
   readonly createdAt: string;
 }
 
+/** Board edge length. Mirrors the core's `BoardSize` without depending on it. */
+export type GameBoardSize = 5 | 6;
+
+/** Lifecycle state of a game (CONTEXT.md: proposed → in play → finished). */
+export type GameLifecycleState = 'proposed' | 'in_play' | 'finished';
+
+/** Who may join a proposal: anyone, or one designated player (ADR-0003). */
+export type JoinType = 'open' | 'invited';
+
+/** A games-table row, mapped to domain shape. */
+export interface GameRecord {
+  readonly id: number;
+  readonly boardSize: GameBoardSize;
+  readonly state: GameLifecycleState;
+  readonly joinType: JoinType;
+  readonly proposerId: number;
+  readonly opponentId: number | null;
+  readonly invitedPlayerId: number | null;
+  /** The PTN record this game was imported from, or null when proposed from scratch. */
+  readonly importedPtn: string | null;
+  readonly result: string | null;
+  readonly createdAt: string;
+  readonly finishedAt: string | null;
+}
+
+/** Input for creating a game row. Games are always born `proposed`. */
+export interface CreateGameInput {
+  readonly boardSize: GameBoardSize;
+  readonly joinType: JoinType;
+  readonly proposerId: number;
+  readonly invitedPlayerId?: number | null;
+  readonly importedPtn?: string | null;
+}
+
 /** Input for creating a user row. */
 export interface CreateUserInput {
   readonly username: string;
@@ -90,6 +124,16 @@ export interface Persistence {
   updateUserDisplayName(id: number, displayName: string): Result<void, string>;
   setUserBlocked(id: number, blocked: boolean): Result<void, string>;
   setUserForcePasswordChange(id: number, force: boolean): Result<void, string>;
+
+  /** Insert a game in the `proposed` state. */
+  createGame(input: CreateGameInput): Result<GameRecord, string>;
+  findGameById(id: number): Result<GameRecord | null, string>;
+  deleteGame(id: number): Result<void, string>;
+  /**
+   * Games the user takes part in — as proposer or opponent — in any of
+   * `states`, newest first.
+   */
+  listGamesForUser(userId: number, states: readonly GameLifecycleState[]): Result<GameRecord[], string>;
 
   /** Insert a session with a caller-chosen id (the auth module owns id generation). */
   createSession(userId: number, id: string): Result<SessionRecord, string>;
@@ -259,6 +303,65 @@ export function createPersistence(db: Db): Persistence {
       }
     },
 
+    createGame(input: CreateGameInput): Result<GameRecord, string> {
+      try {
+        const info = db
+          .prepare(
+            `INSERT INTO games (board_size, state, join_type, proposer_id, invited_player_id, imported_ptn)
+             VALUES (?, 'proposed', ?, ?, ?, ?)`,
+          )
+          .run(
+            input.boardSize,
+            input.joinType,
+            input.proposerId,
+            input.invitedPlayerId ?? null,
+            input.importedPtn ?? null,
+          );
+        const row = db.prepare('SELECT * FROM games WHERE id = ?').get(info.lastInsertRowid) as
+          | GameRow
+          | undefined;
+        if (!row) return err('inserted game row not found');
+        return ok(mapGame(row));
+      } catch (e) {
+        return err(e instanceof Error ? e.message : String(e));
+      }
+    },
+
+    findGameById(id: number): Result<GameRecord | null, string> {
+      try {
+        const row = db.prepare('SELECT * FROM games WHERE id = ?').get(id) as GameRow | undefined;
+        return ok(row ? mapGame(row) : null);
+      } catch (e) {
+        return err(e instanceof Error ? e.message : String(e));
+      }
+    },
+
+    deleteGame(id: number): Result<void, string> {
+      try {
+        db.prepare('DELETE FROM games WHERE id = ?').run(id);
+        return ok(undefined);
+      } catch (e) {
+        return err(e instanceof Error ? e.message : String(e));
+      }
+    },
+
+    listGamesForUser(userId: number, states: readonly GameLifecycleState[]): Result<GameRecord[], string> {
+      if (states.length === 0) return ok([]);
+      try {
+        const placeholders = states.map(() => '?').join(', ');
+        const rows = db
+          .prepare(
+            `SELECT * FROM games
+             WHERE (proposer_id = ? OR opponent_id = ?) AND state IN (${placeholders})
+             ORDER BY created_at DESC, id DESC`,
+          )
+          .all(userId, userId, ...states) as GameRow[];
+        return ok(rows.map(mapGame));
+      } catch (e) {
+        return err(e instanceof Error ? e.message : String(e));
+      }
+    },
+
     createSession(userId: number, id: string): Result<SessionRecord, string> {
       try {
         db.prepare('INSERT INTO sessions (id, user_id) VALUES (?, ?)').run(id, userId);
@@ -344,6 +447,36 @@ interface SessionRow {
   id: string;
   user_id: number;
   created_at: string;
+}
+
+interface GameRow {
+  id: number;
+  board_size: number;
+  state: string;
+  join_type: string;
+  proposer_id: number;
+  opponent_id: number | null;
+  invited_player_id: number | null;
+  imported_ptn: string | null;
+  result: string | null;
+  created_at: string;
+  finished_at: string | null;
+}
+
+function mapGame(row: GameRow): GameRecord {
+  return {
+    id: row.id,
+    boardSize: row.board_size as GameBoardSize,
+    state: row.state as GameLifecycleState,
+    joinType: row.join_type as JoinType,
+    proposerId: row.proposer_id,
+    opponentId: row.opponent_id,
+    invitedPlayerId: row.invited_player_id,
+    importedPtn: row.imported_ptn,
+    result: row.result,
+    createdAt: row.created_at,
+    finishedAt: row.finished_at,
+  };
 }
 
 function mapUser(row: UserRow): UserRecord {

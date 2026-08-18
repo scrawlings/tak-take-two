@@ -38,9 +38,12 @@ function navItems(user: NavUser | undefined): NavItem[] {
       { href: '/status', label: 'Status' },
     ];
   }
-  const items: NavItem[] = [{ href: '/account', label: 'Account' }];
-  if (user.role === 'admin') items.push({ href: '/admin/users', label: 'Users' });
-  items.push({ href: '/status', label: 'Status' });
+  // Admins administer and never play (CONTEXT.md), so Games is a player's link.
+  const items: NavItem[] =
+    user.role === 'admin'
+      ? [{ href: '/admin/users', label: 'Users' }]
+      : [{ href: '/games', label: 'Games' }];
+  items.push({ href: '/account', label: 'Account' }, { href: '/status', label: 'Status' });
   return items;
 }
 
@@ -337,7 +340,7 @@ p { margin: 0 0 1rem; }
   margin-bottom: 0.375rem;
 }
 
-.field input, .field select {
+.field input, .field select, .field textarea {
   width: 100%;
   font-family: var(--record);
   font-size: 0.9375rem;
@@ -348,7 +351,17 @@ p { margin: 0 0 1rem; }
   padding: 0.5rem 0.625rem;
 }
 
-.field input:focus, .field select:focus {
+/* A pasted record is read as notation: leave it monospaced and unwrapped. */
+.field textarea {
+  display: block;
+  line-height: 1.5;
+  resize: vertical;
+  white-space: pre;
+  overflow-wrap: normal;
+  overflow-x: auto;
+}
+
+.field input:focus, .field select:focus, .field textarea:focus {
   outline: 2px solid var(--slate);
   outline-offset: 0;
   border-color: var(--slate);

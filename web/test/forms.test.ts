@@ -1,8 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import { Hono } from 'hono';
-import { err, ok } from 'neverthrow';
-import { createFormAction, statusForAuthError } from '../src/forms.js';
+import { err, ok, type Result } from 'neverthrow';
+import { createFormAction, statusForAuthError, statusForGameError } from '../src/forms.js';
 import type { AuthError } from '../src/auth.js';
+import type { GameError } from '../src/games.js';
 import type { Logger } from '../src/logging.js';
 
 const silent: Logger = { log() {} };
@@ -26,7 +27,7 @@ describe('createFormAction', () => {
       '/test',
       formAction({
         fields: ['a', 'b'],
-        run: async (c, f) => {
+        run: async (c, f): Promise<Result<string, AuthError>> => {
           received = f;
           return ok('done');
         },
@@ -48,7 +49,7 @@ describe('createFormAction', () => {
       '/test',
       formAction({
         fields: [],
-        run: async () => ok(42),
+        run: async (): Promise<Result<number, AuthError>> => ok(42),
         onOk: (c, r) => c.text(`ok:${r}`),
         renderError: (c, e) => c.text(`err:${e.code}`, 400),
       }),
@@ -121,5 +122,21 @@ describe('statusForAuthError', () => {
     expect(statusForAuthError(e('display-name-taken'))).toBe(400);
     expect(statusForAuthError(e('cannot-block-self'))).toBe(400);
     expect(statusForAuthError(e('username-taken'))).toBe(400);
+  });
+});
+
+describe('statusForGameError', () => {
+  it('maps every code to the right HTTP status', () => {
+    const e = (code: GameError['code']): GameError => ({ code, message: 'x' });
+    expect(statusForGameError(e('persistence'))).toBe(500);
+    expect(statusForGameError(e('forbidden'))).toBe(403);
+    expect(statusForGameError(e('not-found'))).toBe(404);
+    expect(statusForGameError(e('invalid-board-size'))).toBe(400);
+    expect(statusForGameError(e('invalid-join-type'))).toBe(400);
+    expect(statusForGameError(e('invalid-invite'))).toBe(400);
+    expect(statusForGameError(e('invalid-ptn'))).toBe(400);
+    // The request was fine; the game had moved on.
+    expect(statusForGameError(e('already-joined'))).toBe(409);
+    expect(statusForGameError(e('not-proposed'))).toBe(409);
   });
 });

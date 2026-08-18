@@ -63,6 +63,12 @@ const MIGRATIONS: readonly string[] = [
     result TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
   );`,
+  // A game proposed from a PTN import carries its record here. The moves are
+  // fixed (never undoable) and belong to no site account — the opponent has not
+  // joined yet — so they cannot live in game_records, whose rows attribute every
+  // move to a user. The core aggregate makes the same split: `fromPtnText` loads
+  // this text as `fixedMoves`, and moves played here replay on top.
+  `ALTER TABLE games ADD COLUMN imported_ptn TEXT;`,
 ];
 
 export function openDatabase(path: string): Result<Db, string> {

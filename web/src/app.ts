@@ -10,17 +10,20 @@ import type { Logger } from './logging.js';
 import { newRequestId } from './logging.js';
 import { escapeHtml, renderShell, siteCss } from './html.js';
 import { createAuth, type Auth, type AuthError, type SessionUser } from './auth.js';
-import { createFormAction, statusForAuthError } from './forms.js';
+import { createGames, type GameError, type Games } from './games.js';
+import { createFormAction, statusForAuthError, statusForGameError } from './forms.js';
 import {
   renderAccountPage,
   renderAdminUsersPage,
   renderChangeDisplayNamePage,
   renderChangePasswordPage,
   renderLoginPage,
+  renderMyGamesPage,
   renderResetPasswordResult,
   renderRoot,
   renderStatusPageBody,
   renderForbiddenPage,
+  type MyGamesView,
 } from './views.js';
 
 export interface AppDeps {
@@ -61,6 +64,7 @@ export function createApp(deps: AppDeps): App {
   const { persistence, metrics, logger } = deps;
   const secureCookies = deps.secureCookies ?? false;
   const auth: Auth = createAuth(persistence);
+  const games: Games = createGames(persistence);
   const app = new Hono<{ Variables: Variables }>();
 
   app.use('*', async (c, next) => {
@@ -161,7 +165,8 @@ export function createApp(deps: AppDeps): App {
 
   const formAction = createFormAction<{ Variables: Variables }>(logger);
 
-  const userIdFrom = (c: Context<{ Variables: Variables }>): number | null => {
+  /** The `:id` path parameter as a positive integer, or null when it is neither. */
+  const idFrom = (c: Context<{ Variables: Variables }>): number | null => {
     const id = Number(c.req.param('id'));
     return Number.isInteger(id) && id >= 1 ? id : null;
   };
@@ -276,6 +281,67 @@ export function createApp(deps: AppDeps): App {
       c.html(renderChangeDisplayNamePage(c.get('user'), { error: e.message }), statusForAuthError(e)),
   }));
 
+  /**
+   * The games list, optionally showing an error over the propose form with the
+   * submitted values put back. The list itself is always re-read: rendering a
+   * rejected proposal must not also stale the page around it.
+   */
+  const myGamesPage = (
+    c: Context<{ Variables: Variables }>,
+    actor: SessionUser,
+    view?: MyGamesView,
+    status: ContentfulStatusCode = 200,
+  ): Response => {
+    const list = games.listMyGames(actor);
+    if (list.isErr()) {
+      if (list.error.code === 'forbidden') return forbiddenPage(c);
+      logger.log('error', 'failed to list games', { error: list.error });
+      return c.json({ error: 'Internal Server Error' }, 500);
+    }
+    return c.html(renderMyGamesPage(actor, list.value, view), status);
+  };
+
+  /** Shared error rendering for game forms: forbidden → 403, else the list at the mapped status. */
+  const gameFormError = (c: Context<{ Variables: Variables }>, error: GameError, view?: MyGamesView): Response => {
+    if (error.code === 'forbidden') return forbiddenPage(c);
+    return myGamesPage(c, c.get('user'), { ...view, error: error.message }, statusForGameError(error));
+  };
+
+  app.get('/games', requireUser, (c) => myGamesPage(c, c.get('user')));
+
+  app.post('/games', requireUser, formAction({
+    fields: ['board_size', 'join_type', 'invited_display_name', 'ptn'],
+    run: (c, f) =>
+      games.applyGame(c.get('user'), {
+        type: 'propose',
+        boardSize: Number(f.board_size),
+        joinType: f.join_type ?? '',
+        invitedDisplayName: f.invited_display_name ?? undefined,
+        ptn: f.ptn ?? undefined,
+      }),
+    onOk: (c) => c.redirect('/games', 303),
+    renderError: (c, e, f) =>
+      gameFormError(c, e, {
+        submitted: {
+          boardSize: f.board_size,
+          joinType: f.join_type,
+          invitedDisplayName: f.invited_display_name,
+          ptn: f.ptn,
+        },
+      }),
+  }));
+
+  app.post('/games/:id/delete', requireUser, formAction({
+    fields: [],
+    run: (c) => {
+      const id = idFrom(c);
+      if (id === null) return err({ code: 'not-found' as const, message: 'That game no longer exists.' });
+      return games.applyGame(c.get('user'), { type: 'deleteProposal', gameId: id });
+    },
+    onOk: (c) => c.redirect('/games', 303),
+    renderError: (c, e) => gameFormError(c, e),
+  }));
+
   app.get('/admin', requireUser, (c) => c.redirect('/admin/users', 303));
 
   app.get('/admin/users', requireUser, (c) => {
@@ -306,7 +372,7 @@ export function createApp(deps: AppDeps): App {
   app.post('/admin/users/:id/block', requireUser, formAction({
     fields: [],
     run: (c) => {
-      const id = userIdFrom(c);
+      const id = idFrom(c);
       if (id === null) return Promise.resolve(err({ code: 'not-found', message: 'Unknown user.' }));
       return auth.applyAuth(c.get('user'), { type: 'blockUser', userId: id });
     },
@@ -317,7 +383,7 @@ export function createApp(deps: AppDeps): App {
   app.post('/admin/users/:id/unblock', requireUser, formAction({
     fields: [],
     run: (c) => {
-      const id = userIdFrom(c);
+      const id = idFrom(c);
       if (id === null) return Promise.resolve(err({ code: 'not-found', message: 'Unknown user.' }));
       return auth.applyAuth(c.get('user'), { type: 'unblockUser', userId: id });
     },
@@ -328,7 +394,7 @@ export function createApp(deps: AppDeps): App {
   app.post('/admin/users/:id/force-password-change', requireUser, formAction({
     fields: [],
     run: (c) => {
-      const id = userIdFrom(c);
+      const id = idFrom(c);
       if (id === null) return Promise.resolve(err({ code: 'not-found', message: 'Unknown user.' }));
       return auth.applyAuth(c.get('user'), { type: 'forcePasswordChange', userId: id });
     },
@@ -339,7 +405,7 @@ export function createApp(deps: AppDeps): App {
   app.post('/admin/users/:id/reset-password', requireUser, formAction({
     fields: [],
     run: (c) => {
-      const id = userIdFrom(c);
+      const id = idFrom(c);
       if (id === null) return Promise.resolve(err({ code: 'not-found', message: 'Unknown user.' }));
       return auth.applyAuth(c.get('user'), { type: 'resetPassword', userId: id });
     },

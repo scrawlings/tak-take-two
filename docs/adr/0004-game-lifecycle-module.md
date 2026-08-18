@@ -16,7 +16,9 @@ The module authorizes; routes authenticate.
 
 Commands form one exhaustive union passed to a single method, mirroring the core's `applyMove(state, move)`:
 
-- `applyGame(gameId, actorId, command): Result<GameCommandResult, GameError>` — `command` is `propose` | `deleteProposal` | `join` | `playMove` | `requestTakeBack` | `acceptTakeBack` | `rejectTakeBack` | `resign` | `mutualDraw` | `share` | `hide` | `adminDelete`.
+- `applyGame(actor, command): Result<GameCommandResult, GameError>` — `command` is `propose` | `deleteProposal` | `join` | `playMove` | `requestTakeBack` | `acceptTakeBack` | `rejectTakeBack` | `resign` | `mutualDraw` | `share` | `hide` | `adminDelete`.
+
+  This ADR was first written as `applyGame(gameId, actorId, command)`. Ticket 09 built the module and settled the signature, as "Notes for future work" below anticipated: `propose` has no game to address yet, so the target id rides inside the commands that have one, and `actor` is the full `SessionUser` so authorization needs no extra lookup. This is exactly the shape of `applyAuth(actor, command)` described under "Applies to the auth module too" — one command method, an exhaustive union, the actor passed separately, authorization inside the module.
 - Queries are a separate small surface (`getGame`, `searchProposed`, `listMyGames`), shaped by the tickets that name their views (09–11).
 - No event system: commands return a domain-shaped result, not an event log; real-time delivery (ticket 14) adapts at the routes.
 
@@ -34,6 +36,6 @@ The accounts-and-sessions module (`web/src/auth.ts`, tickets 07–08) initially 
 
 ## Notes for future work
 
-- The module is born with ticket 09 (propose + PTN import), its first consumer; the command result types take their final shape there, not before.
+- The module is born with ticket 09 (propose + PTN import), its first consumer; the command result types take their final shape there, not before. (Done: `web/src/games.ts`, carrying `propose` and `deleteProposal`. The `applyGame` signature settled there — see "Interface shape".)
 - Take-back request storage (exactly one pending per game) is a ticket-12 decision; the command surface already includes the protocol.
 - This ADR does not reopen ADR-0001: the game aggregate and PTN/TPS remain headless core code, serving the web layer and future batch programs alike.

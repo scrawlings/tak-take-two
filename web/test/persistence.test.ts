@@ -152,4 +152,109 @@ describe('persistence', () => {
       expect(p.appendActivityTrail({ event: 'sign-in' }).isErr()).toBe(true);
     });
   });
+
+  describe('games', () => {
+    it('creates a proposed open game and reads it back', () => {
+      const db = makeDb();
+      insertUser(db, 1, 'aoife');
+      const p = createPersistence(db);
+
+      const created = p.createGame({ boardSize: 5, joinType: 'open', proposerId: 1 });
+      expect(created.isOk()).toBe(true);
+      const game = created._unsafeUnwrap();
+      expect(game).toMatchObject({
+        boardSize: 5,
+        state: 'proposed',
+        joinType: 'open',
+        proposerId: 1,
+        opponentId: null,
+        invitedPlayerId: null,
+        importedPtn: null,
+      });
+
+      expect(p.findGameById(game.id)._unsafeUnwrap()).toEqual(game);
+    });
+
+    it('stores the invited player and the imported record', () => {
+      const db = makeDb();
+      insertUser(db, 1, 'aoife');
+      insertUser(db, 2, 'takashi');
+      const p = createPersistence(db);
+
+      const game = p
+        .createGame({
+          boardSize: 6,
+          joinType: 'invited',
+          proposerId: 1,
+          invitedPlayerId: 2,
+          importedPtn: '[Size "6"]\n1. a1 f6',
+        })
+        ._unsafeUnwrap();
+
+      expect(game).toMatchObject({
+        boardSize: 6,
+        joinType: 'invited',
+        invitedPlayerId: 2,
+        importedPtn: '[Size "6"]\n1. a1 f6',
+      });
+    });
+
+    it('returns null for an unknown game', () => {
+      const p = createPersistence(makeDb());
+      expect(p.findGameById(404)._unsafeUnwrap()).toBeNull();
+    });
+
+    it('deletes a game', () => {
+      const db = makeDb();
+      insertUser(db, 1, 'aoife');
+      const p = createPersistence(db);
+      const game = p.createGame({ boardSize: 5, joinType: 'open', proposerId: 1 })._unsafeUnwrap();
+
+      expect(p.deleteGame(game.id).isOk()).toBe(true);
+      expect(p.findGameById(game.id)._unsafeUnwrap()).toBeNull();
+    });
+
+    it('lists games the user proposed or joined, filtered by state', () => {
+      const db = makeDb();
+      insertUser(db, 1, 'aoife');
+      insertUser(db, 2, 'takashi');
+      insertUser(db, 3, 'wren');
+      const p = createPersistence(db);
+
+      const mine = p.createGame({ boardSize: 5, joinType: 'open', proposerId: 1 })._unsafeUnwrap();
+      const joined = p.createGame({ boardSize: 5, joinType: 'open', proposerId: 2 })._unsafeUnwrap();
+      const theirs = p.createGame({ boardSize: 5, joinType: 'open', proposerId: 3 })._unsafeUnwrap();
+      db.prepare("UPDATE games SET opponent_id = 1, state = 'in_play' WHERE id = ?").run(joined.id);
+      db.prepare("UPDATE games SET state = 'finished' WHERE id = ?").run(theirs.id);
+
+      const ids = p
+        .listGamesForUser(1, ['proposed', 'in_play'])
+        ._unsafeUnwrap()
+        .map((g) => g.id);
+      expect(ids.sort()).toEqual([mine.id, joined.id].sort());
+    });
+
+    it('excludes states that were not asked for', () => {
+      const db = makeDb();
+      insertUser(db, 1, 'aoife');
+      const p = createPersistence(db);
+      const game = p.createGame({ boardSize: 5, joinType: 'open', proposerId: 1 })._unsafeUnwrap();
+      db.prepare("UPDATE games SET state = 'finished' WHERE id = ?").run(game.id);
+
+      expect(p.listGamesForUser(1, ['proposed', 'in_play'])._unsafeUnwrap()).toEqual([]);
+      expect(p.listGamesForUser(1, ['finished'])._unsafeUnwrap()).toHaveLength(1);
+      expect(p.listGamesForUser(1, [])._unsafeUnwrap()).toEqual([]);
+    });
+
+    it('fails when the database is closed', () => {
+      const db = makeDb();
+      insertUser(db, 1, 'aoife');
+      const p = createPersistence(db);
+      db.close();
+      expect(p.createGame({ boardSize: 5, joinType: 'open', proposerId: 1 }).isErr()).toBe(true);
+      expect(p.findGameById(1).isErr()).toBe(true);
+      expect(p.deleteGame(1).isErr()).toBe(true);
+      expect(p.listGamesForUser(1, ['proposed']).isErr()).toBe(true);
+    });
+  });
 });

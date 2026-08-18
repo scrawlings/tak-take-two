@@ -1,5 +1,6 @@
 import { breadcrumb, escapeHtml, renderShell } from './html.js';
 import type { SessionUser } from './auth.js';
+import type { GameSummary } from './games.js';
 
 /**
  * Server-rendered auth/admin views. Keep the markup thin: these pages only
@@ -230,6 +231,115 @@ ${notice}
   </div>
 </div>`;
   return renderShell('Users', body, { user: actor, path: '/admin/users' });
+}
+
+export interface MyGamesView {
+  error?: string;
+  /** Values to put back in the propose form when it comes back with an error. */
+  submitted?: {
+    boardSize?: string | null;
+    joinType?: string | null;
+    invitedDisplayName?: string | null;
+    ptn?: string | null;
+  };
+}
+
+function gameStatusTag(game: GameSummary): string {
+  if (game.state === 'in_play') return '<span class="tag">in play</span>';
+  const kind = game.joinType === 'open' ? 'open' : 'invited';
+  return `<span class="tag">proposed · ${kind}</span>`;
+}
+
+/** Who the viewer is playing, or who the proposal is still waiting on. */
+function opponentCell(game: GameSummary): string {
+  if (game.otherPlayer !== null) return escapeHtml(game.otherPlayer.displayName);
+  if (game.invitedPlayer !== null) {
+    return `<span class="dim">waiting for ${escapeHtml(game.invitedPlayer.displayName)}</span>`;
+  }
+  return '<span class="dim">waiting for anyone</span>';
+}
+
+export function renderMyGamesPage(
+  user: SessionUser,
+  games: readonly GameSummary[],
+  view: MyGamesView = {},
+): string {
+  const error = view.error ? `<p class="error">${escapeHtml(view.error)}</p>` : '';
+  const submitted = view.submitted ?? {};
+  const sizeSelected = (size: string): string => (submitted.boardSize === size ? ' selected' : '');
+  const joinSelected = (kind: string): string => (submitted.joinType === kind ? ' selected' : '');
+
+  const rows = games
+    .map((game) => {
+      const del = game.canDelete
+        ? `<form method="post" action="/games/${game.id}/delete"><button type="submit" class="btn btn-danger btn-sm">Delete</button></form>`
+        : '';
+      return `<tr>
+  <td class="num">${game.boardSize}×${game.boardSize}</td>
+  <td>${gameStatusTag(game)}</td>
+  <td>${opponentCell(game)}</td>
+  <td>${game.imported ? '<span class="tag">imported</span>' : '<span class="dim">empty board</span>'}</td>
+  <td><div class="row-actions">${del}</div></td>
+</tr>`;
+    })
+    .join('');
+
+  const table =
+    games.length === 0
+      ? `<p class="lede">No games yet. Propose one below and it will appear here.</p>`
+      : `<div class="table-scroll">
+    <table class="data">
+      <thead><tr><th>Board</th><th>State</th><th>Opponent</th><th>Started from</th><th>Actions</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  </div>`;
+
+  const body = `
+<h1>Your games</h1>
+${error}
+<div class="block">
+  <h2>In progress</h2>
+  ${table}
+</div>
+<div class="block">
+  <h2>Propose a game</h2>
+  <form class="panel" method="post" action="/games" x-data="{ join: '${submitted.joinType === 'invited' ? 'invited' : 'open'}', ptn: ${escapeHtml(JSON.stringify(submitted.ptn ?? ''))} }">
+    <div class="field-grid">
+      <!-- A pasted record carries its own [Size], and the module takes the size
+           from the record. Disabling the select says so rather than letting a
+           contradicting choice be silently discarded. -->
+      <div class="field">
+        <label for="board_size">Board</label>
+        <select id="board_size" name="board_size" x-bind:disabled="ptn.trim() !== ''">
+          <option value="5"${sizeSelected('5')}>5×5</option>
+          <option value="6"${sizeSelected('6')}>6×6</option>
+        </select>
+        <p class="hint" x-show="ptn.trim() !== ''">Set by the record below.</p>
+      </div>
+      <div class="field">
+        <label for="join_type">Who can join</label>
+        <select id="join_type" name="join_type" x-model="join">
+          <option value="open"${joinSelected('open')}>anyone</option>
+          <option value="invited"${joinSelected('invited')}>one player I name</option>
+        </select>
+      </div>
+    </div>
+    <!-- Only an invited game needs a name. Without Alpine the field simply
+         stays visible, so the form still works with scripting off. -->
+    <div class="field" x-show="join === 'invited'">
+      <label for="invited_display_name">Player to invite</label>
+      <input id="invited_display_name" name="invited_display_name" autocomplete="off" value="${escapeHtml(submitted.invitedDisplayName ?? '')}">
+      <p class="hint">Their display name, as other players see it.</p>
+    </div>
+    <div class="field">
+      <label for="ptn">Start from a record (optional)</label>
+      <textarea id="ptn" name="ptn" rows="6" spellcheck="false" x-model="ptn" placeholder='[Size "5"]&#10;1. a1 e5&#10;2. c3 c4'>${escapeHtml(submitted.ptn ?? '')}</textarea>
+    </div>
+    <p class="actions"><button type="submit" class="btn">Propose game</button></p>
+    <p class="hint">Paste Portable Tak Notation to carry a game in from elsewhere. Its moves are replayed and fixed, and the record sets the board size.</p>
+  </form>
+</div>`;
+  return renderShell('Your games', body, { user, path: '/games' });
 }
 
 export function renderResetPasswordResult(actor: SessionUser, username: string, password: string): string {
