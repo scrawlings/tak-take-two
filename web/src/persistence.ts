@@ -74,13 +74,24 @@ export interface GameRecord {
   /** ADR-0003 share toggles; a game is viewable by non-participants iff both are on. */
   readonly proposerShared: boolean;
   readonly opponentShared: boolean;
+  /** Ticket 13: per-player hide; hiding removes a game from that player's own
+   * views and clears that side's share (CONTEXT.md: Hide). */
+  readonly proposerHidden: boolean;
+  readonly opponentHidden: boolean;
   /** One pending request/offer per game (ticket 12): `take-back` or `draw`, from `pendingBy`. */
   readonly pendingKind: 'take-back' | 'draw' | null;
   readonly pendingBy: number | null;
   readonly result: string | null;
+  /** Ticket 13: forced end by an admin. The game stays (with its real result,
+   * if it had one) so affected players see why it ended. */
+  readonly adminRemoved: boolean;
   readonly createdAt: string;
   readonly finishedAt: string | null;
 }
+
+/** A game's two sides, as the actor who occupies each: the proposer, or the
+ * opponent (which also names the not-yet-joined invited player's seat). */
+export type GameSide = 'proposer' | 'opponent';
 
 /** Input for creating a game row. Games are always born `proposed`. */
 export interface CreateGameInput {
@@ -191,6 +202,13 @@ export interface Persistence {
    * racing joins cannot both succeed.
    */
   joinGame(gameId: number, opponentId: number): Result<boolean, string>;
+
+  /** Set one side's share toggle; turning it on also clears that side's hide flag. */
+  setGameShare(gameId: number, side: GameSide, shared: boolean): Result<void, string>;
+  /** Hide the game for the given side(s): sets hidden and clears shared for each. */
+  hideGame(gameId: number, sides: readonly GameSide[]): Result<void, string>;
+  /** Force a game to `finished` (keeping any real result already set) and flag it admin-removed. */
+  adminRemoveGame(gameId: number): Result<void, string>;
 
   /** Set the game's single pending request/offer (clearing any prior one). */
   setPendingRequest(gameId: number, kind: 'take-back' | 'draw', by: number): Result<void, string>;
@@ -428,10 +446,12 @@ export function createPersistence(db: Db): Persistence {
         const rows = db
           .prepare(
             `SELECT * FROM games
-             WHERE (proposer_id = ? OR opponent_id = ?) AND state IN (${placeholders})
+             WHERE (proposer_id = ? OR opponent_id = ?)
+               AND (state IN (${placeholders}) OR admin_removed = 1)
+               AND NOT ((proposer_id = ? AND proposer_hidden = 1) OR (opponent_id = ? AND opponent_hidden = 1))
              ORDER BY created_at DESC, id DESC`,
           )
-          .all(userId, userId, ...states) as GameRow[];
+          .all(userId, userId, ...states, userId, userId) as GameRow[];
         return ok(rows.map(mapGame));
       } catch (e) {
         return err(e instanceof Error ? e.message : String(e));
@@ -472,13 +492,54 @@ export function createPersistence(db: Db): Persistence {
 
     joinGame(gameId: number, opponentId: number): Result<boolean, string> {
       try {
+        // A join starts a fresh, active game: either side may have hidden the
+        // bare proposal beforehand (ticket 13), and that must not carry over
+        // and hide the game they are now actively part of.
         const info = db
           .prepare(
-            `UPDATE games SET opponent_id = ?, state = 'in_play'
+            `UPDATE games SET opponent_id = ?, state = 'in_play', proposer_hidden = 0, opponent_hidden = 0
              WHERE id = ? AND state = 'proposed' AND opponent_id IS NULL`,
           )
           .run(opponentId, gameId);
         return ok(info.changes === 1);
+      } catch (e) {
+        return err(e instanceof Error ? e.message : String(e));
+      }
+    },
+
+    setGameShare(gameId: number, side: GameSide, shared: boolean): Result<void, string> {
+      try {
+        // Sharing again also un-hides that side (CONTEXT.md: Hide is reversible).
+        if (shared) {
+          db.prepare(`UPDATE games SET ${side}_shared = 1, ${side}_hidden = 0 WHERE id = ?`).run(gameId);
+        } else {
+          db.prepare(`UPDATE games SET ${side}_shared = 0 WHERE id = ?`).run(gameId);
+        }
+        return ok(undefined);
+      } catch (e) {
+        return err(e instanceof Error ? e.message : String(e));
+      }
+    },
+
+    hideGame(gameId: number, sides: readonly GameSide[]): Result<void, string> {
+      try {
+        for (const side of sides) {
+          db.prepare(`UPDATE games SET ${side}_hidden = 1, ${side}_shared = 0 WHERE id = ?`).run(gameId);
+        }
+        return ok(undefined);
+      } catch (e) {
+        return err(e instanceof Error ? e.message : String(e));
+      }
+    },
+
+    adminRemoveGame(gameId: number): Result<void, string> {
+      try {
+        db.prepare(
+          `UPDATE games SET admin_removed = 1, state = 'finished',
+             finished_at = COALESCE(finished_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+           WHERE id = ?`,
+        ).run(gameId);
+        return ok(undefined);
       } catch (e) {
         return err(e instanceof Error ? e.message : String(e));
       }
@@ -676,9 +737,12 @@ interface GameRow {
   imported_ptn: string | null;
   proposer_shared: number;
   opponent_shared: number;
+  proposer_hidden: number;
+  opponent_hidden: number;
   pending_kind: string | null;
   pending_by: number | null;
   result: string | null;
+  admin_removed: number;
   created_at: string;
   finished_at: string | null;
 }
@@ -705,9 +769,12 @@ function mapGame(row: GameRow): GameRecord {
     importedPtn: row.imported_ptn,
     proposerShared: row.proposer_shared !== 0,
     opponentShared: row.opponent_shared !== 0,
+    proposerHidden: row.proposer_hidden !== 0,
+    opponentHidden: row.opponent_hidden !== 0,
     pendingKind: row.pending_kind as 'take-back' | 'draw' | null,
     pendingBy: row.pending_by,
     result: row.result,
+    adminRemoved: row.admin_removed !== 0,
     createdAt: row.created_at,
     finishedAt: row.finished_at,
   };

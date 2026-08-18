@@ -16,6 +16,7 @@ import type {
   GameBoardSize,
   GameRecord,
   GameLifecycleState,
+  GameSide,
   JoinType,
   Persistence,
   ProposedGameFilters,
@@ -55,6 +56,7 @@ export type GameErrorCode =
   | 'request-pending'
   | 'no-pending-request'
   | 'no-move-to-take-back'
+  | 'already-removed'
   | 'persistence';
 
 export interface GameError {
@@ -88,6 +90,8 @@ export interface GameSummary {
   readonly canJoin: boolean;
   /** Whose turn it is, or null while the game is not in play. */
   readonly toMove: PlayerRef | null;
+  /** Ticket 13: this game was ended by an admin, not by play or agreement. */
+  readonly adminRemoved: boolean;
 }
 
 /** One stone as the board view shows it. */
@@ -161,6 +165,14 @@ export interface GameView {
   readonly reserves: Readonly<Record<1 | 2, { readonly stones: number; readonly capstones: number }>>;
   /** Whether each seat has made its opening (first) move. */
   readonly opened: Readonly<Record<1 | 2, boolean>>;
+  /** The viewer's own share toggle, or null when they are not a participant. */
+  readonly viewerShared: boolean | null;
+  /** The viewer is a participant and may hide this game from their own views. */
+  readonly canHide: boolean;
+  /** The viewer is an admin and this game is not already admin-removed. */
+  readonly canAdminDelete: boolean;
+  /** Ticket 13: this game was ended by an admin, not by play or agreement. */
+  readonly adminRemoved: boolean;
 }
 
 /** What a player may narrow a proposal search by. All optional; blanks mean "any". */
@@ -191,7 +203,10 @@ export type GameCommand =
   | { readonly type: 'rejectTakeBack'; readonly gameId: number }
   | { readonly type: 'offerDraw'; readonly gameId: number }
   | { readonly type: 'acceptDraw'; readonly gameId: number }
-  | { readonly type: 'rejectDraw'; readonly gameId: number };
+  | { readonly type: 'rejectDraw'; readonly gameId: number }
+  | { readonly type: 'share'; readonly gameId: number; readonly on: boolean }
+  | { readonly type: 'hide'; readonly gameId: number }
+  | { readonly type: 'adminDelete'; readonly gameId: number };
 
 /** One domain-shaped result per command; commands that only change state yield `{ type: 'ok' }`. */
 export type GameCommandResult =
@@ -257,6 +272,21 @@ function isParticipant(game: GameRecord, actorId: number): boolean {
     game.opponentId === actorId ||
     game.invitedPlayerId === actorId
   );
+}
+
+/**
+ * Which side(s) of the game `actorId` occupies — proposer, opponent, or (for
+ * self-play) both. An invited player who has not yet joined occupies the
+ * opponent side pre-emptively, so they may set its share/hide before joining.
+ * Ticket 13: share and hide act per side, and this is the one place that
+ * decides which side an actor's command reaches.
+ */
+function sidesOf(game: GameRecord, actorId: number): GameSide[] {
+  const sides: GameSide[] = [];
+  if (game.proposerId === actorId) sides.push('proposer');
+  if (game.opponentId === actorId) sides.push('opponent');
+  else if (game.opponentId === null && game.invitedPlayerId === actorId) sides.push('opponent');
+  return sides;
 }
 
 /**
@@ -912,7 +942,12 @@ export function createGames(persistence: Persistence): Games {
     return ok({ type: 'ok' });
   }
 
-  function gameView(actor: SessionUser, gameId: number): Result<GameView, GameError> {
+  /** Load a game and the actor's side(s) in it, refusing a non-participant. */
+  function loadOwnSides(
+    actor: SessionUser,
+    gameId: number,
+    act: string,
+  ): Result<{ game: GameRecord; sides: GameSide[] }, GameError> {
     const player = requirePlayer(actor);
     if (player.isErr()) return err(player.error);
 
@@ -920,7 +955,126 @@ export function createGames(persistence: Persistence): Games {
     if (found.isErr()) return err(persistenceError(found.error));
     if (found.value === null) return err({ code: 'not-found', message: 'That game no longer exists.' });
     const game = found.value;
-    if (!visibleTo(game, actor.id)) {
+
+    const sides = sidesOf(game, actor.id);
+    if (sides.length === 0) {
+      return err({ code: 'forbidden', message: `Only a participant may ${act}.` });
+    }
+    return ok({ game, sides });
+  }
+
+  function share(
+    actor: SessionUser,
+    command: Extract<GameCommand, { type: 'share' }>,
+  ): Result<GameCommandResult, GameError> {
+    const loaded = loadOwnSides(actor, command.gameId, 'change sharing');
+    if (loaded.isErr()) return err(loaded.error);
+    const { game, sides } = loaded.value;
+
+    const persisted = persistence.transaction((): Result<void, string> => {
+      for (const side of sides) {
+        const set = persistence.setGameShare(game.id, side, command.on);
+        if (set.isErr()) return set;
+      }
+      return persistence.appendActivityTrail({
+        userId: actor.id,
+        gameId: game.id,
+        event: command.on ? 'game-shared' : 'game-unshared',
+      });
+    });
+    if (persisted.isErr()) return err(persistenceError(persisted.error));
+
+    return ok({ type: 'ok' });
+  }
+
+  /**
+   * Hide the game for the actor's side(s). Self-play holds both sides, so it
+   * always counts as mutual; otherwise mutual is the other side's hidden flag,
+   * read before this hide is applied. Mutual hide deletes the game outright
+   * (CONTEXT.md: Hide) — unlike an admin's removal, nobody needs to be told,
+   * since both participants chose it themselves.
+   */
+  function hide(
+    actor: SessionUser,
+    command: Extract<GameCommand, { type: 'hide' }>,
+  ): Result<GameCommandResult, GameError> {
+    const loaded = loadOwnSides(actor, command.gameId, 'hide a game');
+    if (loaded.isErr()) return err(loaded.error);
+    const { game, sides } = loaded.value;
+
+    const mutual = sides.length === 2 || (sides[0] === 'proposer' ? game.opponentHidden : game.proposerHidden);
+
+    const persisted = persistence.transaction((): Result<void, string> => {
+      const hidden = persistence.hideGame(game.id, sides);
+      if (hidden.isErr()) return hidden;
+      const trail = persistence.appendActivityTrail({ userId: actor.id, gameId: game.id, event: 'game-hidden' });
+      if (trail.isErr()) return trail;
+      if (!mutual) return ok(undefined);
+
+      // activity_trail.game_id is ON DELETE SET NULL, so the id goes in the
+      // payload too, same as deleteProposal's trail entry.
+      const deleted = persistence.appendActivityTrail({
+        userId: actor.id,
+        gameId: game.id,
+        event: 'game-deleted',
+        payload: { gameId: game.id, reason: 'both-hidden' },
+      });
+      if (deleted.isErr()) return deleted;
+      return persistence.deleteGame(game.id);
+    });
+    if (persisted.isErr()) return err(persistenceError(persisted.error));
+
+    return ok({ type: 'ok' });
+  }
+
+  /**
+   * An admin's forced end to any game. Unlike a mutual hide, the row stays —
+   * with any real result it already had — so affected players see why it
+   * ended, on the game view and in their lists.
+   */
+  function adminDelete(
+    actor: SessionUser,
+    command: Extract<GameCommand, { type: 'adminDelete' }>,
+  ): Result<GameCommandResult, GameError> {
+    if (actor.role !== 'admin') {
+      return err({ code: 'forbidden', message: 'Only an admin can do that.' });
+    }
+
+    const found = persistence.findGameById(command.gameId);
+    if (found.isErr()) return err(persistenceError(found.error));
+    if (found.value === null) return err({ code: 'not-found', message: 'That game no longer exists.' });
+    const game = found.value;
+    if (game.adminRemoved) {
+      return err({ code: 'already-removed', message: 'This game has already been removed by an admin.' });
+    }
+
+    const persisted = persistence.transaction((): Result<void, string> => {
+      const cleared = persistence.clearPendingRequest(game.id);
+      if (cleared.isErr()) return cleared;
+      const removed = persistence.adminRemoveGame(game.id);
+      if (removed.isErr()) return removed;
+      return persistence.appendActivityTrail({
+        userId: actor.id,
+        gameId: game.id,
+        event: 'game-admin-deleted',
+        payload: { by: actor.username, priorState: game.state },
+      });
+    });
+    if (persisted.isErr()) return err(persistenceError(persisted.error));
+
+    return ok({ type: 'ok' });
+  }
+
+  function gameView(actor: SessionUser, gameId: number): Result<GameView, GameError> {
+    // Ticket 13: an admin may view any game regardless of share state, so the
+    // visibility check below applies only to players.
+    const isAdmin = actor.role === 'admin';
+
+    const found = persistence.findGameById(gameId);
+    if (found.isErr()) return err(persistenceError(found.error));
+    if (found.value === null) return err({ code: 'not-found', message: 'That game no longer exists.' });
+    const game = found.value;
+    if (!isAdmin && !visibleTo(game, actor.id)) {
       return err({ code: 'not-found', message: 'That game no longer exists.' });
     }
 
@@ -969,6 +1123,11 @@ export function createGames(persistence: Persistence): Games {
       });
     }
 
+    // Ticket 13: the viewer's own share/hide standing, and an admin's removal power.
+    const sides = sidesOf(game, actor.id);
+    const viewerShared =
+      sides.length === 0 ? null : sides.includes('proposer') ? game.proposerShared : game.opponentShared;
+
     return ok({
       id: game.id,
       boardSize: game.boardSize,
@@ -992,6 +1151,10 @@ export function createGames(persistence: Persistence): Games {
       resultText: resultTextOf(game.result, proposer.value, opponent.value),
       reserves: tak.state.reserves,
       opened: tak.state.opened,
+      viewerShared,
+      canHide: sides.length > 0,
+      canAdminDelete: isAdmin && !game.adminRemoved,
+      adminRemoved: game.adminRemoved,
     });
   }
 
@@ -1044,6 +1207,7 @@ export function createGames(persistence: Persistence): Games {
       createdAt: game.createdAt,
       canDelete: deletableBy(game, actor.id),
       canJoin: joinableBy(game, actor),
+      adminRemoved: game.adminRemoved,
       toMove,
     });
   }
@@ -1085,6 +1249,12 @@ export function createGames(persistence: Persistence): Games {
           return acceptDraw(actor, command);
         case 'rejectDraw':
           return rejectDraw(actor, command);
+        case 'share':
+          return share(actor, command);
+        case 'hide':
+          return hide(actor, command);
+        case 'adminDelete':
+          return adminDelete(actor, command);
       }
     },
 

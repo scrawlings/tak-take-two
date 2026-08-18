@@ -79,6 +79,13 @@ const MIGRATIONS: readonly string[] = [
   // one may be pending; both are cleared on accept, reject, or any finish.
   `ALTER TABLE games ADD COLUMN pending_kind TEXT;
    ALTER TABLE games ADD COLUMN pending_by INTEGER;`,
+  // Ticket 13: per-player hide (removes a game from that player's own views
+  // and turns their share off; mutual hide deletes the game) and an admin's
+  // forced removal, which stays in the table — unlike a mutual hide — so the
+  // affected players still see why the game ended.
+  `ALTER TABLE games ADD COLUMN proposer_hidden INTEGER NOT NULL DEFAULT 0;
+   ALTER TABLE games ADD COLUMN opponent_hidden INTEGER NOT NULL DEFAULT 0;
+   ALTER TABLE games ADD COLUMN admin_removed INTEGER NOT NULL DEFAULT 0;`,
 ];
 
 export function openDatabase(path: string): Result<Db, string> {

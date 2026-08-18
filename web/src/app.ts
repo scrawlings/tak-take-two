@@ -518,6 +518,36 @@ export function createApp(deps: AppDeps): App {
     renderError: (c, e) => gameViewError(c, e),
   }));
 
+  app.post('/games/:id/share', requireUser, formAction({
+    fields: ['on'],
+    run: (c, f) =>
+      paramId(c, 'id', 'That game no longer exists.').andThen((id) =>
+        games.applyGame(c.get('user'), { type: 'share', gameId: id, on: f.on === '1' }),
+      ),
+    onOk: (c) => c.redirect(`/games/${c.req.param('id')}`, 303),
+    renderError: (c, e) => gameViewError(c, e),
+  }));
+
+  app.post('/games/:id/hide', requireUser, formAction({
+    fields: [],
+    run: (c) =>
+      paramId(c, 'id', 'That game no longer exists.').andThen((id) =>
+        games.applyGame(c.get('user'), { type: 'hide', gameId: id }),
+      ),
+    onOk: (c) => c.redirect('/games', 303),
+    renderError: (c, e) => myGamesError(c, e),
+  }));
+
+  app.post('/games/:id/admin-delete', requireUser, formAction({
+    fields: [],
+    run: (c) =>
+      paramId(c, 'id', 'That game no longer exists.').andThen((id) =>
+        games.applyGame(c.get('user'), { type: 'adminDelete', gameId: id }),
+      ),
+    onOk: (c) => c.redirect(`/games/${c.req.param('id')}`, 303),
+    renderError: (c, e) => gameViewError(c, e),
+  }));
+
   app.get('/admin', requireUser, (c) => c.redirect('/admin/users', 303));
 
   app.get('/admin/users', requireUser, (c) => {

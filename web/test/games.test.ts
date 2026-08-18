@@ -1239,3 +1239,297 @@ describe('games: take-back', () => {
     expect(h.games.applyGame(h.aoife, { type: 'requestTakeBack', gameId })._unsafeUnwrapErr().code).toBe('forbidden');
   });
 });
+
+function wren(h: Harness): SessionUser {
+  insertUser(h.db, { id: 4, username: 'wren', displayName: 'Wren Alvarez' });
+  return {
+    id: 4,
+    username: 'wren',
+    displayName: 'Wren Alvarez',
+    role: 'player',
+    forcePasswordChange: false,
+    blocked: false,
+  };
+}
+
+describe('games: share', () => {
+  function inPlay(h: Harness): number {
+    const r = h.games.applyGame(h.aoife, { type: 'propose', boardSize: 5, joinType: 'open' });
+    const gameId = (r._unsafeUnwrap() as { gameId: number }).gameId;
+    h.games.applyGame(h.takashi, { type: 'join', gameId });
+    return gameId;
+  }
+
+  it('lets a participant turn their own share off and on', () => {
+    const h = harness();
+    const gameId = inPlay(h);
+
+    expect(h.games.applyGame(h.aoife, { type: 'share', gameId, on: false }).isOk()).toBe(true);
+    expect(h.persistence.findGameById(gameId)._unsafeUnwrap()).toMatchObject({
+      proposerShared: false,
+      opponentShared: true, // only the actor's own side changes
+    });
+    expect(h.games.getGame(h.aoife, gameId)._unsafeUnwrap().viewerShared).toBe(false);
+    expect(trailEvents(h.db)).toContain('game-unshared');
+
+    expect(h.games.applyGame(h.aoife, { type: 'share', gameId, on: true }).isOk()).toBe(true);
+    expect(h.persistence.findGameById(gameId)._unsafeUnwrap()).toMatchObject({ proposerShared: true });
+    expect(trailEvents(h.db)).toContain('game-shared');
+  });
+
+  it('re-sharing clears a prior hide, bringing the game back into the list', () => {
+    const h = harness();
+    const gameId = inPlay(h);
+    h.games.applyGame(h.aoife, { type: 'hide', gameId });
+    expect(h.games.listMyGames(h.aoife)._unsafeUnwrap()).toEqual([]);
+
+    expect(h.games.applyGame(h.aoife, { type: 'share', gameId, on: true }).isOk()).toBe(true);
+
+    expect(h.persistence.findGameById(gameId)._unsafeUnwrap()).toMatchObject({
+      proposerHidden: false,
+      proposerShared: true,
+    });
+    expect(h.games.listMyGames(h.aoife)._unsafeUnwrap().map((g) => g.id)).toContain(gameId);
+  });
+
+  it('lets an invited, not-yet-joined player set their side before joining', () => {
+    const h = harness();
+    const r = h.games.applyGame(h.aoife, {
+      type: 'propose',
+      boardSize: 5,
+      joinType: 'invited',
+      invitedDisplayName: 'Takashi Mori',
+    });
+    const gameId = (r._unsafeUnwrap() as { gameId: number }).gameId;
+
+    expect(h.games.applyGame(h.takashi, { type: 'share', gameId, on: true }).isOk()).toBe(true);
+    expect(h.persistence.findGameById(gameId)._unsafeUnwrap()).toMatchObject({ opponentShared: true });
+  });
+
+  it('sets both sides at once in self-play', () => {
+    const h = harness();
+    const r = h.games.applyGame(h.aoife, { type: 'propose', boardSize: 5, joinType: 'open' });
+    const gameId = (r._unsafeUnwrap() as { gameId: number }).gameId;
+    h.games.applyGame(h.aoife, { type: 'join', gameId });
+
+    expect(h.games.applyGame(h.aoife, { type: 'share', gameId, on: false }).isOk()).toBe(true);
+    expect(h.persistence.findGameById(gameId)._unsafeUnwrap()).toMatchObject({
+      proposerShared: false,
+      opponentShared: false,
+    });
+  });
+
+  it('refuses a non-participant', () => {
+    const h = harness();
+    const gameId = inPlay(h);
+
+    expect(h.games.applyGame(wren(h), { type: 'share', gameId, on: true })._unsafeUnwrapErr().code).toBe('forbidden');
+  });
+
+  it('refuses an admin account', () => {
+    const h = harness();
+    const gameId = inPlay(h);
+
+    expect(h.games.applyGame(h.root, { type: 'share', gameId, on: true })._unsafeUnwrapErr().code).toBe('forbidden');
+  });
+
+  it('reports an unknown game as not found', () => {
+    const h = harness();
+
+    expect(h.games.applyGame(h.aoife, { type: 'share', gameId: 404, on: true })._unsafeUnwrapErr().code).toBe(
+      'not-found',
+    );
+  });
+});
+
+describe('games: hide', () => {
+  function inPlay(h: Harness): number {
+    const r = h.games.applyGame(h.aoife, { type: 'propose', boardSize: 5, joinType: 'open' });
+    const gameId = (r._unsafeUnwrap() as { gameId: number }).gameId;
+    h.games.applyGame(h.takashi, { type: 'join', gameId });
+    return gameId;
+  }
+
+  it('removes the game from the hider’s own list, leaving the other player’s untouched', () => {
+    const h = harness();
+    const gameId = inPlay(h);
+
+    expect(h.games.applyGame(h.aoife, { type: 'hide', gameId }).isOk()).toBe(true);
+
+    expect(h.games.listMyGames(h.aoife)._unsafeUnwrap()).toEqual([]);
+    expect(h.games.listMyGames(h.takashi)._unsafeUnwrap().map((g) => g.id)).toContain(gameId);
+    expect(h.persistence.findGameById(gameId)._unsafeUnwrap()).toMatchObject({
+      proposerHidden: true,
+      proposerShared: false,
+    });
+    expect(trailEvents(h.db)).toContain('game-hidden');
+  });
+
+  it('deletes the game once both players have hidden it', () => {
+    const h = harness();
+    const gameId = inPlay(h);
+
+    h.games.applyGame(h.aoife, { type: 'hide', gameId });
+    expect(h.games.applyGame(h.takashi, { type: 'hide', gameId }).isOk()).toBe(true);
+
+    expect(h.persistence.findGameById(gameId)._unsafeUnwrap()).toBeNull();
+    expect(trailEvents(h.db)).toContain('game-deleted');
+  });
+
+  it('deletes immediately in self-play, which always holds both sides', () => {
+    const h = harness();
+    const r = h.games.applyGame(h.aoife, { type: 'propose', boardSize: 5, joinType: 'open' });
+    const gameId = (r._unsafeUnwrap() as { gameId: number }).gameId;
+    h.games.applyGame(h.aoife, { type: 'join', gameId });
+
+    expect(h.games.applyGame(h.aoife, { type: 'hide', gameId }).isOk()).toBe(true);
+
+    expect(h.persistence.findGameById(gameId)._unsafeUnwrap()).toBeNull();
+  });
+
+  it('lets the invited, not-yet-joined player hide their invitation, and mutual hide still deletes it', () => {
+    const h = harness();
+    const r = h.games.applyGame(h.aoife, {
+      type: 'propose',
+      boardSize: 5,
+      joinType: 'invited',
+      invitedDisplayName: 'Takashi Mori',
+    });
+    const gameId = (r._unsafeUnwrap() as { gameId: number }).gameId;
+
+    expect(h.games.applyGame(h.takashi, { type: 'hide', gameId }).isOk()).toBe(true);
+    expect(h.persistence.findGameById(gameId)._unsafeUnwrap()).toMatchObject({ opponentHidden: true });
+
+    expect(h.games.applyGame(h.aoife, { type: 'hide', gameId }).isOk()).toBe(true);
+    expect(h.persistence.findGameById(gameId)._unsafeUnwrap()).toBeNull();
+  });
+
+  it('clears a pre-join hide once the hider actually joins, so their new game is not stuck invisible', () => {
+    const h = harness();
+    const r = h.games.applyGame(h.aoife, {
+      type: 'propose',
+      boardSize: 5,
+      joinType: 'invited',
+      invitedDisplayName: 'Takashi Mori',
+    });
+    const gameId = (r._unsafeUnwrap() as { gameId: number }).gameId;
+    h.games.applyGame(h.takashi, { type: 'hide', gameId });
+
+    expect(h.games.applyGame(h.takashi, { type: 'join', gameId }).isOk()).toBe(true);
+
+    expect(h.persistence.findGameById(gameId)._unsafeUnwrap()).toMatchObject({
+      opponentHidden: false,
+      proposerHidden: false,
+    });
+    expect(h.games.listMyGames(h.takashi)._unsafeUnwrap().map((g) => g.id)).toContain(gameId);
+  });
+
+  it('refuses a non-participant', () => {
+    const h = harness();
+    const gameId = inPlay(h);
+
+    expect(h.games.applyGame(wren(h), { type: 'hide', gameId })._unsafeUnwrapErr().code).toBe('forbidden');
+  });
+
+  it('refuses an admin account', () => {
+    const h = harness();
+    const gameId = inPlay(h);
+
+    expect(h.games.applyGame(h.root, { type: 'hide', gameId })._unsafeUnwrapErr().code).toBe('forbidden');
+  });
+
+  it('reports an unknown game as not found', () => {
+    const h = harness();
+
+    expect(h.games.applyGame(h.aoife, { type: 'hide', gameId: 404 })._unsafeUnwrapErr().code).toBe('not-found');
+  });
+});
+
+describe('games: admin delete and view', () => {
+  function inPlay(h: Harness): number {
+    const r = h.games.applyGame(h.aoife, { type: 'propose', boardSize: 5, joinType: 'open' });
+    const gameId = (r._unsafeUnwrap() as { gameId: number }).gameId;
+    h.games.applyGame(h.takashi, { type: 'join', gameId });
+    return gameId;
+  }
+
+  it('lets an admin view any game regardless of share state', () => {
+    const h = harness();
+    const r = h.games.applyGame(h.aoife, {
+      type: 'propose',
+      boardSize: 5,
+      joinType: 'invited',
+      invitedDisplayName: 'Takashi Mori',
+    });
+    const gameId = (r._unsafeUnwrap() as { gameId: number }).gameId;
+    h.games.applyGame(h.takashi, { type: 'join', gameId });
+
+    const view = h.games.getGame(h.root, gameId)._unsafeUnwrap();
+    expect(view.viewerSeat).toBeNull();
+    expect(view.canAdminDelete).toBe(true);
+  });
+
+  it('ends the game, keeps the record, and stops further play', () => {
+    const h = harness();
+    const gameId = inPlay(h);
+    h.games.applyGame(h.aoife, { type: 'playMove', gameId, move: 'a2' });
+
+    expect(h.games.applyGame(h.root, { type: 'adminDelete', gameId }).isOk()).toBe(true);
+
+    const game = h.persistence.findGameById(gameId)._unsafeUnwrap();
+    expect(game).toMatchObject({ state: 'finished', adminRemoved: true });
+    expect(h.persistence.listMoves(gameId)._unsafeUnwrap()).toHaveLength(1); // history is kept
+    expect(trailEvents(h.db)).toContain('game-admin-deleted');
+
+    // Further play is refused, like any other finished game.
+    expect(h.games.applyGame(h.takashi, { type: 'playMove', gameId, move: 'e5' })._unsafeUnwrapErr().code).toBe(
+      'not-in-play',
+    );
+
+    // Affected players still see it, marked, in their own list and view.
+    const summary = h.games.listMyGames(h.aoife)._unsafeUnwrap().find((g) => g.id === gameId);
+    expect(summary?.adminRemoved).toBe(true);
+    expect(h.games.getGame(h.aoife, gameId)._unsafeUnwrap().adminRemoved).toBe(true);
+  });
+
+  it('preserves a real result when removing an already-finished game', () => {
+    const h = harness();
+    const gameId = inPlay(h);
+    h.games.applyGame(h.aoife, { type: 'resign', gameId });
+    const finishedAt = h.persistence.findGameById(gameId)._unsafeUnwrap()?.finishedAt;
+
+    expect(h.games.applyGame(h.root, { type: 'adminDelete', gameId }).isOk()).toBe(true);
+
+    expect(h.persistence.findGameById(gameId)._unsafeUnwrap()).toMatchObject({
+      state: 'finished',
+      result: '0-1',
+      adminRemoved: true,
+      finishedAt,
+    });
+  });
+
+  it('refuses to remove a game twice', () => {
+    const h = harness();
+    const gameId = inPlay(h);
+    h.games.applyGame(h.root, { type: 'adminDelete', gameId });
+
+    expect(h.games.applyGame(h.root, { type: 'adminDelete', gameId })._unsafeUnwrapErr().code).toBe(
+      'already-removed',
+    );
+  });
+
+  it('refuses a non-admin', () => {
+    const h = harness();
+    const gameId = inPlay(h);
+
+    expect(h.games.applyGame(h.aoife, { type: 'adminDelete', gameId })._unsafeUnwrapErr().code).toBe('forbidden');
+  });
+
+  it('reports an unknown game as not found', () => {
+    const h = harness();
+
+    expect(h.games.applyGame(h.root, { type: 'adminDelete', gameId: 404 })._unsafeUnwrapErr().code).toBe(
+      'not-found',
+    );
+  });
+});

@@ -246,6 +246,10 @@ export interface MyGamesView {
 }
 
 function gameStatusTag(game: GameSummary): string {
+  // listMyGames only ever returns 'finished' rows that are admin-removed
+  // (ACTIVE_STATES excludes 'finished' otherwise), so that is the only
+  // 'finished' case this ever needs to render.
+  if (game.adminRemoved) return '<span class="tag tag-flag">removed by an admin</span>';
   if (game.state === 'in_play') return '<span class="tag">in play</span>';
   const kind = game.joinType === 'open' ? 'open' : 'invited';
   return `<span class="tag">proposed · ${kind}</span>`;
@@ -559,6 +563,9 @@ function renderBoard(game: GameView): string {
 }
 
 function renderGameStatus(game: GameView): string {
+  if (game.adminRemoved) {
+    return `<p class="notice">This game was removed by an admin.</p>`;
+  }
   if (game.state === 'proposed') {
     return `<p class="lede">Proposed by ${escapeHtml(game.proposer.displayName)}${game.imported ? ', starting from an imported record' : ''}. Waiting for an opponent.</p>`;
   }
@@ -716,6 +723,41 @@ function renderMoveSyntax(): string {
 </div>`;
 }
 
+/**
+ * Ticket 13: the viewer's own share toggle and hide button (any participant),
+ * plus an admin's removal. Rendered regardless of lifecycle state — an admin
+ * may still want to remove a finished game, and a participant may still want
+ * to stop sharing or hide one.
+ */
+function renderGameManagement(game: GameView): string {
+  const parts: string[] = [];
+  if (game.viewerShared !== null) {
+    parts.push(
+      game.viewerShared
+        ? `<form method="post" action="/games/${game.id}/share"><input type="hidden" name="on" value="0"><button type="submit" class="btn btn-quiet btn-sm">Stop sharing</button></form>`
+        : `<form method="post" action="/games/${game.id}/share"><input type="hidden" name="on" value="1"><button type="submit" class="btn btn-quiet btn-sm">Share with spectators</button></form>`,
+    );
+  }
+  if (game.canHide) {
+    parts.push(
+      `<form method="post" action="/games/${game.id}/hide"><button type="submit" class="btn btn-quiet btn-sm">Hide from my games</button></form>`,
+    );
+  }
+  if (game.canAdminDelete) {
+    parts.push(
+      `<form method="post" action="/games/${game.id}/admin-delete"><button type="submit" class="btn btn-danger btn-sm">Remove this game</button></form>`,
+    );
+  }
+  if (parts.length === 0) return '';
+  return `<div class="block"><h2>Visibility</h2><p class="hint">${
+    game.viewerShared === null
+      ? 'Only an admin can see this here.'
+      : game.viewerShared
+        ? 'Shared: anyone can view this game.'
+        : 'Not shared: only the two players can view this game.'
+  }</p><div class="row-actions">${parts.join('')}</div></div>`;
+}
+
 export function renderGamePage(user: SessionUser, game: GameView, view: GameViewPageView = {}): string {
   const error = view.error ? `<p class="error">${escapeHtml(view.error)}</p>` : '';
   const body = `
@@ -729,6 +771,7 @@ ${TAK_BOARD_SCRIPT}
   ${renderBoard(game)}
   ${renderGameControls(game)}
 </div>
+${renderGameManagement(game)}
 ${renderReserves(game)}
 ${renderHistory(game)}
 ${renderMoveSyntax()}`;

@@ -625,3 +625,98 @@ describe('draw offers and take-backs at the game screen', () => {
     expect(page).not.toContain('1.</span>'); // the move was undone
   });
 });
+
+describe('sharing, hiding, and admin removal at the game screen', () => {
+  async function inPlayGame(): Promise<{ app: App; db: Database.Database; aoife: string; takashi: string }> {
+    const { app, db } = makeApp();
+    await insertUser(db, { id: 1, username: 'aoife', password: 'pw', displayName: 'Aoife Nolan' });
+    await insertUser(db, { id: 2, username: 'takashi', password: 'pw', displayName: 'Takashi Mori' });
+    const aoife = await signIn(app, 'aoife', 'pw');
+    const takashi = await signIn(app, 'takashi', 'pw');
+    await app.request('/games', withCookie(form({ board_size: '5', join_type: 'open' }), aoife));
+    await app.request('/games/1/join', withCookie(form({ from: 'find' }), takashi));
+    return { app, db, aoife, takashi };
+  }
+
+  it('toggles the viewer’s own share and shows it on the page', async () => {
+    const { app, aoife } = await inPlayGame();
+
+    const shared = await (await app.request('/games/1', withCookie({}, aoife))).text();
+    expect(shared).toContain('Shared: anyone can view this game.');
+    expect(shared).toContain('Stop sharing');
+
+    const res = await app.request('/games/1/share', withCookie(form({ on: '0' }), aoife));
+    expect(res.status).toBe(303);
+    expect(res.headers.get('location')).toBe('/games/1');
+
+    const unshared = await (await app.request('/games/1', withCookie({}, aoife))).text();
+    expect(unshared).toContain('Not shared: only the two players can view this game.');
+    expect(unshared).toContain('Share with spectators');
+  });
+
+  it('hides the game from the hider’s list and redirects there', async () => {
+    const { app, aoife, takashi } = await inPlayGame();
+
+    const res = await app.request('/games/1/hide', withCookie(form({}), aoife));
+
+    expect(res.status).toBe(303);
+    expect(res.headers.get('location')).toBe('/games');
+    expect(await (await app.request('/games', withCookie({}, aoife))).text()).toContain('No games yet');
+    // Takashi never hid it, so it still shows for him.
+    expect(await (await app.request('/games', withCookie({}, takashi))).text()).not.toContain('No games yet');
+  });
+
+  it('deletes the game once both players hide it', async () => {
+    const { app, aoife, takashi } = await inPlayGame();
+    await app.request('/games/1/hide', withCookie(form({}), aoife));
+
+    await app.request('/games/1/hide', withCookie(form({}), takashi));
+
+    expect((await app.request('/games/1', withCookie({}, aoife))).status).toBe(404);
+  });
+
+  it('lets an admin remove any game, leaving a warning for the players', async () => {
+    const { app, db, aoife } = await inPlayGame();
+    await insertUser(db, { id: 3, username: 'root', password: 'pw', role: 'admin' });
+    const admin = await signIn(app, 'root', 'pw');
+
+    const res = await app.request('/games/1/admin-delete', withCookie(form({}), admin));
+
+    expect(res.status).toBe(303);
+    expect(db.prepare('SELECT state, admin_removed FROM games WHERE id = 1').get()).toEqual({
+      state: 'finished',
+      admin_removed: 1,
+    });
+
+    const playerView = await (await app.request('/games/1', withCookie({}, aoife))).text();
+    expect(playerView).toContain('This game was removed by an admin');
+    const list = await (await app.request('/games', withCookie({}, aoife))).text();
+    expect(list).toContain('removed by an admin');
+  });
+
+  it('lets an admin view a game that is not shared', async () => {
+    const { app, db } = makeApp();
+    await insertUser(db, { id: 1, username: 'aoife', password: 'pw' });
+    await insertUser(db, { id: 2, username: 'takashi', password: 'pw' });
+    await insertUser(db, { id: 3, username: 'root', password: 'pw', role: 'admin' });
+    const aoife = await signIn(app, 'aoife', 'pw');
+    await app.request(
+      '/games',
+      withCookie(form({ board_size: '5', join_type: 'invited', invited_display_name: 'takashi' }), aoife),
+    );
+    const admin = await signIn(app, 'root', 'pw');
+
+    const res = await app.request('/games/1', withCookie({}, admin));
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain('Remove this game');
+  });
+
+  it('refuses a non-admin the admin-delete route', async () => {
+    const { app, aoife } = await inPlayGame();
+
+    const res = await app.request('/games/1/admin-delete', withCookie(form({}), aoife));
+
+    expect(res.status).toBe(403);
+  });
+});

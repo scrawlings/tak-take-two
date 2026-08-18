@@ -192,6 +192,7 @@ export function statusForGameError(error: GameError): ContentfulStatusCode {
     case 'request-pending':
     case 'no-pending-request':
     case 'no-move-to-take-back':
+    case 'already-removed':
       return 409;
   }
 }
