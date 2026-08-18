@@ -8,11 +8,12 @@
     "web"
   ],
   "scripts": {
-    "typecheck": "tsc --noEmit -p core && tsc --noEmit -p web",
+    "typecheck": "tsc --noEmit -p core && tsc --noEmit -p web && tsc --noEmit -p web/tsconfig.client.json",
     "test": "vitest run",
     "test:watch": "vitest",
     "dev": "npm run dev -w web",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "build:client": "npm run build:client -w web"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

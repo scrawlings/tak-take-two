@@ -4,16 +4,16 @@
 
 **Blocked by:** 11 — Play: game view, moves, finish; 18 — Self-play in one window
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `web/src/client/move-builder.ts` — the state machine: interaction state (stone to place, source square, lift count, per-square drops) in; composed PTN notation, path highlights with drop counts, and validity out. Invariants: straight-line path, lift ≤ carry limit, lift ≤ stack height, every drop ≥ 1, drops sum = lift. Seat-agnostic — no seat data in the module.
-- [ ] Ticket-19 interaction model born here: lift-count state, per-square drop-adjustment state, capstone-flatten composition — tested now; the stepper and drop-adjuster HTML stay in ticket 19.
-- [ ] `web/src/client/board-adapter.ts` — thin Alpine adapter: registers `Alpine.data('takBoard', …)` (component name and `x-data` config injection preserved — `games-http.test.ts:566` pins both), reads `data-square`/`data-height`/`data-top`, applies the ownership rule (`selfPlay || top[0] === viewerSeat`) before calling the module.
-- [ ] First client build seam: vite bundles module + adapter to a single IIFE; a build step emits it as a TS string; `renderGamePage` inlines `<script>…</script>` on the game page only, mirroring `siteCss()`. Alpine stays on the CDN.
-- [ ] `TAK_BOARD_SCRIPT` deleted from `web/src/views.ts`; `renderBoard` and the board markup unchanged.
-- [ ] Tests (`web/test/board-builder.test.ts`): flagship round-trip — `parseMove` succeeds and `formatMove(parsed) === composed` for every composed notation; transitions (place, pick source, straight-line path, non-straight rejected, cancel, capstone flatten); the lift/drop invariants including drop-adjustment steps.
-- [ ] Existing tests stay green: `shell.test.ts:25` (Alpine CDN), `games-http.test.ts:564` (board markup), `:566` (`takBoard` name + config).
-- [ ] No CONTEXT.md change (the builder is mechanics); ADR-0006 cross-reference.
+- [x] `web/src/client/move-builder.ts` — the state machine: interaction state (stone to place, source square, lift count, per-square drops) in; composed PTN notation, path highlights with drop counts, and validity out. Invariants: straight-line path, lift ≤ carry limit, lift ≤ stack height, every drop ≥ 1, drops sum = lift. Seat-agnostic — no seat data in the module.
+- [x] Ticket-19 interaction model born here: lift-count state, per-square drop-adjustment state, capstone-flatten composition — tested now; the stepper and drop-adjuster HTML stay in ticket 19.
+- [x] `web/src/client/board-adapter.ts` — thin Alpine adapter: registers `Alpine.data('takBoard', …)` (component name and `x-data` config injection preserved — `games-http.test.ts:566` pins both), reads `data-square`/`data-height`/`data-top`, applies the ownership rule (`selfPlay || top[0] === viewerSeat`) before calling the module.
+- [x] First client build seam: vite bundles module + adapter to a single IIFE; a build step emits it as a TS string; `renderGamePage` inlines `<script>…</script>` on the game page only, mirroring `siteCss()`. Alpine stays on the CDN.
+- [x] `TAK_BOARD_SCRIPT` deleted from `web/src/views.ts`; `renderBoard` and the board markup unchanged.
+- [x] Tests (`web/test/board-builder.test.ts`): flagship round-trip — `parseMove` succeeds and `formatMove(parsed) === composed` for every composed notation; transitions (place, pick source, straight-line path, non-straight rejected, cancel, capstone flatten); the lift/drop invariants including drop-adjustment steps.
+- [x] Existing tests stay green: `shell.test.ts:25` (Alpine CDN), `games-http.test.ts:564` (board markup), `:566` (`takBoard` name + config).
+- [x] No CONTEXT.md change (the builder is mechanics); ADR-0006 cross-reference.
 
 ## Comments
 
@@ -25,3 +25,14 @@
 - **Seat logic stays in the adapter.** CONTEXT.md's Seat is a view concern — the Game module decides `canMove`/`viewerSeat`/`selfPlay` and the view passes them as config; the adapter applies the ownership rule and keeps the module seat-free.
 - **Inline bundle, not a served file.** The repo has no static serving (ADR-0002 single-process) and `/site.css` is already an inlined TS string; the bundle follows that pattern, game-page-only. Alpine stays on the CDN; the reactivity fork (which runtime owns what on the game screen) is deliberately not decided by this ticket.
 - **What ticket 19 becomes:** a pure UI ticket — the stepper and drop adjusters wire to the born state machine, plus the path-square highlighting it already derives.
+
+**2026-08-18 — Implemented.** `web/src/client/move-builder.ts` is the state machine (pure data in, composed PTN out); `web/src/client/board-adapter.ts` is the Alpine adapter that owns the DOM and the seat rule. `npm run build:client` bundles the pair to an IIFE and emits `web/src/client-script.generated.ts`, which `renderGamePage` inlines. 28 tests in `web/test/board-builder.test.ts`.
+
+Decisions worth carrying forward:
+
+- **The generated bundle is committed**, so tests, typecheck and `npm run dev` never need a build step. The failure mode that buys — editing `src/client/` and forgetting to rebuild, silently serving yesterday's script — is closed by a fingerprint: the build records a hash of the client sources and a test recomputes it. `AGENTS.md` names the workflow.
+- **`stone` stays a plain component field**, not builder state, because `games-http.test.ts` pins `x-on:click="stone = 'flat'"` in the markup. The adapter folds it into the module at click time, so the module still owns composition.
+- **Only a composition writes to the move field.** Picking up a stack composes nothing yet, and blanking the field at that moment would throw away notation the player typed by hand.
+- **`source.sq` became `source.square`** in the two templates that read it, matching the module's vocabulary.
+- **The path is refused, not shortened, when it is longer than the hand** — a click that cannot mean a legal shape means nothing, rather than a shape the player did not ask for.
+- **Adjusting a drop moves exactly one stone**, taken from (or given back to) the last square that can spare it; an adjustment no square can pay for is refused rather than half-applied. That keeps both invariants — every square ≥ 1, drops sum to the lift — true after every step, which is what the round-trip test relies on.

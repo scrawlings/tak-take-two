@@ -1,3 +1,4 @@
+import { BOARD_SCRIPT } from './client-script.generated.js';
 import { breadcrumb, escapeHtml, renderShell } from './html.js';
 import type { SessionUser } from './auth.js';
 import type { ExportFormat, GameExport, GameSummary, GameView } from './games.js';
@@ -593,45 +594,6 @@ export interface GameViewPageView {
   error?: string;
 }
 
-/** Register the board's click builder as an Alpine component. */
-const TAK_BOARD_SCRIPT = `<script>
-document.addEventListener('alpine:init', () => {
-  Alpine.data('takBoard', (config) => ({
-    move: '', stone: 'flat', source: null,
-    canMove: config.canMove, viewerSeat: config.viewerSeat, size: config.size, selfPlay: config.selfPlay,
-    cellClick(el) {
-      if (!this.canMove) return;
-      const sq = el.dataset.square;
-      const height = Number(el.dataset.height);
-      const top = el.dataset.top;
-      const mine = top !== '' && (this.selfPlay || top[0] === String(this.viewerSeat));
-      if (this.source === null) {
-        if (height === 0) {
-          const prefix = this.stone === 'standing' ? 'S' : this.stone === 'capstone' ? 'C' : '';
-          this.move = prefix + sq;
-        } else if (mine) {
-          this.source = { sq, height };
-        }
-        return;
-      }
-      if (this.source.sq === sq) { this.source = null; return; }
-      const sf = this.source.sq[0], sr = Number(this.source.sq[1]);
-      const df = sq[0], dr = Number(sq[1]);
-      if (sf !== df && sr !== dr) return;
-      let dir, dist;
-      if (sf === df) { dir = dr > sr ? '+' : '-'; dist = Math.abs(dr - sr); }
-      else { dir = df > sf ? '>' : '<'; dist = Math.abs(df.charCodeAt(0) - sf.charCodeAt(0)); }
-      const lift = Math.min(this.source.height, this.size);
-      if (lift < dist) return;
-      const drops = new Array(dist).fill(1);
-      drops[dist - 1] = lift - (dist - 1);
-      this.move = lift + this.source.sq + dir + drops.join('');
-      this.source = null;
-    }
-  }));
-});
-</script>`;
-
 function renderBoard(game: GameView): string {
   const files = ['a', 'b', 'c', 'd', 'e', 'f'].slice(0, game.boardSize);
   const top = `<span class="axis"></span>${files.map((f) => `<span class="axis">${f}</span>`).join('')}`;
@@ -651,7 +613,7 @@ function renderBoard(game: GameView): string {
                 .reverse()
                 .map((s) => `<span>${stoneGlyph(s.player, s.kind)}</span>`)
                 .join('')}</span>`;
-        return `<button type="button" class="cell" data-square="${cell.file}${cell.rank}" data-height="${cell.stack.length}" data-top="${topAttr}" x-on:click="cellClick($el)" :class="{ 'is-source': source !== null && source.sq === '${cell.file}${cell.rank}' }" aria-label="${cell.file}${cell.rank}">${glyph}${height}${stackTip}</button>`;
+        return `<button type="button" class="cell" data-square="${cell.file}${cell.rank}" data-height="${cell.stack.length}" data-top="${topAttr}" x-on:click="cellClick($el)" :class="{ 'is-source': source !== null && source.square === '${cell.file}${cell.rank}' }" aria-label="${cell.file}${cell.rank}">${glyph}${height}${stackTip}</button>`;
       })
       .join('');
     rows.push(`<span class="axis">${rank}</span>${cells}`);
@@ -768,7 +730,7 @@ function renderGameControls(game: GameView): string {
     <div class="stone-picker" role="group" aria-labelledby="stone-label">
       ${stoneButtons}
     </div>
-    <p class="hint" x-show="source !== null">Moving from <span x-text="source ? source.sq : ''"></span> — click a square in a straight line, or the source again to cancel.</p>
+    <p class="hint" x-show="source !== null">Moving from <span x-text="source ? source.square : ''"></span> — click a square in a straight line, or the source again to cancel.</p>
   </div>
   <p class="actions"><button type="submit" class="btn">Play move</button></p>
 </form>`);
@@ -906,7 +868,10 @@ ${breadcrumb({ href: '/games', label: 'Games' }, `Game ${game.id}`)}
 ${renderGameStatus(game)}
 ${error}
 ${renderLegend()}
-${TAK_BOARD_SCRIPT}
+${/* The move builder, inlined: state machine and Alpine adapter from
+     src/client/, bundled by `npm run build:client -w web` (ADR-0006). Only
+     this page needs them, so only this page carries them. */ ''}
+<script>${BOARD_SCRIPT}</script>
 <div x-data="takBoard(${escapeHtml(JSON.stringify({ canMove: game.canMove, viewerSeat: game.viewerSeat, size: game.boardSize, selfPlay: game.selfPlay }))})" x-cloak>
   ${renderBoard(game)}
   ${renderGameControls(game)}

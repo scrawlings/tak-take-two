@@ -10,4 +10,4 @@ coverage/
 .DS_Store
 *.log
 *.pem
-web/data
+web/dataweb/dist-client/
