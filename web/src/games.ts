@@ -93,6 +93,11 @@ export interface GameSummary {
   readonly canDelete: boolean;
   /** Whether the viewer may join this proposal — likewise decided here. */
   readonly canJoin: boolean;
+  /**
+   * The viewer may claim their own proposal, making it a self-play game
+   * (CONTEXT.md: Self-play); the join button reads “solo” for them.
+   */
+  readonly canSolo: boolean;
   /** Whose turn it is, or null while the game is not in play. */
   readonly toMove: PlayerRef | null;
   /** The stored PTN result (`R-0`, `1/2-1/2`, …), or null while not finished. */
@@ -1418,6 +1423,7 @@ export function createGames(persistence: Persistence): Games {
       createdAt: game.createdAt,
       canDelete: deletableBy(game, actor.id),
       canJoin: joinableBy(game, actor),
+      canSolo: game.proposerId === actor.id && joinableBy(game, actor),
       adminRemoved: game.adminRemoved,
       toMove,
       result: game.result,

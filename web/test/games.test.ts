@@ -816,6 +816,19 @@ describe('games: searchProposed', () => {
     expect(found.every((g) => g.canJoin)).toBe(true);
   });
 
+  it('marks only your own proposal as solo, never someone else’s', () => {
+    const h = harness();
+    propose(h, h.aoife);
+
+    // On the proposer's own list the proposal is claimable as a solo game.
+    const mine = h.games.listMyGames(h.aoife)._unsafeUnwrap();
+    expect(mine[0]).toMatchObject({ canJoin: true, canSolo: true });
+
+    // For anyone else the same proposal is a plain join, not a solo.
+    const found = h.games.searchProposed(h.takashi)._unsafeUnwrap();
+    expect(found[0]).toMatchObject({ canJoin: true, canSolo: false });
+  });
+
   it('shows an invited game only to the player it names', () => {
     const h = harness();
     insertUser(h.db, { id: 4, username: 'wren', displayName: 'Wren Alvarez' });

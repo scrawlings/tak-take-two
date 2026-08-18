@@ -415,7 +415,7 @@ export function createApp(deps: AppDeps): App {
       ),
     // A join means play now: land on the game screen, not back on a list.
     // Only a refused join is reported on the list that offered the button.
-    onOk: (c) => c.redirect('/games', 303),
+    onOk: (c) => c.redirect(`/games/${c.req.param('id')}`, 303),
     renderError: (c, e, f) => gameJoinError(c, e, f.from),
   }));
 

@@ -387,14 +387,15 @@ describe('POST /games/:id/join', () => {
     return { app, db, aoife, takashi };
   }
 
-  it('joins an open game and lands back on the games list', async () => {
+  it('joins an open game and lands on the game screen to play', async () => {
     const { app, db, aoife, takashi } = await twoPlayers();
     await app.request('/games', withCookie(form({ board_size: '5', join_type: 'open' }), aoife));
 
     const res = await app.request('/games/1/join', withCookie({ method: 'POST' }, takashi));
 
     expect(res.status).toBe(303);
-    expect(res.headers.get('location')).toBe('/games');
+    // A join means play now, so it lands on the game screen, not a list.
+    expect(res.headers.get('location')).toBe('/games/1');
     expect(db.prepare('SELECT state, opponent_id FROM games').get()).toEqual({
       state: 'in_play',
       opponent_id: 2,
@@ -441,6 +442,24 @@ describe('POST /games/:id/join', () => {
     const html = await res.text();
     expect(html).toContain('Find a game');
     expect(html).toContain('This game has already started');
+  });
+
+  it('labels claiming your own proposal as solo, not join', async () => {
+    const { app, aoife, takashi } = await twoPlayers();
+    await app.request('/games', withCookie(form({ board_size: '5', join_type: 'open' }), aoife));
+
+    // On the proposer's own lists, claiming the proposal is a solo game.
+    const mine = await (await app.request('/games', withCookie({}, aoife))).text();
+    expect(mine).toContain('>Solo</button>');
+    expect(mine).toContain('title="Claim your own game and play both seats yourself."');
+    expect(mine).not.toContain('>Join</button>');
+    const find = await (await app.request('/games/find', withCookie({}, aoife))).text();
+    expect(find).toContain('>Solo</button>');
+
+    // Another player is offered the same game as a plain join.
+    const theirs = await (await app.request('/games/find', withCookie({}, takashi))).text();
+    expect(theirs).toContain('>Join</button>');
+    expect(theirs).not.toContain('>Solo</button>');
   });
 
   it('reports an unknown game as not found', async () => {

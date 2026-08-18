@@ -350,10 +350,16 @@ export type GameListPage = 'games' | 'find';
 
 /** The actions a viewer may take on a game, as the module decided them. */
 function gameActions(game: GameSummary, from: GameListPage): string {
-  const buttons = [
+  // Claiming your own proposal starts a self-play game, so the button says
+  // what that means rather than a bare “join” (CONTEXT.md: Self-play).
+  const join =
     game.canJoin
-      ? `<form method="post" action="/games/${game.id}/join"><input type="hidden" name="from" value="${from}"><button type="submit" class="btn btn-sm">Join</button></form>`
-      : '',
+      ? `<form method="post" action="/games/${game.id}/join"><input type="hidden" name="from" value="${from}"><button type="submit" class="btn btn-sm"${
+          game.canSolo ? ' title="Claim your own game and play both seats yourself."' : ''
+        }>${game.canSolo ? 'Solo' : 'Join'}</button></form>`
+      : '';
+  const buttons = [
+    join,
     game.canDelete
       ? `<form method="post" action="/games/${game.id}/delete"><button type="submit" class="btn btn-danger btn-sm">Delete</button></form>`
       : '',
