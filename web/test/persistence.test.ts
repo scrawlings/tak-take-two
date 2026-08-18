@@ -162,6 +162,7 @@ describe('persistence', () => {
       proposerId,
       proposerShared: true,
       opponentShared: true,
+      proposerSeat: 1 as const,
     });
 
     it('creates a proposed open game and reads it back', () => {
@@ -201,6 +202,7 @@ describe('persistence', () => {
           // ADR-0003: an invited game starts private.
           proposerShared: false,
           opponentShared: false,
+          proposerSeat: 1,
         })
         ._unsafeUnwrap();
 

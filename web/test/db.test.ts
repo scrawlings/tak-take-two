@@ -46,9 +46,9 @@ describe('runMigrations', () => {
 
     expect(runMigrations(db).isOk()).toBe(true);
 
-    expect(versions(db)).toEqual([1, 2, 3, 4, 5]);
+    expect(versions(db)).toEqual([1, 2, 3, 4, 5, 6]);
     expect(columns(db, 'games')).toEqual(
-      expect.arrayContaining(['imported_ptn', 'proposer_shared', 'opponent_shared', 'admin_removed']),
+      expect.arrayContaining(['imported_ptn', 'proposer_shared', 'opponent_shared', 'admin_removed', 'proposer_seat']),
     );
   });
 
@@ -59,7 +59,7 @@ describe('runMigrations', () => {
 
     expect(runMigrations(db).isOk()).toBe(true);
 
-    expect(versions(db)).toEqual([1, 2, 3, 4, 5]);
+    expect(versions(db)).toEqual([1, 2, 3, 4, 5, 6]);
   });
 
   it('upgrades an existing database without disturbing its rows', () => {
@@ -68,13 +68,14 @@ describe('runMigrations', () => {
 
     expect(runMigrations(db).isOk()).toBe(true);
 
-    expect(versions(db)).toEqual([1, 2, 3, 4, 5]);
-    // The existing game survives, gaining an empty record and both share
-    // toggles off — the private default, never a silent opening-up.
+    expect(versions(db)).toEqual([1, 2, 3, 4, 5, 6]);
+    // The existing game survives, gaining an empty record, both share toggles
+    // off — the private default, never a silent opening-up — and an unresolved
+    // (NULL) starter seat, meaning a coin flip decides who starts on join.
     expect(
       db
         .prepare(
-          'SELECT id, board_size, proposer_id, imported_ptn, proposer_shared, opponent_shared FROM games',
+          'SELECT id, board_size, proposer_id, imported_ptn, proposer_shared, opponent_shared, proposer_seat FROM games',
         )
         .get(),
     ).toEqual({
@@ -84,6 +85,7 @@ describe('runMigrations', () => {
       imported_ptn: null,
       proposer_shared: 0,
       opponent_shared: 0,
+      proposer_seat: null,
     });
   });
 });

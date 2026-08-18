@@ -48,6 +48,7 @@ export type GameErrorCode =
   | 'invalid-board-size'
   | 'invalid-join-type'
   | 'invalid-invite'
+  | 'invalid-starter'
   | 'invalid-ptn'
   | 'already-joined'
   | 'not-invited'
@@ -96,6 +97,11 @@ export interface GameSummary {
   readonly toMove: PlayerRef | null;
   /** The stored PTN result (`R-0`, `1/2-1/2`, …), or null while not finished. */
   readonly result: string | null;
+  /**
+   * The core seat (1 or 2) the proposer holds; null means random, resolved
+   * when the joiner claims the game. Seat 1 (filled) moves first.
+   */
+  readonly proposerSeat: 1 | 2 | null;
   /** Ticket 13: this game was ended by an admin, not by play or agreement. */
   readonly adminRemoved: boolean;
 }
@@ -153,6 +159,11 @@ export interface GameView {
   readonly toMove: PlayerRef | null;
   /** 1 or 2, or null while not in play. */
   readonly toMoveSeat: 1 | 2 | null;
+  /**
+   * The core seat (1 or 2) the proposer holds; null means random, resolved
+   * when the joiner claims the game. Seat 1 (filled) moves first.
+   */
+  readonly proposerSeat: 1 | 2 | null;
   /** The viewer may play a move right now. */
   readonly canMove: boolean;
   /** One pending request/offer, from a participant, awaiting the other's answer. */
@@ -197,6 +208,8 @@ export type GameCommand =
       readonly joinType: string;
       /** Required for an invited proposal; the display name of the player to invite. */
       readonly invitedDisplayName?: string;
+      /** Who starts (seat 1): `me`, `opponent`, or `random`. Defaults to `me`. */
+      readonly starter?: string;
       /** A PTN record to import as fixed history. Blank or absent proposes an empty board. */
       readonly ptn?: string;
     }
@@ -337,7 +350,10 @@ function visibleTo(game: GameRecord, actorId: number): boolean {
 
 /** The proposer is always Player 1 and the joiner Player 2 (CONTEXT.md: Seat). */
 function seatOf(game: GameRecord, player: Player): number | null {
-  return player === 1 ? game.proposerId : game.opponentId;
+  const proposerSeat = game.proposerSeat;
+  if (proposerSeat === null) return null; // random, unresolved — still proposed
+  if (player === 1) return proposerSeat === 1 ? game.proposerId : game.opponentId;
+  return proposerSeat === 1 ? game.opponentId : game.proposerId;
 }
 
 /** Whether one account holds both seats — the proposer joined their own proposal (CONTEXT.md: Self-play). */
@@ -353,6 +369,24 @@ function parseBoardSize(value: number): Result<GameBoardSize, GameError> {
 function parseJoinType(value: string): Result<JoinType, GameError> {
   if (value === 'open' || value === 'invited') return ok(value);
   return err({ code: 'invalid-join-type', message: 'Choose an open or an invited game.' });
+}
+
+/**
+ * The proposer's seat choice: `me` → 1, `opponent` → 2, `random` → null (a
+ * coin flip when the joiner claims the game). The result is the proposer's
+ * core seat, the one fact every other seat mapping derives from.
+ */
+function parseStarter(value: string | undefined): Result<1 | 2 | null, GameError> {
+  switch (value ?? 'me') {
+    case 'me':
+      return ok(1);
+    case 'opponent':
+      return ok(2);
+    case 'random':
+      return ok(null);
+    default:
+      return err({ code: 'invalid-starter', message: 'Choose who starts: you, the other player, or at random.' });
+  }
 }
 
 function parseExportFormat(value: string): Result<ExportFormat, GameError> {
@@ -446,6 +480,9 @@ export function createGames(persistence: Persistence): Games {
     const joinType = parseJoinType(command.joinType);
     if (joinType.isErr()) return err(joinType.error);
 
+    const proposerSeat = parseStarter(command.starter);
+    if (proposerSeat.isErr()) return err(proposerSeat.error);
+
     const imported = validateImport(command.ptn);
     if (imported.isErr()) return err(imported.error);
 
@@ -470,6 +507,7 @@ export function createGames(persistence: Persistence): Games {
         proposerId: actor.id,
         invitedPlayerId: invited.value?.id ?? null,
         importedPtn: imported.value?.text ?? null,
+        proposerSeat: proposerSeat.value,
         // ADR-0003: an open game starts shared, because joining one implies
         // sharing; an invited game starts private to its two players.
         proposerShared: joinType.value === 'open',
@@ -485,6 +523,7 @@ export function createGames(persistence: Persistence): Games {
           joinType: joinType.value,
           invited: invited.value?.displayName ?? null,
           imported: imported.value !== null,
+          proposerSeat: proposerSeat.value,
         },
       });
       if (trail.isErr()) return err(trail.error);
@@ -556,7 +595,10 @@ export function createGames(persistence: Persistence): Games {
     }
 
     const joined = persistence.transaction((): Result<boolean, string> => {
-      const claimed = persistence.joinGame(game.id, actor.id);
+      // A random start resolves here, once, when the second player claims the
+      // game; a seat the proposer already chose is left alone by COALESCE.
+      const proposerSeat: 1 | 2 = game.proposerSeat ?? (Math.random() < 0.5 ? 1 : 2);
+      const claimed = persistence.joinGame(game.id, actor.id, proposerSeat);
       if (claimed.isErr()) return claimed;
       // The conditional UPDATE is the real guard: if it changed nothing, the
       // game stopped being an unjoined proposal, so write no trail event.
@@ -565,7 +607,7 @@ export function createGames(persistence: Persistence): Games {
         userId: actor.id,
         gameId: game.id,
         event: 'game-joined',
-        payload: { proposer: game.proposerId, joinType: game.joinType },
+        payload: { proposer: game.proposerId, joinType: game.joinType, proposerSeat },
       });
       if (trail.isErr()) return err(trail.error);
       return ok(true);
@@ -580,8 +622,10 @@ export function createGames(persistence: Persistence): Games {
 
   /** The seat (1/2) an actor holds in a game, or null when not a participant. */
   function seatOfActor(game: GameRecord, actorId: number): 1 | 2 | null {
-    if (game.proposerId === actorId) return 1;
-    if (game.opponentId === actorId) return 2;
+    const proposerSeat = game.proposerSeat;
+    if (proposerSeat === null) return null; // random, unresolved — still proposed
+    if (game.proposerId === actorId) return proposerSeat;
+    if (game.opponentId === actorId) return proposerSeat === 1 ? 2 : 1;
     return null;
   }
 
@@ -752,7 +796,10 @@ export function createGames(persistence: Persistence): Games {
 
     const current = currentTakGame(game);
     if (current.isErr()) return err(current.error);
-    const seat: 1 | 2 = actor.id === game.proposerId ? 1 : 2;
+    const seat = seatOfActor(game, actor.id);
+    if (seat === null) {
+      return err({ code: 'forbidden', message: 'Only the two players may end a game.' });
+    }
     const done = coreResign(current.value, seat);
     if (done.isErr()) return err({ code: 'not-in-play', message: done.error.message });
     const result = resultCode(done.value)!;
@@ -1187,15 +1234,21 @@ export function createGames(persistence: Persistence): Games {
       // Who held each seat here. A record that does not name its players is a
       // move list, not a game record (CONTEXT.md: PTN is tags, moves, result).
       // Nothing else is claimed: an imported game's own tags are not this
-      // game's to restate.
+      // game's to restate. Seats come from the starter choice, so Player1 is
+      // the seat-1 account, not necessarily the proposer.
       const nameOf = nameResolver();
-      const proposer = nameOf(game.proposerId);
-      if (proposer.isErr()) return err(proposer.error);
-      const tags: Array<readonly [string, string]> = [['Player1', proposer.value.displayName]];
-      if (game.opponentId !== null) {
-        const opponent = nameOf(game.opponentId);
-        if (opponent.isErr()) return err(opponent.error);
-        tags.push(['Player2', opponent.value.displayName]);
+      const seat1 = seatOf(game, 1);
+      const seat2 = seatOf(game, 2);
+      const tags: Array<readonly [string, string]> = [];
+      if (seat1 !== null) {
+        const p1 = nameOf(seat1);
+        if (p1.isErr()) return err(p1.error);
+        tags.push(['Player1', p1.value.displayName]);
+      }
+      if (seat2 !== null) {
+        const p2 = nameOf(seat2);
+        if (p2.isErr()) return err(p2.error);
+        tags.push(['Player2', p2.value.displayName]);
       }
 
       // A prefix stops short of the ending, so it must not carry the result:
@@ -1244,7 +1297,11 @@ export function createGames(persistence: Persistence): Games {
     const viewerSeat = seatOfActor(game, actor.id);
     const selfPlay = isSelfPlay(game);
     const toMoveSeat: 1 | 2 | null = game.state === 'in_play' ? tak.state.playerToMove : null;
-    const toMove = toMoveSeat === null ? null : toMoveSeat === 1 ? proposer.value : opponent.value;
+    // Seat 1 (filled) and seat 2 (open) resolve through the proposer's seat,
+    // which the starter choice sets — the proposer need not be seat 1.
+    const seat1Ref = seatOf(game, 1) === game.proposerId ? proposer.value : opponent.value;
+    const seat2Ref = seatOf(game, 2) === game.proposerId ? proposer.value : opponent.value;
+    const toMove = toMoveSeat === null ? null : toMoveSeat === 1 ? seat1Ref : seat2Ref;
 
     // The single pending request/offer, resolved to a name for the board.
     let pending: PendingRequestView | null = null;
@@ -1265,7 +1322,7 @@ export function createGames(persistence: Persistence): Games {
     for (let i = 0; i < tak.history.length; i++) {
       const rec = tak.history[i]!;
       const seat: 1 | 2 = i % 2 === 0 ? 1 : 2;
-      const ref = seat === 1 ? proposer.value : opponent.value;
+      const ref = seat === 1 ? seat1Ref : seat2Ref;
       if (ref === null) continue; // moves exist only after a join, so the joiner is known
       moves.push({
         number: i + 1,
@@ -1291,6 +1348,7 @@ export function createGames(persistence: Persistence): Games {
       imported: game.importedPtn !== null,
       viewerSeat,
       selfPlay,
+      proposerSeat: game.proposerSeat,
       moves,
       board: buildBoard(tak.state),
       toMove,
@@ -1301,7 +1359,7 @@ export function createGames(persistence: Persistence): Games {
       canResign: inPlay && participant && !selfPlay,
       canOfferDraw: inPlay && participant && !selfPlay && noPending,
       canOfferTakeBack: inPlay && participant && !selfPlay && noPending && lastLiveSeat === viewerSeat,
-      resultText: resultTextOf(game.result, proposer.value, opponent.value),
+      resultText: resultTextOf(game.result, seat1Ref, seat2Ref),
       reserves: tak.state.reserves,
       opened: tak.state.opened,
       viewerShared,
@@ -1363,6 +1421,7 @@ export function createGames(persistence: Persistence): Games {
       adminRemoved: game.adminRemoved,
       toMove,
       result: game.result,
+      proposerSeat: game.proposerSeat,
     });
   }
 
@@ -1506,18 +1565,18 @@ function buildBoard(state: GameState): readonly (readonly BoardSquareView[])[] {
 }
 
 /** The human-readable result, or null while in play. */
-function resultTextOf(result: string | null, p1: PlayerRef, p2: PlayerRef | null): string | null {
+function resultTextOf(result: string | null, p1: PlayerRef | null, p2: PlayerRef | null): string | null {
   switch (result) {
     case 'R-0':
-      return `Road win for ${p1.displayName}`;
+      return `Road win for ${p1?.displayName ?? 'player 1'}`;
     case '0-R':
       return p2 ? `Road win for ${p2.displayName}` : 'Road win for player 2';
     case 'F-0':
-      return `Flat win for ${p1.displayName}`;
+      return `Flat win for ${p1?.displayName ?? 'player 1'}`;
     case '0-F':
       return p2 ? `Flat win for ${p2.displayName}` : 'Flat win for player 2';
     case '1-0':
-      return `${p1.displayName} wins by resignation`;
+      return `${p1?.displayName ?? 'Player 1'} wins by resignation`;
     case '0-1':
       return p2 ? `${p2.displayName} wins by resignation` : 'Player 2 wins by resignation';
     case '1/2-1/2':

@@ -82,6 +82,12 @@ export interface GameRecord {
   readonly pendingKind: 'take-back' | 'draw' | null;
   readonly pendingBy: number | null;
   readonly result: string | null;
+  /**
+   * The core seat (1 or 2) the proposer holds; NULL means random, decided by
+   * a coin flip when the joiner claims the game. Seats are decoupled from the
+   * proposer/opponent split so a player may start from the other side.
+   */
+  readonly proposerSeat: 1 | 2 | null;
   /** Ticket 13: forced end by an admin. The game stays (with its real result,
    * if it had one) so affected players see why it ended. */
   readonly adminRemoved: boolean;
@@ -102,6 +108,8 @@ export interface CreateGameInput {
   readonly importedPtn?: string | null;
   readonly proposerShared: boolean;
   readonly opponentShared: boolean;
+  /** The proposer's seat (1 or 2), or null for a random start resolved at join. */
+  readonly proposerSeat: 1 | 2 | null;
 }
 
 /** Column filters for browsing proposals. Visibility is the Game module's rule, not a filter. */
@@ -204,9 +212,9 @@ export interface Persistence {
   /**
    * Claim a proposal as its opponent and start play. Returns false — changing
    * nothing — when the game is no longer an unjoined proposal, so that two
-   * racing joins cannot both succeed.
+   * racing joins cannot both succeed. `proposerSeat` resolves a random start.
    */
-  joinGame(gameId: number, opponentId: number): Result<boolean, string>;
+  joinGame(gameId: number, opponentId: number, proposerSeat: 1 | 2): Result<boolean, string>;
 
   /** Set one side's share toggle; turning it on also clears that side's hide flag. */
   setGameShare(gameId: number, side: GameSide, shared: boolean): Result<void, string>;
@@ -404,8 +412,8 @@ export function createPersistence(db: Db): Persistence {
         const info = db
           .prepare(
             `INSERT INTO games (board_size, state, join_type, proposer_id, invited_player_id, imported_ptn,
-                              proposer_shared, opponent_shared)
-             VALUES (?, 'proposed', ?, ?, ?, ?, ?, ?)`,
+                              proposer_shared, opponent_shared, proposer_seat)
+             VALUES (?, 'proposed', ?, ?, ?, ?, ?, ?, ?)`,
           )
           .run(
             input.boardSize,
@@ -415,6 +423,7 @@ export function createPersistence(db: Db): Persistence {
             input.importedPtn ?? null,
             input.proposerShared ? 1 : 0,
             input.opponentShared ? 1 : 0,
+            input.proposerSeat,
           );
         const row = db.prepare('SELECT * FROM games WHERE id = ?').get(info.lastInsertRowid) as
           | GameRow
@@ -508,17 +517,19 @@ export function createPersistence(db: Db): Persistence {
       }
     },
 
-    joinGame(gameId: number, opponentId: number): Result<boolean, string> {
+    joinGame(gameId: number, opponentId: number, proposerSeat: 1 | 2): Result<boolean, string> {
       try {
         // A join starts a fresh, active game: either side may have hidden the
         // bare proposal beforehand (ticket 13), and that must not carry over
-        // and hide the game they are now actively part of.
+        // and hide the game they are now actively part of. COALESCE keeps a
+        // seat the proposer already chose; a random (NULL) start resolves here.
         const info = db
           .prepare(
-            `UPDATE games SET opponent_id = ?, state = 'in_play', proposer_hidden = 0, opponent_hidden = 0
+            `UPDATE games SET opponent_id = ?, state = 'in_play', proposer_hidden = 0, opponent_hidden = 0,
+               proposer_seat = COALESCE(proposer_seat, ?)
              WHERE id = ? AND state = 'proposed' AND opponent_id IS NULL`,
           )
-          .run(opponentId, gameId);
+          .run(opponentId, proposerSeat, gameId);
         return ok(info.changes === 1);
       } catch (e) {
         return err(e instanceof Error ? e.message : String(e));
@@ -761,6 +772,7 @@ interface GameRow {
   pending_by: number | null;
   result: string | null;
   admin_removed: number;
+  proposer_seat: number | null;
   created_at: string;
   finished_at: string | null;
 }
@@ -792,6 +804,7 @@ function mapGame(row: GameRow): GameRecord {
     pendingKind: row.pending_kind as 'take-back' | 'draw' | null,
     pendingBy: row.pending_by,
     result: row.result,
+    proposerSeat: row.proposer_seat as 1 | 2 | null,
     adminRemoved: row.admin_removed !== 0,
     createdAt: row.created_at,
     finishedAt: row.finished_at,

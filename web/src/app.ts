@@ -384,13 +384,14 @@ export function createApp(deps: AppDeps): App {
   });
 
   app.post('/games', requireUser, formAction({
-    fields: ['board_size', 'join_type', 'invited_display_name', 'ptn'],
+    fields: ['board_size', 'join_type', 'invited_display_name', 'starter', 'ptn'],
     run: (c, f) =>
       games.applyGame(c.get('user'), {
         type: 'propose',
         boardSize: Number(f.board_size),
         joinType: f.join_type ?? '',
         invitedDisplayName: f.invited_display_name ?? undefined,
+        starter: f.starter ?? undefined,
         ptn: f.ptn ?? undefined,
       }),
     onOk: (c) => c.redirect('/games', 303),
@@ -400,6 +401,7 @@ export function createApp(deps: AppDeps): App {
           boardSize: f.board_size,
           joinType: f.join_type,
           invitedDisplayName: f.invited_display_name,
+          starter: f.starter,
           ptn: f.ptn,
         },
       }),
@@ -411,6 +413,8 @@ export function createApp(deps: AppDeps): App {
       paramId(c, 'id', 'That game no longer exists.').andThen((id) =>
         games.applyGame(c.get('user'), { type: 'join', gameId: id }),
       ),
+    // A join means play now: land on the game screen, not back on a list.
+    // Only a refused join is reported on the list that offered the button.
     onOk: (c) => c.redirect('/games', 303),
     renderError: (c, e, f) => gameJoinError(c, e, f.from),
   }));

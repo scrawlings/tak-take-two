@@ -86,6 +86,11 @@ const MIGRATIONS: readonly string[] = [
   `ALTER TABLE games ADD COLUMN proposer_hidden INTEGER NOT NULL DEFAULT 0;
    ALTER TABLE games ADD COLUMN opponent_hidden INTEGER NOT NULL DEFAULT 0;
    ALTER TABLE games ADD COLUMN admin_removed INTEGER NOT NULL DEFAULT 0;`,
+  // The proposer chooses who starts (seat 1): 1 = the proposer, 2 = the
+  // opponent, NULL = random — the coin is flipped when the joiner claims the
+  // game. Decoupling seats from the proposer/opponent split is what lets a
+  // player import a past record and replay it from the other side.
+  `ALTER TABLE games ADD COLUMN proposer_seat INTEGER CHECK (proposer_seat IN (1, 2));`,
 ];
 
 export function openDatabase(path: string): Result<Db, string> {

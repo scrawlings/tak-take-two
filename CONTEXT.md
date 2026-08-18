@@ -30,7 +30,7 @@ A glossary of Tak and this system's domain terms. Vocabulary for the game itself
 ## Games
 
 - **Game** — a match of Tak between two players, from proposal to completion. A game is proposed, in play, or finished.
-- **Seat** — which side of the board an account plays. The **proposer is always Player 1** and the **joiner always Player 2**; seats are not chosen and never swap. This is load-bearing beyond turn order: PTN move direction is written from Player 1's perspective, so the seat decides how a player's moves are notated.
+- **Seat** — which side of the board an account plays: Player 1 (filled, moves first) or Player 2 (open). The proposer chooses who starts when proposing: themselves, the joiner, or at random (a coin flip when the joiner claims the game). Seats are fixed once the game starts and never swap. This is load-bearing beyond turn order: PTN move direction is written from Player 1's perspective, so the seat decides how a player's moves are notated — and choosing the other seat is how a player imports a past record and replays it from the opponent's side.
 - **Game proposal** — a not-yet-started game offered for others to join, as an open game or an invited game.
   _Avoid_: request (ambiguous with take-back request)
 - **Open game** — a proposal any player may join; joining implies the game is shared (both players' share toggles start on).

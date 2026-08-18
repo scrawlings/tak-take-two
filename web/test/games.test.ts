@@ -695,6 +695,101 @@ describe('games: join', () => {
   });
 });
 
+describe('games: who starts (seat choice)', () => {
+  function propose(h: Harness, actor: SessionUser, extra: { starter?: string; ptn?: string } = {}): number {
+    const r = h.games.applyGame(actor, {
+      type: 'propose',
+      boardSize: 5,
+      joinType: 'open',
+      starter: extra.starter,
+      ptn: extra.ptn,
+    });
+    return (r._unsafeUnwrap() as { gameId: number }).gameId;
+  }
+
+  it('defaults to the proposer starting (seat 1)', () => {
+    const h = harness();
+    const gameId = propose(h, h.aoife);
+    h.games.applyGame(h.takashi, { type: 'join', gameId });
+
+    expect(h.persistence.findGameById(gameId)._unsafeUnwrap()?.proposerSeat).toBe(1);
+    expect(h.games.getGame(h.aoife, gameId)._unsafeUnwrap().viewerSeat).toBe(1);
+    expect(h.games.getGame(h.aoife, gameId)._unsafeUnwrap().toMove).toEqual({
+      id: 1,
+      displayName: 'Aoife Nolan',
+    });
+  });
+
+  it('lets the proposer give the start to the opponent', () => {
+    const h = harness();
+    const gameId = propose(h, h.aoife, { starter: 'opponent' });
+    h.games.applyGame(h.takashi, { type: 'join', gameId });
+
+    expect(h.persistence.findGameById(gameId)._unsafeUnwrap()?.proposerSeat).toBe(2);
+    // The joiner holds seat 1 and moves first; the proposer holds seat 2.
+    expect(h.games.getGame(h.takashi, gameId)._unsafeUnwrap().viewerSeat).toBe(1);
+    expect(h.games.getGame(h.aoife, gameId)._unsafeUnwrap().viewerSeat).toBe(2);
+    expect(h.games.getGame(h.takashi, gameId)._unsafeUnwrap().toMove).toEqual({
+      id: 2,
+      displayName: 'Takashi Mori',
+    });
+  });
+
+  it('resolves a random start once, when the joiner claims the game', () => {
+    const h = harness();
+    const gameId = propose(h, h.aoife, { starter: 'random' });
+    expect(h.persistence.findGameById(gameId)._unsafeUnwrap()?.proposerSeat).toBeNull();
+
+    h.games.applyGame(h.takashi, { type: 'join', gameId });
+
+    const seat = h.persistence.findGameById(gameId)._unsafeUnwrap()?.proposerSeat;
+    expect(seat === 1 || seat === 2).toBe(true);
+    // Whoever holds seat 1 moves first.
+    expect(h.games.getGame(h.aoife, gameId)._unsafeUnwrap().toMove?.id).toBe(seat === 1 ? 1 : 2);
+  });
+
+  it('enforces turn order on the chosen seat', () => {
+    const h = harness();
+    const gameId = propose(h, h.aoife, { starter: 'opponent' });
+    h.games.applyGame(h.takashi, { type: 'join', gameId });
+
+    // The proposer is seat 2 now, so it is not her turn.
+    expect(
+      h.games.applyGame(h.aoife, { type: 'playMove', gameId, move: 'a1' })._unsafeUnwrapErr().code,
+    ).toBe('not-your-turn');
+    // The joiner is seat 1 and may move first.
+    expect(h.games.applyGame(h.takashi, { type: 'playMove', gameId, move: 'a1' }).isOk()).toBe(true);
+  });
+
+  it('replays an imported record from the other seat when the opponent starts', () => {
+    const h = harness();
+    // OPENING_PTN has four half-moves, so it is player 1's turn to move again.
+    const gameId = propose(h, h.aoife, { starter: 'opponent', ptn: OPENING_PTN });
+    h.games.applyGame(h.takashi, { type: 'join', gameId });
+
+    // Seat 1 is the joiner now: the imported moves belong to him, and so does
+    // the next turn — the proposer cannot move from the other seat.
+    expect(
+      h.games.applyGame(h.aoife, { type: 'playMove', gameId, move: 'a3' })._unsafeUnwrapErr().code,
+    ).toBe('not-your-turn');
+    expect(h.games.applyGame(h.takashi, { type: 'playMove', gameId, move: 'a3' }).isOk()).toBe(true);
+  });
+
+  it('attributes a resignation to the seat, not the proposer', () => {
+    const h = harness();
+    const gameId = propose(h, h.aoife, { starter: 'opponent' });
+    h.games.applyGame(h.takashi, { type: 'join', gameId });
+
+    // Aoife (seat 2) resigns, so seat 1 (Takashi) wins.
+    h.games.applyGame(h.aoife, { type: 'resign', gameId });
+
+    expect(h.persistence.findGameById(gameId)._unsafeUnwrap()?.result).toBe('1-0');
+    expect(h.games.getGame(h.takashi, gameId)._unsafeUnwrap().resultText).toBe(
+      'Takashi Mori wins by resignation',
+    );
+  });
+});
+
 describe('games: searchProposed', () => {
   function propose(
     h: Harness,
@@ -1590,6 +1685,26 @@ describe('games: export', () => {
     expect(parsed.tags.get('Player2')).toBe('Takashi Mori');
     expect(parsed.size).toBe(5);
     expect(parsed.result).toBe('R-0');
+  });
+
+  it('names the seat-1 player as Player1 when the proposer starts second', () => {
+    const h = harness();
+    const r = h.games.applyGame(h.aoife, {
+      type: 'propose',
+      boardSize: 5,
+      joinType: 'open',
+      starter: 'opponent',
+    });
+    const gameId = (r._unsafeUnwrap() as { gameId: number }).gameId;
+    h.games.applyGame(h.takashi, { type: 'join', gameId });
+    // Takashi is seat 1 now, so he moves first and is Player1 in the record.
+    h.games.applyGame(h.takashi, { type: 'playMove', gameId, move: 'a1' });
+
+    const out = exported(h, h.aoife, gameId, 'ptn');
+    const parsed = parsePtn(out.text)._unsafeUnwrap();
+
+    expect(parsed.tags.get('Player1')).toBe('Takashi Mori');
+    expect(parsed.tags.get('Player2')).toBe('Aoife Nolan');
   });
 
   it('exports a prefix that replays, and never claims a result the prefix has not reached', () => {

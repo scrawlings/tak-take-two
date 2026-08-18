@@ -92,6 +92,17 @@ describe('GET /games', () => {
     expect(html).toContain('6×6');
     expect(html).toContain('waiting for anyone');
   });
+
+  it('offers the who-starts choice in the propose form', async () => {
+    const { app, session } = await playerApp();
+
+    const html = await (await app.request('/games', withCookie({}, session))).text();
+
+    expect(html).toContain('name="starter"');
+    expect(html).toContain('value="me"');
+    expect(html).toContain('value="opponent"');
+    expect(html).toContain('value="random"');
+  });
 });
 
 describe('POST /games', () => {
@@ -147,6 +158,31 @@ describe('POST /games', () => {
     const html = await res.text();
     expect(html).toContain('not a legal game');
     expect(html).toContain('not a record');
+    expect(db.prepare('SELECT COUNT(*) AS n FROM games').get()).toEqual({ n: 0 });
+  });
+
+  it('stores the chosen starter as the proposer’s seat', async () => {
+    const { app, db, session } = await playerApp();
+
+    const res = await app.request(
+      '/games',
+      withCookie(form({ board_size: '5', join_type: 'open', starter: 'opponent' }), session),
+    );
+
+    expect(res.status).toBe(303);
+    expect(db.prepare('SELECT proposer_seat FROM games').get()).toEqual({ proposer_seat: 2 });
+  });
+
+  it('rejects an unknown starter and re-renders the form', async () => {
+    const { app, db, session } = await playerApp();
+
+    const res = await app.request(
+      '/games',
+      withCookie(form({ board_size: '5', join_type: 'open', starter: 'sideways' }), session),
+    );
+
+    expect(res.status).toBe(400);
+    expect(await res.text()).toContain('Choose who starts');
     expect(db.prepare('SELECT COUNT(*) AS n FROM games').get()).toEqual({ n: 0 });
   });
 
@@ -351,7 +387,7 @@ describe('POST /games/:id/join', () => {
     return { app, db, aoife, takashi };
   }
 
-  it('joins an open game and lands on the player’s games', async () => {
+  it('joins an open game and lands back on the games list', async () => {
     const { app, db, aoife, takashi } = await twoPlayers();
     await app.request('/games', withCookie(form({ board_size: '5', join_type: 'open' }), aoife));
 
@@ -411,6 +447,58 @@ describe('POST /games/:id/join', () => {
     const { app, takashi } = await twoPlayers();
 
     expect((await app.request('/games/404/join', withCookie({ method: 'POST' }, takashi))).status).toBe(404);
+  });
+});
+
+describe('who starts (seat choice)', () => {
+  it('shows the starter on the proposer’s list and the joiner’s find page', async () => {
+    const { app, db } = makeApp();
+    await insertUser(db, { id: 1, username: 'aoife', password: 'pw', displayName: 'Aoife Nolan' });
+    await insertUser(db, { id: 2, username: 'takashi', password: 'pw', displayName: 'Takashi Mori' });
+    const aoife = await signIn(app, 'aoife', 'pw');
+    const takashi = await signIn(app, 'takashi', 'pw');
+    await app.request('/games', withCookie(form({ board_size: '5', join_type: 'open', starter: 'opponent' }), aoife));
+
+    const mine = await (await app.request('/games', withCookie({}, aoife))).text();
+    expect(mine).toContain('you go second');
+
+    const find = await (await app.request('/games/find', withCookie({}, takashi))).text();
+    expect(find).toContain('you start');
+  });
+
+  it('names who will start on a proposed game page', async () => {
+    const { app, db } = makeApp();
+    await insertUser(db, { id: 1, username: 'aoife', password: 'pw', displayName: 'Aoife Nolan' });
+    const aoife = await signIn(app, 'aoife', 'pw');
+
+    await app.request('/games', withCookie(form({ board_size: '5', join_type: 'open', starter: 'me' }), aoife));
+    await app.request('/games', withCookie(form({ board_size: '5', join_type: 'open', starter: 'opponent' }), aoife));
+    await app.request('/games', withCookie(form({ board_size: '5', join_type: 'open', starter: 'random' }), aoife));
+
+    expect(await (await app.request('/games/1', withCookie({}, aoife))).text()).toContain('Aoife Nolan will start.');
+    expect(await (await app.request('/games/2', withCookie({}, aoife))).text()).toContain('The joiner will start.');
+    expect(await (await app.request('/games/3', withCookie({}, aoife))).text()).toContain(
+      'A coin flip will decide who starts.',
+    );
+  });
+
+  it('resolves a random start when the game is joined', async () => {
+    const { app, db } = makeApp();
+    await insertUser(db, { id: 1, username: 'aoife', password: 'pw', displayName: 'Aoife Nolan' });
+    await insertUser(db, { id: 2, username: 'takashi', password: 'pw', displayName: 'Takashi Mori' });
+    const aoife = await signIn(app, 'aoife', 'pw');
+    const takashi = await signIn(app, 'takashi', 'pw');
+    await app.request('/games', withCookie(form({ board_size: '5', join_type: 'open', starter: 'random' }), aoife));
+
+    await app.request('/games/1/join', withCookie({ method: 'POST' }, takashi));
+
+    const seat = db.prepare('SELECT proposer_seat FROM games WHERE id = 1').get() as {
+      proposer_seat: number | null;
+    };
+    expect(seat.proposer_seat === 1 || seat.proposer_seat === 2).toBe(true);
+    // The game screen names the viewer's seat, so the flip is visible to both.
+    const page = await (await app.request('/games/1', withCookie({}, takashi))).text();
+    expect(page).toContain('You play');
   });
 });
 

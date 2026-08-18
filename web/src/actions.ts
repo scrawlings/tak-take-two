@@ -181,6 +181,7 @@ export function statusForGameError(error: GameError): ContentfulStatusCode {
     case 'invalid-board-size':
     case 'invalid-join-type':
     case 'invalid-invite':
+    case 'invalid-starter':
     case 'invalid-ptn':
     case 'invalid-move':
     case 'invalid-export-format':

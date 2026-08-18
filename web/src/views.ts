@@ -309,6 +309,7 @@ export interface MyGamesView {
     boardSize?: string | null;
     joinType?: string | null;
     invitedDisplayName?: string | null;
+    starter?: string | null;
     ptn?: string | null;
   };
 }
@@ -330,6 +331,18 @@ function opponentCell(game: GameSummary): string {
     return `<span class="dim">waiting for ${escapeHtml(game.invitedPlayer.displayName)}</span>`;
   }
   return '<span class="dim">waiting for anyone</span>';
+}
+
+/**
+ * Who starts a proposal, phrased for the viewer. Only proposals have a starter
+ * that is not yet settled — once the game is in play the seat is fixed and the
+ * game screen's colour line names it.
+ */
+function starterHint(game: GameSummary, user: SessionUser): string {
+  if (game.state !== 'proposed') return '';
+  if (game.proposerSeat === null) return ' · random start';
+  const youStart = (game.proposerSeat === 1) === (game.proposer.id === user.id);
+  return ` · ${youStart ? 'you start' : 'you go second'}`;
 }
 
 /** Which list a game action was taken from, so a refusal returns there. */
@@ -360,12 +373,13 @@ export function renderMyGamesPage(
   const submitted = view.submitted ?? {};
   const sizeSelected = (size: string): string => (submitted.boardSize === size ? ' selected' : '');
   const joinSelected = (kind: string): string => (submitted.joinType === kind ? ' selected' : '');
+  const starterSelected = (value: string): string => (submitted.starter === value ? ' selected' : '');
 
   const rows = games
     .map(
       (game) => `<tr>
   <td class="num">${game.boardSize}×${game.boardSize}</td>
-  <td>${gameStatusTag(game)}</td>
+  <td>${gameStatusTag(game)}${starterHint(game, user)}</td>
   <td>${opponentCell(game)}</td>
   <td>${game.toMove === null ? '<span class="dim">—</span>' : escapeHtml(game.toMove.displayName)}</td>
   <td>${game.imported ? '<span class="tag">imported</span>' : '<span class="dim">empty board</span>'}</td>
@@ -412,6 +426,15 @@ ${error}
           <option value="open"${joinSelected('open')}>anyone</option>
           <option value="invited"${joinSelected('invited')}>one player I name</option>
         </select>
+      </div>
+      <div class="field">
+        <label for="starter">Who starts</label>
+        <select id="starter" name="starter">
+          <option value="me"${starterSelected('me')}>I start (filled)</option>
+          <option value="opponent"${starterSelected('opponent')}>The other player starts</option>
+          <option value="random"${starterSelected('random')}>Random — decided when they join</option>
+        </select>
+        <p class="hint">Player 1 moves first. Importing a past record, choosing “the other player starts” lets you replay it from the other seat.</p>
       </div>
     </div>
     <!-- Only an invited game needs a name. Without Alpine the field simply
@@ -467,7 +490,7 @@ export function renderFindGamesPage(
     .map(
       (game) => `<tr>
   <td class="num">${game.boardSize}×${game.boardSize}</td>
-  <td>${proposalKind(game)}</td>
+  <td>${proposalKind(game)}${starterHint(game, user)}</td>
   <td>${escapeHtml(game.proposer.displayName)}</td>
   <td>${game.imported ? '<span class="tag">imported</span>' : '<span class="dim">empty board</span>'}</td>
   <td>${gameActions(game, 'find')}</td>
@@ -635,7 +658,15 @@ function renderGameStatus(game: GameView): string {
     return `<p class="notice">This game was removed by an admin.</p>`;
   }
   if (game.state === 'proposed') {
-    return `<p class="lede">Proposed by ${escapeHtml(game.proposer.displayName)}${game.imported ? ', starting from an imported record' : ''}. Waiting for an opponent.</p>`;
+    // Who starts is the proposer's choice, and until a random start is resolved
+    // at join the seat is only a promise — say so rather than guess.
+    const starter =
+      game.proposerSeat === null
+        ? 'A coin flip will decide who starts.'
+        : game.proposerSeat === 1
+          ? `${escapeHtml(game.proposer.displayName)} will start.`
+          : `${game.opponent === null ? 'The joiner' : escapeHtml(game.opponent.displayName)} will start.`;
+    return `<p class="lede">Proposed by ${escapeHtml(game.proposer.displayName)}${game.imported ? ', starting from an imported record' : ''}. Waiting for an opponent. ${starter}</p>`;
   }
   if (game.state === 'finished') {
     return `<p class="lede">${escapeHtml(game.resultText ?? 'Finished')}.</p>`;
