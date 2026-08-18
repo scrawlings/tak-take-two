@@ -6,7 +6,6 @@ import {
   generateTps,
   isBoardFinished,
   isFinished,
-  mutualDraw as coreMutualDraw,
   parseMove,
   playMove as corePlayMove,
   resign as coreResign,
@@ -53,6 +52,9 @@ export type GameErrorCode =
   | 'not-in-play'
   | 'not-your-turn'
   | 'invalid-move'
+  | 'request-pending'
+  | 'no-pending-request'
+  | 'no-move-to-take-back'
   | 'persistence';
 
 export interface GameError {
@@ -114,6 +116,12 @@ export interface MoveView {
   readonly imported: boolean;
 }
 
+/** One pending request/offer (ticket 12): a take-back request or a draw offer. */
+export interface PendingRequestView {
+  readonly kind: 'take-back' | 'draw';
+  readonly requester: PlayerRef;
+}
+
 /** The full game view — every rule the template needs already decided. */
 export interface GameView {
   readonly id: number;
@@ -137,8 +145,16 @@ export interface GameView {
   readonly toMoveSeat: 1 | 2 | null;
   /** The viewer may play a move right now. */
   readonly canMove: boolean;
-  /** The viewer is a participant and may resign or declare a draw. */
-  readonly canEnd: boolean;
+  /** One pending request/offer, from a participant, awaiting the other's answer. */
+  readonly pending: PendingRequestView | null;
+  /** The viewer is the respondent and may accept/reject the pending request. */
+  readonly canRespond: boolean;
+  /** The viewer is a participant and may resign. */
+  readonly canResign: boolean;
+  /** The viewer may offer a draw (nothing pending, not self-play). */
+  readonly canOfferDraw: boolean;
+  /** The viewer may request a take-back of their last move. */
+  readonly canOfferTakeBack: boolean;
   /** Human-readable result, or null while in play. */
   readonly resultText: string | null;
   /** Remaining stones and capstones per seat. */
@@ -170,7 +186,12 @@ export type GameCommand =
   | { readonly type: 'join'; readonly gameId: number }
   | { readonly type: 'playMove'; readonly gameId: number; readonly move: string }
   | { readonly type: 'resign'; readonly gameId: number }
-  | { readonly type: 'mutualDraw'; readonly gameId: number };
+  | { readonly type: 'requestTakeBack'; readonly gameId: number }
+  | { readonly type: 'acceptTakeBack'; readonly gameId: number }
+  | { readonly type: 'rejectTakeBack'; readonly gameId: number }
+  | { readonly type: 'offerDraw'; readonly gameId: number }
+  | { readonly type: 'acceptDraw'; readonly gameId: number }
+  | { readonly type: 'rejectDraw'; readonly gameId: number };
 
 /** One domain-shaped result per command; commands that only change state yield `{ type: 'ok' }`. */
 export type GameCommandResult =
@@ -531,8 +552,10 @@ export function createGames(persistence: Persistence): Games {
     result: string,
     how: string,
   ): Result<void, string> {
-    const finished = persistence.finishGame(game.id, result);
+    const finished = persistence.clearPendingRequest(game.id);
     if (finished.isErr()) return finished;
+    const marked = persistence.finishGame(game.id, result);
+    if (marked.isErr()) return marked;
     const durationSeconds = Math.max(0, Math.floor((Date.now() - Date.parse(game.createdAt)) / 1000));
     const stats = persistence.writeGameStats({
       gameId: game.id,
@@ -570,6 +593,10 @@ export function createGames(persistence: Persistence): Games {
     }
     if (game.state !== 'in_play') {
       return err({ code: 'not-in-play', message: 'This game is not being played right now.' });
+    }
+    if (game.pendingKind !== null) {
+      const what = game.pendingKind === 'draw' ? 'A draw offer' : 'A take-back request';
+      return err({ code: 'request-pending', message: `${what} is pending; accept or reject it first.` });
     }
 
     const current = currentTakGame(game);
@@ -660,14 +687,20 @@ export function createGames(persistence: Persistence): Games {
     return ok({ type: 'ok' });
   }
 
-  function mutualDraw(
+  /**
+   * The shared preamble for the offer/respond commands: a player, a visible
+   * in-play game they participate in, and not self-play. Returns the game.
+   */
+  function loadInPlayGame(
     actor: SessionUser,
-    command: Extract<GameCommand, { type: 'mutualDraw' }>,
-  ): Result<GameCommandResult, GameError> {
+    gameId: number,
+    act: string,
+    selfPlayMessage: string,
+  ): Result<GameRecord, GameError> {
     const player = requirePlayer(actor);
     if (player.isErr()) return err(player.error);
 
-    const found = persistence.findGameById(command.gameId);
+    const found = persistence.findGameById(gameId);
     if (found.isErr()) return err(persistenceError(found.error));
     if (found.value === null) return err({ code: 'not-found', message: 'That game no longer exists.' });
     const game = found.value;
@@ -676,24 +709,204 @@ export function createGames(persistence: Persistence): Games {
       return err({ code: 'not-found', message: 'That game no longer exists.' });
     }
     if (!isParticipant(game, actor.id)) {
-      return err({ code: 'forbidden', message: 'Only the two players may end a game.' });
+      return err({ code: 'forbidden', message: `Only the two players may ${act}.` });
     }
     if (game.state !== 'in_play') {
       return err({ code: 'not-in-play', message: 'This game is not being played right now.' });
     }
     if (isSelfPlay(game)) {
-      return err({ code: 'forbidden', message: 'You cannot draw against yourself.' });
+      return err({ code: 'forbidden', message: selfPlayMessage });
+    }
+    return ok(game);
+  }
+
+  /**
+   * The respondent check: the game carries a pending request of `kind`, and the
+   * actor is the other player. Returns the requester's id.
+   */
+  function checkPending(
+    game: GameRecord,
+    kind: 'take-back' | 'draw',
+    actor: SessionUser,
+    what: string,
+  ): Result<number, GameError> {
+    if (game.pendingKind !== kind || game.pendingBy === null) {
+      return err({ code: 'no-pending-request', message: `There is no pending ${what}.` });
+    }
+    if (game.pendingBy === actor.id) {
+      return err({ code: 'forbidden', message: 'Only the other player can respond.' });
+    }
+    return ok(game.pendingBy);
+  }
+
+  function offerDraw(
+    actor: SessionUser,
+    command: Extract<GameCommand, { type: 'offerDraw' }>,
+  ): Result<GameCommandResult, GameError> {
+    const game = loadInPlayGame(actor, command.gameId, 'request a draw', 'You cannot draw against yourself.');
+    if (game.isErr()) return err(game.error);
+    if (game.value.pendingKind !== null) {
+      return err({ code: 'request-pending', message: 'Only one request or offer may be pending.' });
     }
 
-    const current = currentTakGame(game);
-    if (current.isErr()) return err(current.error);
-    const done = coreMutualDraw(current.value);
-    if (done.isErr()) return err({ code: 'not-in-play', message: done.error.message });
-    const result = resultCode(done.value)!;
+    const persisted = persistence.transaction((): Result<void, string> => {
+      const set = persistence.setPendingRequest(game.value.id, 'draw', actor.id);
+      if (set.isErr()) return set;
+      return persistence.appendActivityTrail({ userId: actor.id, gameId: game.value.id, event: 'draw-offered' });
+    });
+    if (persisted.isErr()) return err(persistenceError(persisted.error));
 
-    const persisted = persistence.transaction(() =>
-      finishGameTransaction(actor, game, done.value, result, 'mutual-draw'),
+    return ok({ type: 'ok' });
+  }
+
+  function acceptDraw(
+    actor: SessionUser,
+    command: Extract<GameCommand, { type: 'acceptDraw' }>,
+  ): Result<GameCommandResult, GameError> {
+    const game = loadInPlayGame(actor, command.gameId, 'respond to a draw offer', 'You cannot respond to yourself.');
+    if (game.isErr()) return err(game.error);
+    const requester = checkPending(game.value, 'draw', actor, 'draw offer');
+    if (requester.isErr()) return err(requester.error);
+
+    const current = currentTakGame(game.value);
+    if (current.isErr()) return err(current.error);
+
+    const persisted = persistence.transaction((): Result<void, string> => {
+      const accepted = persistence.appendActivityTrail({
+        userId: actor.id,
+        gameId: game.value.id,
+        event: 'draw-accepted',
+        payload: { by: requester.value },
+      });
+      if (accepted.isErr()) return accepted;
+      return finishGameTransaction(actor, game.value, current.value, '1/2-1/2', 'mutual-draw');
+    });
+    if (persisted.isErr()) return err(persistenceError(persisted.error));
+
+    return ok({ type: 'ok' });
+  }
+
+  function rejectDraw(
+    actor: SessionUser,
+    command: Extract<GameCommand, { type: 'rejectDraw' }>,
+  ): Result<GameCommandResult, GameError> {
+    const game = loadInPlayGame(actor, command.gameId, 'respond to a draw offer', 'You cannot respond to yourself.');
+    if (game.isErr()) return err(game.error);
+    const requester = checkPending(game.value, 'draw', actor, 'draw offer');
+    if (requester.isErr()) return err(requester.error);
+
+    const persisted = persistence.transaction((): Result<void, string> => {
+      const cleared = persistence.clearPendingRequest(game.value.id);
+      if (cleared.isErr()) return cleared;
+      return persistence.appendActivityTrail({
+        userId: actor.id,
+        gameId: game.value.id,
+        event: 'draw-rejected',
+        payload: { by: requester.value },
+      });
+    });
+    if (persisted.isErr()) return err(persistenceError(persisted.error));
+
+    return ok({ type: 'ok' });
+  }
+
+  function requestTakeBack(
+    actor: SessionUser,
+    command: Extract<GameCommand, { type: 'requestTakeBack' }>,
+  ): Result<GameCommandResult, GameError> {
+    const game = loadInPlayGame(
+      actor,
+      command.gameId,
+      'request a take-back',
+      'You cannot request a take-back against yourself.',
     );
+    if (game.isErr()) return err(game.error);
+    if (game.value.pendingKind !== null) {
+      return err({ code: 'request-pending', message: 'Only one request or offer may be pending.' });
+    }
+
+    // A take-back needs a live move of yours, played since the opponent moved.
+    const current = currentTakGame(game.value);
+    if (current.isErr()) return err(current.error);
+    const tak = current.value;
+    if (tak.history.length <= tak.fixedMoves) {
+      return err({ code: 'no-move-to-take-back', message: 'There is no move of yours to take back.' });
+    }
+    const lastSeat: 1 | 2 = (tak.history.length - 1) % 2 === 0 ? 1 : 2;
+    if (seatOfActor(game.value, actor.id) !== lastSeat) {
+      return err({
+        code: 'no-move-to-take-back',
+        message: 'Your opponent has already moved; there is nothing to take back.',
+      });
+    }
+
+    const persisted = persistence.transaction((): Result<void, string> => {
+      const set = persistence.setPendingRequest(game.value.id, 'take-back', actor.id);
+      if (set.isErr()) return set;
+      return persistence.appendActivityTrail({ userId: actor.id, gameId: game.value.id, event: 'take-back-requested' });
+    });
+    if (persisted.isErr()) return err(persistenceError(persisted.error));
+
+    return ok({ type: 'ok' });
+  }
+
+  function acceptTakeBack(
+    actor: SessionUser,
+    command: Extract<GameCommand, { type: 'acceptTakeBack' }>,
+  ): Result<GameCommandResult, GameError> {
+    const game = loadInPlayGame(
+      actor,
+      command.gameId,
+      'respond to a take-back request',
+      'You cannot respond to yourself.',
+    );
+    if (game.isErr()) return err(game.error);
+    const requester = checkPending(game.value, 'take-back', actor, 'take-back request');
+    if (requester.isErr()) return err(requester.error);
+
+    // The board cannot have changed since the request: moves are blocked while
+    // pending, so the last recorded move is still the requester's.
+    const persisted = persistence.transaction((): Result<void, string> => {
+      const deleted = persistence.deleteLastMove(game.value.id);
+      if (deleted.isErr()) return deleted;
+      const cleared = persistence.clearPendingRequest(game.value.id);
+      if (cleared.isErr()) return cleared;
+      return persistence.appendActivityTrail({
+        userId: actor.id,
+        gameId: game.value.id,
+        event: 'take-back-accepted',
+        payload: { by: requester.value },
+      });
+    });
+    if (persisted.isErr()) return err(persistenceError(persisted.error));
+
+    return ok({ type: 'ok' });
+  }
+
+  function rejectTakeBack(
+    actor: SessionUser,
+    command: Extract<GameCommand, { type: 'rejectTakeBack' }>,
+  ): Result<GameCommandResult, GameError> {
+    const game = loadInPlayGame(
+      actor,
+      command.gameId,
+      'respond to a take-back request',
+      'You cannot respond to yourself.',
+    );
+    if (game.isErr()) return err(game.error);
+    const requester = checkPending(game.value, 'take-back', actor, 'take-back request');
+    if (requester.isErr()) return err(requester.error);
+
+    const persisted = persistence.transaction((): Result<void, string> => {
+      const cleared = persistence.clearPendingRequest(game.value.id);
+      if (cleared.isErr()) return cleared;
+      return persistence.appendActivityTrail({
+        userId: actor.id,
+        gameId: game.value.id,
+        event: 'take-back-rejected',
+        payload: { by: requester.value },
+      });
+    });
     if (persisted.isErr()) return err(persistenceError(persisted.error));
 
     return ok({ type: 'ok' });
@@ -726,6 +939,21 @@ export function createGames(persistence: Persistence): Games {
     const toMoveSeat: 1 | 2 | null = game.state === 'in_play' ? tak.state.playerToMove : null;
     const toMove = toMoveSeat === null ? null : toMoveSeat === 1 ? proposer.value : opponent.value;
 
+    // The single pending request/offer, resolved to a name for the board.
+    let pending: PendingRequestView | null = null;
+    if (game.pendingKind !== null && game.pendingBy !== null) {
+      const requester = nameOf(game.pendingBy);
+      if (requester.isErr()) return err(requester.error);
+      pending = { kind: game.pendingKind, requester: requester.value };
+    }
+    const requesterSeat = game.pendingBy === null ? null : seatOfActor(game, game.pendingBy);
+    const inPlay = game.state === 'in_play';
+    const participant = viewerSeat !== null;
+    const noPending = pending === null;
+    // The last live move's seat, or null when the history ends in imported moves.
+    const lastLiveSeat: 1 | 2 | null =
+      tak.history.length > tak.fixedMoves ? ((tak.history.length - 1) % 2 === 0 ? 1 : 2) : null;
+
     const moves: MoveView[] = [];
     for (let i = 0; i < tak.history.length; i++) {
       const rec = tak.history[i]!;
@@ -750,13 +978,17 @@ export function createGames(persistence: Persistence): Games {
       opponent: opponent.value,
       imported: game.importedPtn !== null,
       viewerSeat,
-      selfPlay: isSelfPlay(game),
+      selfPlay,
       moves,
       board: buildBoard(tak.state),
       toMove,
       toMoveSeat,
-      canMove: game.state === 'in_play' && viewerSeat !== null && (selfPlay || viewerSeat === toMoveSeat),
-      canEnd: game.state === 'in_play' && viewerSeat !== null && !selfPlay,
+      canMove: inPlay && participant && noPending && (selfPlay || viewerSeat === toMoveSeat),
+      pending,
+      canRespond: pending !== null && participant && requesterSeat !== null && requesterSeat !== viewerSeat,
+      canResign: inPlay && participant && !selfPlay,
+      canOfferDraw: inPlay && participant && !selfPlay && noPending,
+      canOfferTakeBack: inPlay && participant && !selfPlay && noPending && lastLiveSeat === viewerSeat,
       resultText: resultTextOf(game.result, proposer.value, opponent.value),
       reserves: tak.state.reserves,
       opened: tak.state.opened,
@@ -841,8 +1073,18 @@ export function createGames(persistence: Persistence): Games {
           return playMove(actor, command);
         case 'resign':
           return resign(actor, command);
-        case 'mutualDraw':
-          return mutualDraw(actor, command);
+        case 'requestTakeBack':
+          return requestTakeBack(actor, command);
+        case 'acceptTakeBack':
+          return acceptTakeBack(actor, command);
+        case 'rejectTakeBack':
+          return rejectTakeBack(actor, command);
+        case 'offerDraw':
+          return offerDraw(actor, command);
+        case 'acceptDraw':
+          return acceptDraw(actor, command);
+        case 'rejectDraw':
+          return rejectDraw(actor, command);
       }
     },
 

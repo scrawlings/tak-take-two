@@ -46,7 +46,7 @@ describe('runMigrations', () => {
 
     expect(runMigrations(db).isOk()).toBe(true);
 
-    expect(versions(db)).toEqual([1, 2, 3]);
+    expect(versions(db)).toEqual([1, 2, 3, 4]);
     expect(columns(db, 'games')).toEqual(
       expect.arrayContaining(['imported_ptn', 'proposer_shared', 'opponent_shared']),
     );
@@ -59,7 +59,7 @@ describe('runMigrations', () => {
 
     expect(runMigrations(db).isOk()).toBe(true);
 
-    expect(versions(db)).toEqual([1, 2, 3]);
+    expect(versions(db)).toEqual([1, 2, 3, 4]);
   });
 
   it('upgrades an existing database without disturbing its rows', () => {
@@ -68,7 +68,7 @@ describe('runMigrations', () => {
 
     expect(runMigrations(db).isOk()).toBe(true);
 
-    expect(versions(db)).toEqual([1, 2, 3]);
+    expect(versions(db)).toEqual([1, 2, 3, 4]);
     // The existing game survives, gaining an empty record and both share
     // toggles off — the private default, never a silent opening-up.
     expect(

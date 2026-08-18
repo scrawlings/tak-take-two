@@ -603,7 +603,33 @@ function renderGameStatus(game: GameView): string {
 function renderGameControls(game: GameView): string {
   if (game.state === 'finished') return '';
   const parts: string[] = [];
-  if (game.canMove) {
+
+  if (game.pending !== null) {
+    // The single pending request/offer: the respondent may accept or reject;
+    // the requester waits. Either way, no move form while pending.
+    const requester = escapeHtml(game.pending.requester.displayName);
+    if (game.canRespond) {
+      const text =
+        game.pending.kind === 'draw'
+          ? `${requester} offers a draw.`
+          : `${requester} requests a take-back of their last move.`;
+      const base = `/games/${game.id}/${game.pending.kind === 'draw' ? 'draw' : 'take-back'}`;
+      parts.push(`
+<div class="notice">
+  <p>${text}</p>
+  <p class="actions">
+    <form method="post" action="${base}/accept"><button type="submit" class="btn btn-sm">Accept</button></form>
+    <form method="post" action="${base}/reject"><button type="submit" class="btn btn-quiet btn-sm">Reject</button></form>
+  </p>
+</div>`);
+    } else {
+      const waiting =
+        game.pending.kind === 'draw'
+          ? 'Draw offered — waiting for a response.'
+          : 'Take-back requested — waiting for a response.';
+      parts.push(`<p class="notice">${waiting}</p>`);
+    }
+  } else if (game.canMove) {
     parts.push(`
 <form class="panel" method="post" action="/games/${game.id}/move">
   <div class="field">
@@ -623,11 +649,13 @@ function renderGameControls(game: GameView): string {
   <p class="actions"><button type="submit" class="btn">Play move</button></p>
 </form>`);
   }
-  if (game.canEnd) {
+
+  if (game.canOfferTakeBack || game.canOfferDraw || game.canResign) {
     parts.push(`
 <div class="actions">
-  <form method="post" action="/games/${game.id}/resign"><button type="submit" class="btn btn-quiet">Resign</button></form>
-  <form method="post" action="/games/${game.id}/draw"><button type="submit" class="btn btn-quiet">Draw by agreement</button></form>
+  ${game.canOfferTakeBack ? `<form method="post" action="/games/${game.id}/take-back"><button type="submit" class="btn btn-quiet">Request take-back</button></form>` : ''}
+  ${game.canOfferDraw ? `<form method="post" action="/games/${game.id}/draw"><button type="submit" class="btn btn-quiet">Offer draw</button></form>` : ''}
+  ${game.canResign ? `<form method="post" action="/games/${game.id}/resign"><button type="submit" class="btn btn-quiet">Resign</button></form>` : ''}
 </div>`);
   }
   return parts.join('');

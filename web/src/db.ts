@@ -74,6 +74,11 @@ const MIGRATIONS: readonly string[] = [
   // game turns them on, because joining an open game implies sharing.
   `ALTER TABLE games ADD COLUMN proposer_shared INTEGER NOT NULL DEFAULT 0;
    ALTER TABLE games ADD COLUMN opponent_shared INTEGER NOT NULL DEFAULT 0;`,
+  // One kinded pending request/offer per game (ticket 12): a take-back request
+  // or a draw offer from one player awaiting the other's accept/reject. Only
+  // one may be pending; both are cleared on accept, reject, or any finish.
+  `ALTER TABLE games ADD COLUMN pending_kind TEXT;
+   ALTER TABLE games ADD COLUMN pending_by INTEGER;`,
 ];
 
 export function openDatabase(path: string): Result<Db, string> {

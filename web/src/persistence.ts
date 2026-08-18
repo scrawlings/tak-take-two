@@ -74,6 +74,9 @@ export interface GameRecord {
   /** ADR-0003 share toggles; a game is viewable by non-participants iff both are on. */
   readonly proposerShared: boolean;
   readonly opponentShared: boolean;
+  /** One pending request/offer per game (ticket 12): `take-back` or `draw`, from `pendingBy`. */
+  readonly pendingKind: 'take-back' | 'draw' | null;
+  readonly pendingBy: number | null;
   readonly result: string | null;
   readonly createdAt: string;
   readonly finishedAt: string | null;
@@ -188,6 +191,13 @@ export interface Persistence {
    * racing joins cannot both succeed.
    */
   joinGame(gameId: number, opponentId: number): Result<boolean, string>;
+
+  /** Set the game's single pending request/offer (clearing any prior one). */
+  setPendingRequest(gameId: number, kind: 'take-back' | 'draw', by: number): Result<void, string>;
+  /** Clear the pending request/offer. */
+  clearPendingRequest(gameId: number): Result<void, string>;
+  /** Delete the most recently recorded move (take-back accept). */
+  deleteLastMove(gameId: number): Result<void, string>;
 
   /** Record one played move. */
   appendMove(input: AppendMoveInput): Result<MoveRecord, string>;
@@ -474,6 +484,36 @@ export function createPersistence(db: Db): Persistence {
       }
     },
 
+    setPendingRequest(gameId: number, kind: 'take-back' | 'draw', by: number): Result<void, string> {
+      try {
+        db.prepare('UPDATE games SET pending_kind = ?, pending_by = ? WHERE id = ?').run(kind, by, gameId);
+        return ok(undefined);
+      } catch (e) {
+        return err(e instanceof Error ? e.message : String(e));
+      }
+    },
+
+    clearPendingRequest(gameId: number): Result<void, string> {
+      try {
+        db.prepare('UPDATE games SET pending_kind = NULL, pending_by = NULL WHERE id = ?').run(gameId);
+        return ok(undefined);
+      } catch (e) {
+        return err(e instanceof Error ? e.message : String(e));
+      }
+    },
+
+    deleteLastMove(gameId: number): Result<void, string> {
+      try {
+        db.prepare(
+          `DELETE FROM game_records WHERE game_id = ? AND move_number =
+             (SELECT MAX(move_number) FROM game_records WHERE game_id = ?)`,
+        ).run(gameId, gameId);
+        return ok(undefined);
+      } catch (e) {
+        return err(e instanceof Error ? e.message : String(e));
+      }
+    },
+
     appendMove(input: AppendMoveInput): Result<MoveRecord, string> {
       try {
         const info = db
@@ -636,6 +676,8 @@ interface GameRow {
   imported_ptn: string | null;
   proposer_shared: number;
   opponent_shared: number;
+  pending_kind: string | null;
+  pending_by: number | null;
   result: string | null;
   created_at: string;
   finished_at: string | null;
@@ -663,6 +705,8 @@ function mapGame(row: GameRow): GameRecord {
     importedPtn: row.imported_ptn,
     proposerShared: row.proposer_shared !== 0,
     opponentShared: row.opponent_shared !== 0,
+    pendingKind: row.pending_kind as 'take-back' | 'draw' | null,
+    pendingBy: row.pending_by,
     result: row.result,
     createdAt: row.created_at,
     finishedAt: row.finished_at,

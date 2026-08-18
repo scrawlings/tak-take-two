@@ -462,7 +462,57 @@ export function createApp(deps: AppDeps): App {
     fields: [],
     run: (c) =>
       paramId(c, 'id', 'That game no longer exists.').andThen((id) =>
-        games.applyGame(c.get('user'), { type: 'mutualDraw', gameId: id }),
+        games.applyGame(c.get('user'), { type: 'offerDraw', gameId: id }),
+      ),
+    onOk: (c) => c.redirect(`/games/${c.req.param('id')}`, 303),
+    renderError: (c, e) => gameViewError(c, e),
+  }));
+
+  app.post('/games/:id/draw/accept', requireUser, formAction({
+    fields: [],
+    run: (c) =>
+      paramId(c, 'id', 'That game no longer exists.').andThen((id) =>
+        games.applyGame(c.get('user'), { type: 'acceptDraw', gameId: id }),
+      ),
+    onOk: (c) => c.redirect(`/games/${c.req.param('id')}`, 303),
+    renderError: (c, e) => gameViewError(c, e),
+  }));
+
+  app.post('/games/:id/draw/reject', requireUser, formAction({
+    fields: [],
+    run: (c) =>
+      paramId(c, 'id', 'That game no longer exists.').andThen((id) =>
+        games.applyGame(c.get('user'), { type: 'rejectDraw', gameId: id }),
+      ),
+    onOk: (c) => c.redirect(`/games/${c.req.param('id')}`, 303),
+    renderError: (c, e) => gameViewError(c, e),
+  }));
+
+  app.post('/games/:id/take-back', requireUser, formAction({
+    fields: [],
+    run: (c) =>
+      paramId(c, 'id', 'That game no longer exists.').andThen((id) =>
+        games.applyGame(c.get('user'), { type: 'requestTakeBack', gameId: id }),
+      ),
+    onOk: (c) => c.redirect(`/games/${c.req.param('id')}`, 303),
+    renderError: (c, e) => gameViewError(c, e),
+  }));
+
+  app.post('/games/:id/take-back/accept', requireUser, formAction({
+    fields: [],
+    run: (c) =>
+      paramId(c, 'id', 'That game no longer exists.').andThen((id) =>
+        games.applyGame(c.get('user'), { type: 'acceptTakeBack', gameId: id }),
+      ),
+    onOk: (c) => c.redirect(`/games/${c.req.param('id')}`, 303),
+    renderError: (c, e) => gameViewError(c, e),
+  }));
+
+  app.post('/games/:id/take-back/reject', requireUser, formAction({
+    fields: [],
+    run: (c) =>
+      paramId(c, 'id', 'That game no longer exists.').andThen((id) =>
+        games.applyGame(c.get('user'), { type: 'rejectTakeBack', gameId: id }),
       ),
     onOk: (c) => c.redirect(`/games/${c.req.param('id')}`, 303),
     renderError: (c, e) => gameViewError(c, e),

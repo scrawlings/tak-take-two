@@ -562,10 +562,66 @@ describe('self-play in one window', () => {
     expect(page).toContain('Self-play');
     expect(page).toContain('You play both colours');
     expect(page).not.toContain('Resign');
-    expect(page).not.toContain('Draw by agreement');
+    expect(page).not.toContain('Offer draw');
+    expect(page).not.toContain('Request take-back');
 
     // Both seats' moves come from the same account.
     expect((await app.request('/games/1/move', withCookie(form({ move: 'a1' }), aoife))).status).toBe(303);
     expect((await app.request('/games/1/move', withCookie(form({ move: 'e5' }), aoife))).status).toBe(303);
+  });
+});
+
+describe('draw offers and take-backs at the game screen', () => {
+  async function inPlayGame(): Promise<{ app: App; db: Database.Database; aoife: string; takashi: string }> {
+    const { app, db } = makeApp();
+    await insertUser(db, { id: 1, username: 'aoife', password: 'pw', displayName: 'Aoife Nolan' });
+    await insertUser(db, { id: 2, username: 'takashi', password: 'pw', displayName: 'Takashi Mori' });
+    const aoife = await signIn(app, 'aoife', 'pw');
+    const takashi = await signIn(app, 'takashi', 'pw');
+    await app.request('/games', withCookie(form({ board_size: '5', join_type: 'open' }), aoife));
+    await app.request('/games/1/join', withCookie(form({ from: 'find' }), takashi));
+    return { app, db, aoife, takashi };
+  }
+
+  it('offers a draw, notifies the opponent, and finishes only on accept', async () => {
+    const { app, aoife, takashi } = await inPlayGame();
+
+    await app.request('/games/1/draw', withCookie(form({}), takashi));
+
+    // The respondent sees the offer with accept/reject; the offerer sees waiting.
+    const respondent = await (await app.request('/games/1', withCookie({}, aoife))).text();
+    expect(respondent).toContain('Takashi Mori offers a draw');
+    expect(respondent).toContain('/draw/accept');
+    expect(respondent).toContain('/draw/reject');
+    const offerer = await (await app.request('/games/1', withCookie({}, takashi))).text();
+    expect(offerer).toContain('Draw offered — waiting for a response');
+
+    expect((await app.request('/games/1/draw/accept', withCookie(form({}), aoife))).status).toBe(303);
+    const game = await (await app.request('/games/1', withCookie({}, aoife))).text();
+    expect(game).toContain('Draw by agreement');
+  });
+
+  it('rejects the offer and play continues', async () => {
+    const { app, aoife, takashi } = await inPlayGame();
+    await app.request('/games/1/draw', withCookie(form({}), takashi));
+
+    expect((await app.request('/games/1/draw/reject', withCookie(form({}), aoife))).status).toBe(303);
+    const page = await (await app.request('/games/1', withCookie({}, aoife))).text();
+    expect(page).not.toContain('offers a draw');
+  });
+
+  it('takes back the last move on accept', async () => {
+    const { app, aoife, takashi } = await inPlayGame();
+    await app.request('/games/1/move', withCookie(form({ move: 'a1' }), aoife));
+    await app.request('/games/1/take-back', withCookie(form({}), aoife));
+
+    const respondent = await (await app.request('/games/1', withCookie({}, takashi))).text();
+    expect(respondent).toContain('requests a take-back');
+    expect(respondent).toContain('/take-back/accept');
+
+    expect((await app.request('/games/1/take-back/accept', withCookie(form({}), takashi))).status).toBe(303);
+    const page = await (await app.request('/games/1', withCookie({}, aoife))).text();
+    expect(page).toContain('Your move'); // back to Aoife's turn
+    expect(page).not.toContain('1.</span>'); // the move was undone
   });
 });

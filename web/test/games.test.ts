@@ -963,16 +963,81 @@ describe('games: resign and draw', () => {
     expect(trailEvents(h.db)).toContain('game-finished');
   });
 
-  it('mutual draw ends the game as a draw', () => {
+  it('a draw offer ends the game only when the opponent accepts', () => {
     const h = harness();
     const gameId = inPlay(h);
 
-    const result = h.games.applyGame(h.takashi, { type: 'mutualDraw', gameId });
+    const offered = h.games.applyGame(h.takashi, { type: 'offerDraw', gameId });
+    expect(offered.isOk()).toBe(true);
+    // The offer is pending, not a finish.
+    expect(h.persistence.findGameById(gameId)._unsafeUnwrap()).toMatchObject({
+      state: 'in_play',
+      result: null,
+      pendingKind: 'draw',
+      pendingBy: 2,
+    });
 
-    expect(result.isOk()).toBe(true);
+    const accepted = h.games.applyGame(h.aoife, { type: 'acceptDraw', gameId });
+    expect(accepted.isOk()).toBe(true);
     const game = h.persistence.findGameById(gameId)._unsafeUnwrap();
-    expect(game).toMatchObject({ state: 'finished', result: '1/2-1/2' });
+    expect(game).toMatchObject({ state: 'finished', result: '1/2-1/2', pendingKind: null });
     expect(stats(h.db, gameId)).toMatchObject({ result: '1/2-1/2' });
+    expect(trailEvents(h.db)).toContain('game-finished');
+  });
+
+  it('does not finish the game when only one player asks for a draw', () => {
+    const h = harness();
+    const gameId = inPlay(h);
+
+    const result = h.games.applyGame(h.aoife, { type: 'offerDraw', gameId });
+
+    // The opponent has not agreed: the game must remain in play.
+    expect(result.isOk()).toBe(true);
+    expect(h.persistence.findGameById(gameId)._unsafeUnwrap()).toMatchObject({
+      state: 'in_play',
+      result: null,
+    });
+  });
+
+  it('lets the respondent reject the offer and play continues', () => {
+    const h = harness();
+    const gameId = inPlay(h);
+    h.games.applyGame(h.takashi, { type: 'offerDraw', gameId });
+
+    expect(h.games.applyGame(h.aoife, { type: 'rejectDraw', gameId }).isOk()).toBe(true);
+    expect(h.persistence.findGameById(gameId)._unsafeUnwrap()).toMatchObject({
+      state: 'in_play',
+      pendingKind: null,
+    });
+    expect(trailEvents(h.db)).toContain('draw-rejected');
+  });
+
+  it('blocks moves and further offers while a draw is pending', () => {
+    const h = harness();
+    const gameId = inPlay(h);
+    h.games.applyGame(h.aoife, { type: 'playMove', gameId, move: 'a1' });
+    h.games.applyGame(h.takashi, { type: 'offerDraw', gameId });
+
+    // Neither player may move while the offer is out…
+    expect(h.games.applyGame(h.takashi, { type: 'playMove', gameId, move: 'e5' })._unsafeUnwrapErr().code).toBe(
+      'request-pending',
+    );
+    // …and no second request may be made.
+    expect(h.games.applyGame(h.aoife, { type: 'offerDraw', gameId })._unsafeUnwrapErr().code).toBe('request-pending');
+    expect(h.games.applyGame(h.takashi, { type: 'requestTakeBack', gameId })._unsafeUnwrapErr().code).toBe(
+      'request-pending',
+    );
+  });
+
+  it('refuses to respond when there is no pending request, or to your own', () => {
+    const h = harness();
+    const gameId = inPlay(h);
+
+    expect(h.games.applyGame(h.aoife, { type: 'acceptDraw', gameId })._unsafeUnwrapErr().code).toBe(
+      'no-pending-request',
+    );
+    h.games.applyGame(h.aoife, { type: 'offerDraw', gameId });
+    expect(h.games.applyGame(h.aoife, { type: 'acceptDraw', gameId })._unsafeUnwrapErr().code).toBe('forbidden');
   });
 
   it('refuses a resign on a game not in play', () => {
@@ -1019,12 +1084,15 @@ describe('games: game view', () => {
     const aoifeView = h.games.getGame(h.aoife, gameId)._unsafeUnwrap();
     expect(aoifeView.viewerSeat).toBe(1);
     expect(aoifeView.canMove).toBe(true);
-    expect(aoifeView.canEnd).toBe(true);
+    expect(aoifeView.canResign).toBe(true);
+    expect(aoifeView.canOfferDraw).toBe(true);
+    expect(aoifeView.canOfferTakeBack).toBe(false); // no move of hers yet
 
     const takashiView = h.games.getGame(h.takashi, gameId)._unsafeUnwrap();
     expect(takashiView.viewerSeat).toBe(2);
     expect(takashiView.canMove).toBe(false);
-    expect(takashiView.canEnd).toBe(true);
+    expect(takashiView.canResign).toBe(true);
+    expect(takashiView.canOfferDraw).toBe(true);
   });
 
   it('reports not-found for a game the viewer cannot see, and for a stranger to a shared game gives no seat', () => {
@@ -1065,7 +1133,9 @@ describe('games: self-play', () => {
     expect(view.selfPlay).toBe(true);
     expect(view.viewerSeat).toBe(1);
     expect(view.canMove).toBe(true); // whichever seat's turn it is
-    expect(view.canEnd).toBe(false); // no resign/draw against yourself
+    expect(view.canResign).toBe(false); // no resign against yourself
+    expect(view.canOfferDraw).toBe(false);
+    expect(view.canOfferTakeBack).toBe(false);
   });
 
   it('refuses a resign in self-play', () => {
@@ -1075,10 +1145,97 @@ describe('games: self-play', () => {
     expect(h.games.applyGame(h.aoife, { type: 'resign', gameId })._unsafeUnwrapErr().code).toBe('forbidden');
   });
 
-  it('refuses a mutual draw in self-play', () => {
+  it('refuses a draw offer in self-play', () => {
     const h = harness();
     const gameId = selfPlayGame(h);
 
-    expect(h.games.applyGame(h.aoife, { type: 'mutualDraw', gameId })._unsafeUnwrapErr().code).toBe('forbidden');
+    expect(h.games.applyGame(h.aoife, { type: 'offerDraw', gameId })._unsafeUnwrapErr().code).toBe('forbidden');
+  });
+});
+
+describe('games: take-back', () => {
+  function inPlay(h: Harness): number {
+    const r = h.games.applyGame(h.aoife, { type: 'propose', boardSize: 5, joinType: 'open' });
+    const gameId = (r._unsafeUnwrap() as { gameId: number }).gameId;
+    h.games.applyGame(h.takashi, { type: 'join', gameId });
+    return gameId;
+  }
+
+  /** An in-play game where seat 1 (Aoife) has just opened with a2. */
+  function inPlayWithMove(h: Harness): number {
+    const gameId = inPlay(h);
+    h.games.applyGame(h.aoife, { type: 'playMove', gameId, move: 'a2' });
+    return gameId;
+  }
+
+  it('requesting a take-back after your move makes it pending for the opponent', () => {
+    const h = harness();
+    const gameId = inPlayWithMove(h);
+
+    expect(h.games.applyGame(h.aoife, { type: 'requestTakeBack', gameId }).isOk()).toBe(true);
+    expect(h.persistence.findGameById(gameId)._unsafeUnwrap()).toMatchObject({
+      pendingKind: 'take-back',
+      pendingBy: 1,
+    });
+
+    const requesterView = h.games.getGame(h.aoife, gameId)._unsafeUnwrap();
+    expect(requesterView.pending).toMatchObject({ kind: 'take-back' });
+    expect(requesterView.canRespond).toBe(false);
+    expect(h.games.getGame(h.takashi, gameId)._unsafeUnwrap().canRespond).toBe(true);
+  });
+
+  it('accept undoes the requester last move and hands the turn back', () => {
+    const h = harness();
+    const gameId = inPlayWithMove(h);
+    h.games.applyGame(h.aoife, { type: 'requestTakeBack', gameId });
+
+    expect(h.games.applyGame(h.takashi, { type: 'acceptTakeBack', gameId }).isOk()).toBe(true);
+
+    expect(h.persistence.listMoves(gameId)._unsafeUnwrap()).toHaveLength(0);
+    expect(h.persistence.findGameById(gameId)._unsafeUnwrap()).toMatchObject({ pendingKind: null });
+    const view = h.games.getGame(h.aoife, gameId)._unsafeUnwrap();
+    expect(view.toMoveSeat).toBe(1);
+    expect(view.canMove).toBe(true);
+    expect(trailEvents(h.db)).toContain('take-back-accepted');
+  });
+
+  it('reject lets play continue with the move intact', () => {
+    const h = harness();
+    const gameId = inPlayWithMove(h);
+    h.games.applyGame(h.aoife, { type: 'requestTakeBack', gameId });
+
+    expect(h.games.applyGame(h.takashi, { type: 'rejectTakeBack', gameId }).isOk()).toBe(true);
+    expect(h.persistence.listMoves(gameId)._unsafeUnwrap()).toHaveLength(1);
+    expect(h.persistence.findGameById(gameId)._unsafeUnwrap()).toMatchObject({ pendingKind: null });
+    expect(trailEvents(h.db)).toContain('take-back-rejected');
+  });
+
+  it('refuses a take-back when there is no live move of yours to take back', () => {
+    const h = harness();
+    const gameId = inPlay(h); // nobody has moved yet
+
+    expect(h.games.applyGame(h.aoife, { type: 'requestTakeBack', gameId })._unsafeUnwrapErr().code).toBe(
+      'no-move-to-take-back',
+    );
+  });
+
+  it('refuses a take-back once the opponent has moved', () => {
+    const h = harness();
+    const gameId = inPlayWithMove(h);
+    h.games.applyGame(h.takashi, { type: 'playMove', gameId, move: 'a5' });
+
+    expect(h.games.applyGame(h.aoife, { type: 'requestTakeBack', gameId })._unsafeUnwrapErr().code).toBe(
+      'no-move-to-take-back',
+    );
+  });
+
+  it('refuses a take-back in self-play', () => {
+    const h = harness();
+    const r = h.games.applyGame(h.aoife, { type: 'propose', boardSize: 5, joinType: 'open' });
+    const gameId = (r._unsafeUnwrap() as { gameId: number }).gameId;
+    h.games.applyGame(h.aoife, { type: 'join', gameId });
+    h.games.applyGame(h.aoife, { type: 'playMove', gameId, move: 'a2' });
+
+    expect(h.games.applyGame(h.aoife, { type: 'requestTakeBack', gameId })._unsafeUnwrapErr().code).toBe('forbidden');
   });
 });

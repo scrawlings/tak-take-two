@@ -189,6 +189,9 @@ export function statusForGameError(error: GameError): ContentfulStatusCode {
     case 'not-proposed':
     case 'not-in-play':
     case 'not-your-turn':
+    case 'request-pending':
+    case 'no-pending-request':
+    case 'no-move-to-take-back':
       return 409;
   }
 }
