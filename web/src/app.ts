@@ -3,7 +3,6 @@ import { routePath } from 'hono/route';
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
 import { createMiddleware } from 'hono/factory';
 import { err } from 'neverthrow';
-import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import type { Persistence, PersistenceSnapshot } from './persistence.js';
 import { Metrics } from './metrics.js';
 import type { Logger } from './logging.js';
@@ -11,7 +10,15 @@ import { newRequestId } from './logging.js';
 import { escapeHtml, renderShell, siteCss } from './html.js';
 import { createAuth, type Auth, type AuthError, type SessionUser } from './auth.js';
 import { createGames, type GameError, type Games } from './games.js';
-import { createFormAction, statusForAuthError, statusForGameError } from './forms.js';
+import {
+  createFormAction,
+  createPageAction,
+  createPageError,
+  forbiddenPage,
+  paramId,
+  statusForAuthError,
+  statusForGameError,
+} from './actions.js';
 import {
   renderAccountPage,
   renderAdminUsersPage,
@@ -23,7 +30,8 @@ import {
   renderResetPasswordResult,
   renderRoot,
   renderStatusPageBody,
-  renderForbiddenPage,
+  type AdminUsersView,
+  type FindGamesView,
   type MyGamesView,
 } from './views.js';
 
@@ -133,43 +141,75 @@ export function createApp(deps: AppDeps): App {
     return result.isOk() && !result.value.blocked ? result.value : undefined;
   };
 
-  const forbiddenPage = (c: Context<{ Variables: Variables }>): Response =>
-    c.html(
-      renderShell(
-        'Forbidden',
-        renderForbiddenPage(),
-        { user: navUser(c) },
-      ),
-      403,
+  const formAction = createFormAction<{ Variables: Variables }>(logger);
+  const pageAction = createPageAction<{ Variables: Variables }>(logger);
+  const pageError = createPageError<{ Variables: Variables }>(logger);
+
+  /** A refused auth command is reported on the users list, re-read fresh. */
+  const usersError = (c: Context<{ Variables: Variables }>, error: AuthError): Response =>
+    pageError(
+      c,
+      c.get('user'),
+      {
+        name: 'list users',
+        reload: () => auth.listUsers(c.get('user')),
+        render: (data, view: AdminUsersView, status) => c.html(renderAdminUsersPage(c.get('user'), data, view), status),
+        view: (e): AdminUsersView => ({ error: e.message }),
+        statusOf: statusForAuthError,
+      },
+      error,
     );
 
-  const adminUsersPage = (
+  /** A refused game command is reported on the player's own games list. */
+  const myGamesError = (
     c: Context<{ Variables: Variables }>,
-    actor: SessionUser,
-    view?: { error?: string; message?: string },
-    status: ContentfulStatusCode = 200,
+    error: GameError,
+    view?: MyGamesView,
+  ): Response =>
+    pageError(
+      c,
+      c.get('user'),
+      {
+        name: 'list games',
+        reload: () => games.listMyGames(c.get('user')),
+        render: (data, view: MyGamesView, status) => c.html(renderMyGamesPage(c.get('user'), data, view), status),
+        view: (e): MyGamesView => ({ ...view, error: e.message }),
+        statusOf: statusForGameError,
+      },
+      error,
+    );
+
+  /**
+   * A refused join is reported on whichever list offered the button, so the
+   * player stays where they were and can pick another game. The form says which
+   * list that was; anything but the one known value falls back to their games.
+   */
+  const gameJoinError = (
+    c: Context<{ Variables: Variables }>,
+    error: GameError,
+    from: string | null | undefined,
   ): Response => {
-    const list = auth.listUsers(actor);
-    if (list.isErr()) {
-      if (list.error.code === 'forbidden') return forbiddenPage(c);
-      logger.log('error', 'failed to list users', { error: list.error });
-      return c.json({ error: 'Internal Server Error' }, 500);
-    }
-    return c.html(renderAdminUsersPage(actor, list.value, view), status);
+    if (error.code === 'forbidden') return forbiddenPage(c, c.get('user'));
+    if (from !== 'find') return myGamesError(c, error);
+
+    return pageError(
+      c,
+      c.get('user'),
+      {
+        name: 'search games',
+        reload: () => games.searchProposed(c.get('user')),
+        render: (data, view: FindGamesView, status) => c.html(renderFindGamesPage(c.get('user'), data, view), status),
+        view: (e): FindGamesView => ({ error: e.message }),
+        statusOf: statusForGameError,
+      },
+      error,
+    );
   };
 
-  /** Shared error rendering for admin forms: forbidden → 403, else the list at the mapped status. */
-  const adminFormError = (c: Context<{ Variables: Variables }>, error: AuthError): Response => {
-    if (error.code === 'forbidden') return forbiddenPage(c);
-    return adminUsersPage(c, c.get('user'), { error: error.message }, statusForAuthError(error));
-  };
-
-  const formAction = createFormAction<{ Variables: Variables }>(logger);
-
-  /** The `:id` path parameter as a positive integer, or null when it is neither. */
-  const idFrom = (c: Context<{ Variables: Variables }>): number | null => {
-    const id = Number(c.req.param('id'));
-    return Number.isInteger(id) && id >= 1 ? id : null;
+  /** A query parameter, or undefined when absent or blank ("any"). */
+  const query = (c: Context<{ Variables: Variables }>, name: string): string | undefined => {
+    const value = c.req.query(name);
+    return value === undefined || value.trim() === '' ? undefined : value;
   };
 
   app.get('/healthz', (c) => c.json({ status: 'ok' }));
@@ -282,68 +322,17 @@ export function createApp(deps: AppDeps): App {
       c.html(renderChangeDisplayNamePage(c.get('user'), { error: e.message }), statusForAuthError(e)),
   }));
 
-  /**
-   * The games list, optionally showing an error over the propose form with the
-   * submitted values put back. The list itself is always re-read: rendering a
-   * rejected proposal must not also stale the page around it.
-   */
-  const myGamesPage = (
-    c: Context<{ Variables: Variables }>,
-    actor: SessionUser,
-    view?: MyGamesView,
-    status: ContentfulStatusCode = 200,
-  ): Response => {
-    const list = games.listMyGames(actor);
-    if (list.isErr()) {
-      if (list.error.code === 'forbidden') return forbiddenPage(c);
-      logger.log('error', 'failed to list games', { error: list.error });
-      return c.json({ error: 'Internal Server Error' }, 500);
-    }
-    return c.html(renderMyGamesPage(actor, list.value, view), status);
-  };
-
-  /** Shared error rendering for game forms: forbidden → 403, else the list at the mapped status. */
-  const gameFormError = (c: Context<{ Variables: Variables }>, error: GameError, view?: MyGamesView): Response => {
-    if (error.code === 'forbidden') return forbiddenPage(c);
-    return myGamesPage(c, c.get('user'), { ...view, error: error.message }, statusForGameError(error));
-  };
-
-  /**
-   * A refused join is reported on whichever list offered the button, so the
-   * player stays where they were and can pick another game. The form says which
-   * list that was; anything but the one known value falls back to their games.
-   */
-  const gameJoinError = (
-    c: Context<{ Variables: Variables }>,
-    error: GameError,
-    from: string | null | undefined,
-  ): Response => {
-    if (error.code === 'forbidden') return forbiddenPage(c);
-    if (from !== 'find') return gameFormError(c, error);
-
+  app.get('/games', requireUser, (c) => {
     const actor = c.get('user');
-    const found = games.searchProposed(actor);
-    if (found.isErr()) {
-      logger.log('error', 'failed to search games', { error: found.error });
-      return c.json({ error: 'Internal Server Error' }, 500);
-    }
-    return c.html(
-      renderFindGamesPage(actor, found.value, { error: error.message }),
-      statusForGameError(error),
-    );
-  };
+    return pageAction(c, actor, {
+      name: 'list games',
+      load: () => games.listMyGames(actor),
+      render: (data) => c.html(renderMyGamesPage(actor, data)),
+    });
+  });
 
-  /** A query parameter, or undefined when absent or blank ("any"). */
-  const query = (c: Context<{ Variables: Variables }>, name: string): string | undefined => {
-    const value = c.req.query(name);
-    return value === undefined || value.trim() === '' ? undefined : value;
-  };
-
-  const findGamesPage = (
-    c: Context<{ Variables: Variables }>,
-    actor: SessionUser,
-    status: ContentfulStatusCode = 200,
-  ): Response => {
+  app.get('/games/find', requireUser, (c) => {
+    const actor = c.get('user');
     const boardSize = query(c, 'board_size');
     const joinType = query(c, 'join_type');
     const proposer = query(c, 'proposer');
@@ -353,29 +342,21 @@ export function createApp(deps: AppDeps): App {
       proposerDisplayName: proposer ?? null,
     };
 
-    const found = games.searchProposed(actor, {
-      boardSize: boardSize === undefined ? undefined : Number(boardSize),
-      joinType,
-      proposerDisplayName: proposer,
+    return pageAction(c, actor, {
+      name: 'search games',
+      load: () =>
+        games.searchProposed(actor, {
+          boardSize: boardSize === undefined ? undefined : Number(boardSize),
+          joinType,
+          proposerDisplayName: proposer,
+        }),
+      render: (data) => c.html(renderFindGamesPage(actor, data, { filters })),
+      // A bad filter is the user's to fix: keep the form and say what is wrong.
+      renderError: (e, status) =>
+        c.html(renderFindGamesPage(actor, [], { error: e.message, filters }), status),
+      statusOf: statusForGameError,
     });
-    if (found.isErr()) {
-      if (found.error.code === 'forbidden') return forbiddenPage(c);
-      if (found.error.code === 'persistence') {
-        logger.log('error', 'failed to search games', { error: found.error });
-        return c.json({ error: 'Internal Server Error' }, 500);
-      }
-      // A bad filter is the user's to fix, so keep the form and say what is wrong.
-      return c.html(
-        renderFindGamesPage(actor, [], { error: found.error.message, filters }),
-        statusForGameError(found.error),
-      );
-    }
-    return c.html(renderFindGamesPage(actor, found.value, { filters }), status);
-  };
-
-  app.get('/games', requireUser, (c) => myGamesPage(c, c.get('user')));
-
-  app.get('/games/find', requireUser, (c) => findGamesPage(c, c.get('user')));
+  });
 
   app.post('/games', requireUser, formAction({
     fields: ['board_size', 'join_type', 'invited_display_name', 'ptn'],
@@ -389,7 +370,7 @@ export function createApp(deps: AppDeps): App {
       }),
     onOk: (c) => c.redirect('/games', 303),
     renderError: (c, e, f) =>
-      gameFormError(c, e, {
+      myGamesError(c, e, {
         submitted: {
           boardSize: f.board_size,
           joinType: f.join_type,
@@ -401,37 +382,33 @@ export function createApp(deps: AppDeps): App {
 
   app.post('/games/:id/join', requireUser, formAction({
     fields: ['from'],
-    run: (c) => {
-      const id = idFrom(c);
-      if (id === null) return err({ code: 'not-found' as const, message: 'That game no longer exists.' });
-      return games.applyGame(c.get('user'), { type: 'join', gameId: id });
-    },
+    run: (c) =>
+      paramId(c, 'id', 'That game no longer exists.').andThen((id) =>
+        games.applyGame(c.get('user'), { type: 'join', gameId: id }),
+      ),
     onOk: (c) => c.redirect('/games', 303),
     renderError: (c, e, f) => gameJoinError(c, e, f.from),
   }));
 
   app.post('/games/:id/delete', requireUser, formAction({
     fields: [],
-    run: (c) => {
-      const id = idFrom(c);
-      if (id === null) return err({ code: 'not-found' as const, message: 'That game no longer exists.' });
-      return games.applyGame(c.get('user'), { type: 'deleteProposal', gameId: id });
-    },
+    run: (c) =>
+      paramId(c, 'id', 'That game no longer exists.').andThen((id) =>
+        games.applyGame(c.get('user'), { type: 'deleteProposal', gameId: id }),
+      ),
     onOk: (c) => c.redirect('/games', 303),
-    renderError: (c, e) => gameFormError(c, e),
+    renderError: (c, e) => myGamesError(c, e),
   }));
 
   app.get('/admin', requireUser, (c) => c.redirect('/admin/users', 303));
 
   app.get('/admin/users', requireUser, (c) => {
-    const user = c.get('user');
-    const result = auth.listUsers(user);
-    if (result.isErr()) {
-      if (result.error.code === 'forbidden') return forbiddenPage(c);
-      logger.log('error', 'failed to list users', { error: result.error });
-      return c.json({ error: 'Internal Server Error' }, 500);
-    }
-    return c.html(renderAdminUsersPage(user, result.value));
+    const actor = c.get('user');
+    return pageAction(c, actor, {
+      name: 'list users',
+      load: () => auth.listUsers(actor),
+      render: (data) => c.html(renderAdminUsersPage(actor, data)),
+    });
   });
 
   app.post('/admin/users', requireUser, formAction({
@@ -445,48 +422,48 @@ export function createApp(deps: AppDeps): App {
         role: f.role === 'admin' ? 'admin' : 'player',
       }),
     onOk: (c) => c.redirect('/admin/users', 303),
-    renderError: adminFormError,
+    renderError: usersError,
   }));
 
   app.post('/admin/users/:id/block', requireUser, formAction({
     fields: [],
     run: (c) => {
-      const id = idFrom(c);
-      if (id === null) return Promise.resolve(err({ code: 'not-found', message: 'Unknown user.' }));
-      return auth.applyAuth(c.get('user'), { type: 'blockUser', userId: id });
+      const id = paramId(c, 'id', 'Unknown user.');
+      if (id.isErr()) return Promise.resolve(err(id.error));
+      return auth.applyAuth(c.get('user'), { type: 'blockUser', userId: id.value });
     },
     onOk: (c) => c.redirect('/admin/users', 303),
-    renderError: adminFormError,
+    renderError: usersError,
   }));
 
   app.post('/admin/users/:id/unblock', requireUser, formAction({
     fields: [],
     run: (c) => {
-      const id = idFrom(c);
-      if (id === null) return Promise.resolve(err({ code: 'not-found', message: 'Unknown user.' }));
-      return auth.applyAuth(c.get('user'), { type: 'unblockUser', userId: id });
+      const id = paramId(c, 'id', 'Unknown user.');
+      if (id.isErr()) return Promise.resolve(err(id.error));
+      return auth.applyAuth(c.get('user'), { type: 'unblockUser', userId: id.value });
     },
     onOk: (c) => c.redirect('/admin/users', 303),
-    renderError: adminFormError,
+    renderError: usersError,
   }));
 
   app.post('/admin/users/:id/force-password-change', requireUser, formAction({
     fields: [],
     run: (c) => {
-      const id = idFrom(c);
-      if (id === null) return Promise.resolve(err({ code: 'not-found', message: 'Unknown user.' }));
-      return auth.applyAuth(c.get('user'), { type: 'forcePasswordChange', userId: id });
+      const id = paramId(c, 'id', 'Unknown user.');
+      if (id.isErr()) return Promise.resolve(err(id.error));
+      return auth.applyAuth(c.get('user'), { type: 'forcePasswordChange', userId: id.value });
     },
     onOk: (c) => c.redirect('/admin/users', 303),
-    renderError: adminFormError,
+    renderError: usersError,
   }));
 
   app.post('/admin/users/:id/reset-password', requireUser, formAction({
     fields: [],
     run: (c) => {
-      const id = idFrom(c);
-      if (id === null) return Promise.resolve(err({ code: 'not-found', message: 'Unknown user.' }));
-      return auth.applyAuth(c.get('user'), { type: 'resetPassword', userId: id });
+      const id = paramId(c, 'id', 'Unknown user.');
+      if (id.isErr()) return Promise.resolve(err(id.error));
+      return auth.applyAuth(c.get('user'), { type: 'resetPassword', userId: id.value });
     },
     onOk: (c, r) => {
       if (r.type !== 'resetPassword') {
@@ -495,7 +472,7 @@ export function createApp(deps: AppDeps): App {
       }
       return c.html(renderResetPasswordResult(c.get('user'), r.username, r.password));
     },
-    renderError: adminFormError,
+    renderError: usersError,
   }));
 
   app.notFound((c) => c.json({ error: 'Not Found' }, 404));
