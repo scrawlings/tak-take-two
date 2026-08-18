@@ -585,6 +585,49 @@ describe('the game screen', () => {
     expect(html).toContain('Move syntax');
   });
 
+  it('renders the stack-move builder: lift control, drop adjusters, path counts', async () => {
+    const { app, aoife, gameId } = await inPlayGame();
+
+    const res = await app.request(`/games/${gameId}`, withCookie({}, aoife));
+    const html = await res.text();
+
+    // The lift stepper, shown once a stack is picked up (ticket 19).
+    expect(html).toContain('Stones to lift');
+    expect(html).toContain('x-on:click="bumpLift(-1)"');
+    expect(html).toContain('x-on:click="bumpLift(1)"');
+    // Its bounds are the builder's, so the buttons cannot compose a bad lift.
+    expect(html).toContain(':disabled="lift >= liftCeiling"');
+    expect(html).toContain('x-on:click="cancel()"');
+
+    // One drop adjuster per square of the path, driven by the builder's state.
+    expect(html).toContain('Stones dropped');
+    expect(html).toContain('x-for="(step, i) in path"');
+    expect(html).toContain('x-on:click="bumpDrop(i, -1)"');
+    expect(html).toContain('x-on:click="bumpDrop(i, 1)"');
+
+    // Each square shows what it would receive, and lights up on the path.
+    expect(html).toContain(`x-text="dropsOn('a1')"`);
+    expect(html).toContain(`'is-path': dropsOn('a1') > 0`);
+  });
+
+  it('offers no builder controls to a spectator', async () => {
+    const { app, db, aoife, takashi, gameId } = await inPlayGame();
+    await app.request(`/games/${gameId}/share`, withCookie(form({ on: '1' }), aoife));
+    await app.request(`/games/${gameId}/share`, withCookie(form({ on: '1' }), takashi));
+    await insertUser(db, { id: 3, username: 'nuala', password: 'pw', displayName: 'Nuala Byrne' });
+    const stranger = await signIn(app, 'nuala', 'pw');
+
+    const res = await app.request(`/games/${gameId}`, withCookie({}, stranger));
+    const html = await res.text();
+
+    expect(res.status).toBe(200);
+    expect(html).toContain('data-square="a1"'); // the board still renders
+    expect(html).not.toContain('Stones to lift');
+    // The bundle names these methods, so assert on the markup that calls them.
+    expect(html).not.toContain('x-on:click="bumpDrop(i, -1)"');
+    expect(html).not.toContain('x-on:click="bumpLift(1)"');
+  });
+
   it('records a move and redirects back to the game screen', async () => {
     const { app, aoife, gameId } = await inPlayGame();
 

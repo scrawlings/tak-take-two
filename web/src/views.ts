@@ -606,6 +606,10 @@ function renderBoard(game: GameView): string {
         const glyph = topStone === null ? '·' : stoneGlyph(topStone.player, topStone.kind);
         const topAttr = topStone === null ? '' : `${topStone.player}|${topStone.kind}`;
         const height = cell.stack.length > 1 ? `<span class="cell-height">${cell.stack.length}</span>` : '';
+        const square = `${cell.file}${cell.rank}`;
+        // What this square receives if the move is played: the builder's own
+        // count, so the board shows the distribution rather than just the path.
+        const drops = `<span class="cell-drops" x-show="dropsOn('${square}') > 0" x-cloak x-text="dropsOn('${square}')"></span>`;
         const stackTip =
           cell.stack.length === 0
             ? ''
@@ -613,7 +617,7 @@ function renderBoard(game: GameView): string {
                 .reverse()
                 .map((s) => `<span>${stoneGlyph(s.player, s.kind)}</span>`)
                 .join('')}</span>`;
-        return `<button type="button" class="cell" data-square="${cell.file}${cell.rank}" data-height="${cell.stack.length}" data-top="${topAttr}" x-on:click="cellClick($el)" :class="{ 'is-source': source !== null && source.square === '${cell.file}${cell.rank}' }" aria-label="${cell.file}${cell.rank}">${glyph}${height}${stackTip}</button>`;
+        return `<button type="button" class="cell" data-square="${square}" data-height="${cell.stack.length}" data-top="${topAttr}" x-on:click="cellClick($el)" :class="{ 'is-source': source !== null && source.square === '${square}', 'is-path': dropsOn('${square}') > 0 }" aria-label="${square}">${glyph}${height}${drops}${stackTip}</button>`;
       })
       .join('');
     rows.push(`<span class="axis">${rank}</span>${cells}`);
@@ -730,7 +734,30 @@ function renderGameControls(game: GameView): string {
     <div class="stone-picker" role="group" aria-labelledby="stone-label">
       ${stoneButtons}
     </div>
-    <p class="hint" x-show="source !== null">Moving from <span x-text="source ? source.square : ''"></span> — click a square in a straight line, or the source again to cancel.</p>
+  </div>
+  <div class="field" x-show="source !== null" x-cloak>
+    <span class="label" id="lift-label">Stones to lift</span>
+    <div class="stepper" role="group" aria-labelledby="lift-label">
+      <button type="button" class="step-btn" x-on:click="bumpLift(-1)" :disabled="lift <= (path.length || 1)" aria-label="Lift one stone fewer">−</button>
+      <span class="stepper-value" x-text="lift + ' of ' + (source ? source.height : 0)"></span>
+      <button type="button" class="step-btn" x-on:click="bumpLift(1)" :disabled="lift >= liftCeiling" aria-label="Lift one stone more">+</button>
+      <button type="button" class="btn btn-quiet btn-sm" x-on:click="cancel()">Cancel</button>
+    </div>
+    <p class="hint">Holding <span x-text="lift"></span> from <span class="mono" x-text="source ? source.square : ''"></span> — click a square in a straight line, or the source again to put them back.</p>
+  </div>
+  <div class="field" x-show="path.length > 0" x-cloak>
+    <span class="label" id="drops-label">Stones dropped</span>
+    <div class="drop-row" role="group" aria-labelledby="drops-label">
+      <template x-for="(step, i) in path" :key="step.square">
+        <span class="drop-step">
+          <span class="mono drop-square" x-text="step.square"></span>
+          <button type="button" class="step-btn" x-on:click="bumpDrop(i, -1)" :aria-label="'Drop one fewer on ' + step.square">−</button>
+          <span class="drop-count" x-text="step.drops"></span>
+          <button type="button" class="step-btn" x-on:click="bumpDrop(i, 1)" :aria-label="'Drop one more on ' + step.square">+</button>
+        </span>
+      </template>
+    </div>
+    <p class="hint">Every square crossed keeps at least one stone, and the counts always add up to the lift.</p>
   </div>
   <p class="actions"><button type="submit" class="btn">Play move</button></p>
 </form>`);

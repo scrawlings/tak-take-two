@@ -8,9 +8,9 @@ This is the second implementation in TypeScript (earlier work exists in Clojure 
 
 ## Status
 
-Implemented and playable: 18 of 21 tickets are done. Players can propose games — open, invited to a named player, or carried in from a PTN record — join or self-play them, and enter moves by board click or PTN text. The site validates every move against the official rules, detects road and flat wins, and records the game. Take-backs and draw offers follow a request/accept protocol; games can be shared with spectators, hidden, or removed by an admin; any position exports as PTN or TPS.
+Implemented and playable: 20 of 21 tickets are done. Players can propose games — open, invited to a named player, or carried in from a PTN record — join or self-play them, and build moves on the board — including partial lifts and arbitrary drop distributions — or type PTN. The site validates every move against the official rules, detects road and flat wins, and records the game. Take-backs and draw offers follow a request/accept protocol; games can be shared with spectators, hidden, or removed by an admin; any position exports as PTN or TPS.
 
-Remaining: real-time updates (ticket 14), interactive stack-move creation (19), and one architecture ticket (21).
+Remaining: real-time updates (ticket 14).
 
 Intended extensions: the development of computer opponents and playing/teaching computer coaches and game review.
 

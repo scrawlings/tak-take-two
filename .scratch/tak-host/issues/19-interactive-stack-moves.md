@@ -2,17 +2,17 @@
 
 **What to build:** Let a player compose a stack move entirely on the board — choose which stack, how many stones to lift, the straight-line path, and how many stones drop on each square — instead of hand-typing PTN. The click builder currently auto-lifts the whole stack and auto-spreads the drops, so partial lifts, arbitrary distributions, and capstone flattens are only expressible by typing.
 
-**Blocked by:** 11 — Play: game view, moves, finish; 18 — Self-play in one window
+**Blocked by:** 11 — Play: game view, moves, finish; 18 — Self-play in one window; 21 — Board move builder (added by ADR-0006)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Selecting a source stack offers a **lift control** — choose how many of the stack's stones to lift (stepper), default `min(stack height, carry limit)`; the composed notation uses the chosen count.
-- [ ] Clicking a destination square in a straight line sets the **path** with default drops (1 per crossed square, remainder on the last) and highlights each path square with its drop count.
-- [ ] **Drop adjustment** — each path square's drop count can be raised or lowered while keeping every square ≥ 1 and the sum equal to the lift; the composed PTN updates live in the move field.
-- [ ] The builder can express a **capstone flatten** (lift 1 from a stack topped by a capstone onto an adjacent square) and any legal drop distribution the engine accepts.
-- [ ] Visual feedback: source highlighted, stones-in-hand count, path squares with drop counts.
-- [ ] The PTN text field stays the escape hatch and the single validator (`parseMove` → engine `applyMove`); nothing changes on the move POST path.
-- [ ] Tests: the engine-validation tests already cover whatever the builder emits; the HTTP seam asserts the builder's rendered state; the interaction itself is client-side and manually verified (the stance ticket 11 took for the click builder).
+- [x] Selecting a source stack offers a **lift control** — choose how many of the stack's stones to lift (stepper), default `min(stack height, carry limit)`; the composed notation uses the chosen count.
+- [x] Clicking a destination square in a straight line sets the **path** with default drops (1 per crossed square, remainder on the last) and highlights each path square with its drop count.
+- [x] **Drop adjustment** — each path square's drop count can be raised or lowered while keeping every square ≥ 1 and the sum equal to the lift; the composed PTN updates live in the move field.
+- [x] The builder can express a **capstone flatten** (lift 1 from a stack topped by a capstone onto an adjacent square) and any legal drop distribution the engine accepts.
+- [x] Visual feedback: source highlighted, stones-in-hand count, path squares with drop counts.
+- [x] The PTN text field stays the escape hatch and the single validator (`parseMove` → engine `applyMove`); nothing changes on the move POST path.
+- [x] Tests: the engine-validation tests already cover whatever the builder emits; the HTTP seam asserts the builder's rendered state; the interaction itself is client-side and manually verified (the stance ticket 11 took for the click builder).
 
 ## Comments
 
@@ -39,3 +39,17 @@
 **No module or persistence change.** The move POST path, `parseMove`/`formatMove`, and `applyMove` are untouched; the builder only produces the same PTN string the field accepts. Self-play (ticket 18) needs no extra work: the builder is colour-agnostic once a source is selectable.
 
 **Testing caveat.** The builder is client-side Alpine; vitest at the HTTP seam cannot execute it. Assert the rendered state (lift control present, path/drop data attributes) at the HTTP seam, rely on the engine tests for whatever the builder emits, and verify the interaction by hand — the same stance ticket 11 recorded for the click builder.
+
+**2026-08-18 — Implemented.** Pure UI over ticket 21's state machine, as ADR-0006 planned: `renderGameControls` gained a lift stepper and a per-square drop adjuster, `renderBoard` gained the path highlight and drop badge, and `siteCss` gained the styles. No module, persistence, or POST-path change.
+
+Decisions worth carrying forward:
+
+- **This ticket was blocked by 21 and did not say so.** Its checklist predates the architecture review; ADR-0006 then made the interaction model a state machine born in ticket 21 and left 19 the HTML. Doing 19 first would have grown `TAK_BOARD_SCRIPT` — the untestable string ADR-0006 deletes — so 21 landed first. The Blocked-by line now records it.
+- **The controls never compute a move.** Every button calls the builder (`bumpLift`, `bumpDrop`, `cancel`) and every bound value reads builder state, so the invariants — every crossed square ≥ 1, drops sum to the lift, lift within the carry limit — are enforced in one tested place rather than in an Alpine expression. The stepper's own bounds are drawn from the module (`liftCeiling`, `path.length`), so a disabled button and a refused transition can never disagree.
+- **The path shows its distribution on the board**, not just its shape: each crossed square carries the count it would receive, so a 2-1-2 spread is legible without reading the notation.
+- **The spectator test asserts on markup, not method names.** The inlined bundle contains `bumpDrop`, so "a spectator sees no builder" has to be asserted against the attribute that calls it.
+
+Known limits:
+
+- The interaction is mouse and touch; keyboard and screen-reader users compose moves by typing PTN into the move field, which stays the escape hatch and the single validator. The board buttons keep their `aria-label`s, and the adjusters carry labels naming their square, so the composed state is readable — but building a move without a pointer is not offered.
+- Verified by hand at the seam the ticket names: rendered state is asserted at the HTTP seam, composition is tested in the module, and the browser interaction itself is unautomated (the stance ticket 11 recorded).

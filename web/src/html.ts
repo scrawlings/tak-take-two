@@ -345,6 +345,19 @@ p { margin: 0 0 1rem; }
 
 .cell.is-source { outline: 2px solid var(--stone); outline-offset: -2px; }
 
+/* A square the composed move crosses, and the stones it would receive. */
+.cell.is-path { border-color: var(--stone); box-shadow: inset 0 0 0 1px var(--stone); }
+
+.cell-drops {
+  position: absolute;
+  bottom: 1px;
+  right: 3px;
+  font-family: var(--record);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  color: var(--stone);
+}
+
 .cell-height {
   position: absolute;
   top: 1px;
@@ -542,6 +555,52 @@ p { margin: 0 0 1rem; }
   outline-offset: -2px;
   background: var(--panel);
 }
+
+/* ---------- the move builder: lift stepper and drop adjusters ---------- */
+
+.stepper, .drop-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  flex-wrap: wrap;
+}
+
+.step-btn {
+  font-family: var(--record);
+  font-size: 0.875rem;
+  line-height: 1;
+  color: var(--slate);
+  background: #fff;
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  width: 1.75rem;
+  height: 1.75rem;
+  cursor: pointer;
+}
+
+.step-btn:hover:not(:disabled) { border-color: var(--slate); }
+
+.step-btn:disabled { color: var(--slate-mid); cursor: default; opacity: 0.45; }
+
+.stepper-value, .drop-count {
+  font-family: var(--record);
+  font-size: 0.8125rem;
+  color: var(--slate);
+  min-width: 1.25rem;
+  text-align: center;
+}
+
+.drop-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.25rem 0.5rem;
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  background: var(--panel);
+}
+
+.drop-square { font-size: 0.75rem; color: var(--slate-mid); }
 
 /* ---------- buttons ---------- */
 
