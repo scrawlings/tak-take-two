@@ -575,7 +575,7 @@ describe('the game screen', () => {
     // The stone-to-place picker: glyph buttons, not a text select. On the
     // opening the move places an opponent stone, so the glyphs are open.
     expect(html).toContain('aria-label="Place a flat stone"');
-    expect(html).toContain('x-on:click="stone = \'flat\'"');
+    expect(html).toContain('x-on:click="pick(\'flat\')"');
     expect(html).toContain('stone-glyph">○</span>');
     expect(html).toContain('stone-glyph">△</span>');
     expect(html).toContain('stone-glyph">□</span>');

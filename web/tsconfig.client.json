@@ -1,8 +1,11 @@
 {
+  // The browser half of the app (ADR-0006): the move builder and its Alpine
+  // adapter. Separated from the server tsconfig only because it needs the DOM
+  // lib and no node types — the server has exactly the opposite need.
   "extends": "../tsconfig.base.json",
   "compilerOptions": {
     "lib": ["ES2022", "DOM"],
     "types": []
   },
-  "include": ["src/client"]
+  "include": ["src/client", "test/board-adapter.test.ts"]
 }

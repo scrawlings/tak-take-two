@@ -10,4 +10,7 @@ coverage/
 .DS_Store
 *.log
 *.pem
-web/dataweb/dist-client/
+web/data/
+web/dist-client/
+*.db-shm
+*.db-wal

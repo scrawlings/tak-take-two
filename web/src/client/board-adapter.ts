@@ -37,13 +37,18 @@ interface BoardComponent {
   state: BuilderState;
   /** Bound to the move field with `x-model`, so a player may still type over it. */
   move: string;
-  stone: StoneKind;
+  readonly stone: StoneKind;
   readonly source: SourceStack | null;
+  readonly sourceSquare: string;
   readonly lift: number;
+  /** The bounds of the lift stepper, so a disabled button and a refused transition agree. */
   readonly liftCeiling: number;
+  readonly liftFloor: number;
   readonly path: readonly PathStep[];
   apply(next: BuilderState): void;
+  pick(stone: StoneKind): void;
   cellClick(el: HTMLElement): void;
+  isSource(square: SquareRef): boolean;
   bumpLift(delta: number): void;
   bumpDrop(index: number, delta: 1 | -1): void;
   dropsOn(square: SquareRef): number;
@@ -54,10 +59,16 @@ export function boardComponent(config: BoardConfig): BoardComponent {
   return {
     state: createBuilder(config.size),
     move: '',
-    stone: 'flat',
 
+    get stone(): StoneKind {
+      return this.state.stone;
+    },
     get source(): SourceStack | null {
       return this.state.source;
+    },
+    /** The source's name, or '' — the templates want a string either way. */
+    get sourceSquare(): string {
+      return this.state.source?.square ?? '';
     },
     get lift(): number {
       return this.state.lift;
@@ -65,19 +76,30 @@ export function boardComponent(config: BoardConfig): BoardComponent {
     get liftCeiling(): number {
       return maxLift(this.state);
     },
+    /** A path needs a stone for every square it crosses, and a lift needs one stone. */
+    get liftFloor(): number {
+      return Math.max(1, this.state.path.length);
+    },
     get path(): readonly PathStep[] {
       return this.state.path;
     },
 
     /**
-     * Take the builder's next state, and put a composed move in the field.
-     * Only a composition writes to the field: picking up a stack composes
-     * nothing yet, and blanking what the player typed at that moment would
-     * throw away their own work.
+     * Take the builder's next state and keep the move field in step. A
+     * composition fills the field; putting the stack back down empties it,
+     * because a cleared board that still offers the old move to Play is a trap.
+     * Nothing else writes to the field: picking a stack up composes nothing
+     * yet, and blanking it then would throw away what the player typed.
      */
     apply(next: BuilderState): void {
+      const putBack = this.state.source !== null && next.source === null;
       this.state = next;
       if (next.notation !== '') this.move = next.notation;
+      else if (putBack) this.move = '';
+    },
+
+    pick(stone: StoneKind): void {
+      this.state = chooseStone(this.state, stone);
     },
 
     cellClick(el: HTMLElement): void {
@@ -87,7 +109,11 @@ export function boardComponent(config: BoardConfig): BoardComponent {
       const top = el.dataset.top ?? '';
       // `data-top` reads "seat|kind"; an empty square carries neither.
       const mine = top !== '' && (config.selfPlay || top[0] === String(config.viewerSeat));
-      this.apply(clickSquare(chooseStone(this.state, this.stone), { square, height, mine }));
+      this.apply(clickSquare(this.state, { square, height, mine }));
+    },
+
+    isSource(square: SquareRef): boolean {
+      return this.state.source?.square === square;
     },
 
     bumpLift(delta: number): void {
@@ -104,12 +130,15 @@ export function boardComponent(config: BoardConfig): BoardComponent {
     },
 
     cancel(): void {
-      this.state = clearSelection(this.state);
-      this.move = '';
+      this.apply(clearSelection(this.state));
     },
   };
 }
 
-document.addEventListener('alpine:init', () => {
-  Alpine.data('takBoard', boardComponent);
-});
+// Guarded so the component can be imported and driven by a test: this module
+// is a browser bundle, but its behaviour is ordinary data and worth pinning.
+if (typeof document !== 'undefined') {
+  document.addEventListener('alpine:init', () => {
+    Alpine.data('takBoard', boardComponent);
+  });
+}

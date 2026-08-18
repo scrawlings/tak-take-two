@@ -11,7 +11,7 @@ import {
 } from '../src/client/move-builder.js';
 import type { BuilderState } from '../src/client/move-builder.js';
 import { BOARD_SCRIPT, BOARD_SCRIPT_SOURCES } from '../src/client-script.generated.js';
-import { sourcesFingerprint } from '../src/client-fingerprint.js';
+import { sourcesFingerprint } from '../scripts/client-fingerprint.js';
 
 /**
  * The board move builder at its interface: clicks and adjustments in, composed

@@ -1,10 +1,7 @@
 {
   "extends": "../tsconfig.base.json",
-  "include": [
-    "src",
-    "test"
-  ],
-  "exclude": [
-    "src/client/board-adapter.ts"
-  ]
+  // The client sources are typechecked by tsconfig.client.json instead: the
+  // Alpine adapter touches the DOM, which this project's lib deliberately omits.
+  "exclude": ["src/client", "test/board-adapter.test.ts"],
+  "include": ["src", "test"]
 }

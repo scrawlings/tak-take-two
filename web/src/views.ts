@@ -617,7 +617,7 @@ function renderBoard(game: GameView): string {
                 .reverse()
                 .map((s) => `<span>${stoneGlyph(s.player, s.kind)}</span>`)
                 .join('')}</span>`;
-        return `<button type="button" class="cell" data-square="${square}" data-height="${cell.stack.length}" data-top="${topAttr}" x-on:click="cellClick($el)" :class="{ 'is-source': source !== null && source.square === '${square}', 'is-path': dropsOn('${square}') > 0 }" aria-label="${square}">${glyph}${height}${drops}${stackTip}</button>`;
+        return `<button type="button" class="cell" data-square="${square}" data-height="${cell.stack.length}" data-top="${topAttr}" x-on:click="cellClick($el)" :class="{ 'is-source': isSource('${square}'), 'is-path': dropsOn('${square}') > 0 }" aria-label="${square}">${glyph}${height}${drops}${stackTip}</button>`;
       })
       .join('');
     rows.push(`<span class="axis">${rank}</span>${cells}`);
@@ -719,7 +719,7 @@ function renderGameControls(game: GameView): string {
         : viewer === 1 ? 2 : 1;
     const stoneButtons = (['flat', 'standing', 'capstone'] as const)
       .map(
-        (kind) => `<button type="button" class="stone-btn" x-on:click="stone = '${kind}'" :class="{ 'is-selected': stone === '${kind}' }" :aria-pressed="stone === '${kind}'" aria-label="Place a ${kind} stone"><span class="stone-glyph">${stoneGlyph(placing, kind)}</span><span class="stone-btn-name">${kind}</span></button>`,
+        (kind) => `<button type="button" class="stone-btn" x-on:click="pick('${kind}')" :class="{ 'is-selected': stone === '${kind}' }" :aria-pressed="stone === '${kind}'" aria-label="Place a ${kind} stone"><span class="stone-glyph">${stoneGlyph(placing, kind)}</span><span class="stone-btn-name">${kind}</span></button>`,
       )
       .join('');
     parts.push(`
@@ -738,12 +738,12 @@ function renderGameControls(game: GameView): string {
   <div class="field" x-show="source !== null" x-cloak>
     <span class="label" id="lift-label">Stones to lift</span>
     <div class="stepper" role="group" aria-labelledby="lift-label">
-      <button type="button" class="step-btn" x-on:click="bumpLift(-1)" :disabled="lift <= (path.length || 1)" aria-label="Lift one stone fewer">−</button>
+      <button type="button" class="step-btn" x-on:click="bumpLift(-1)" :disabled="lift <= liftFloor" aria-label="Lift one stone fewer">−</button>
       <span class="stepper-value" x-text="lift + ' of ' + (source ? source.height : 0)"></span>
       <button type="button" class="step-btn" x-on:click="bumpLift(1)" :disabled="lift >= liftCeiling" aria-label="Lift one stone more">+</button>
       <button type="button" class="btn btn-quiet btn-sm" x-on:click="cancel()">Cancel</button>
     </div>
-    <p class="hint">Holding <span x-text="lift"></span> from <span class="mono" x-text="source ? source.square : ''"></span> — click a square in a straight line, or the source again to put them back.</p>
+    <p class="hint">Holding <span x-text="lift"></span> from <span class="mono" x-text="sourceSquare"></span> — click a square in a straight line, or the source again to put them back.</p>
   </div>
   <div class="field" x-show="path.length > 0" x-cloak>
     <span class="label" id="drops-label">Stones dropped</span>
