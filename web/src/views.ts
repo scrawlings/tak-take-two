@@ -234,6 +234,74 @@ ${notice}
   return renderShell('Users', body, { user: actor, path: '/admin/users' });
 }
 
+export interface AdminGamesView {
+  error?: string;
+}
+
+/**
+ * Ticket 13's admin face: every game on the site, share state aside, so an
+ * admin can open any game (admin viewing) or remove one (admin deletion). The
+ * `removed` flag renders like the players' lists do, so a removed game is
+ * recognisable at a glance. Only the module's `listAllGames` decides who may
+ * see this page.
+ */
+export function renderAdminGamesPage(actor: SessionUser, games: readonly GameSummary[], view: AdminGamesView = {}): string {
+  const notice = view.error ? `<p class="error">${escapeHtml(view.error)}</p>` : '';
+
+  const rows = games
+    .map((game) => {
+      const state = game.adminRemoved
+        ? '<span class="tag tag-flag">removed by an admin</span>'
+        : game.state === 'in_play'
+          ? '<span class="tag">in play</span>'
+          : game.state === 'proposed'
+            ? `<span class="tag">proposed · ${game.joinType === 'open' ? 'open' : 'invited'}</span>`
+            : '<span class="tag">finished</span>';
+      const players =
+        game.opponent === null
+          ? `${escapeHtml(game.proposer.displayName)} <span class="dim">waiting for ${
+              game.invitedPlayer === null ? 'anyone' : escapeHtml(game.invitedPlayer.displayName)
+            }</span>`
+          : `${escapeHtml(game.proposer.displayName)} <span class="dim">vs</span> ${escapeHtml(game.opponent.displayName)}`;
+      const toMove = game.toMove === null ? '<span class="dim">—</span>' : escapeHtml(game.toMove.displayName);
+      const result = game.result === null ? '<span class="dim">—</span>' : `<span class="mono">${escapeHtml(game.result)}</span>`;
+      const remove =
+        game.adminRemoved
+          ? ''
+          : `<form method="post" action="/games/${game.id}/admin-delete"><button type="submit" class="btn btn-danger btn-sm">Remove</button></form>`;
+      return `<tr>
+  <td class="num"><a href="/games/${game.id}">${game.id}</a></td>
+  <td class="num">${game.boardSize}×${game.boardSize}</td>
+  <td>${players}</td>
+  <td>${state}</td>
+  <td>${toMove}</td>
+  <td>${result}</td>
+  <td><div class="row-actions"><a class="btn btn-sm" href="/games/${game.id}">Open</a>${remove}</div></td>
+</tr>`;
+    })
+    .join('');
+
+  const table =
+    games.length === 0
+      ? `<p class="lede">No games have been proposed yet.</p>`
+      : `<div class="table-scroll">
+    <table class="data">
+      <thead><tr><th>Game</th><th>Board</th><th>Players</th><th>State</th><th>To move</th><th>Result</th><th>Actions</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  </div>`;
+
+  const body = `
+<h1>Games</h1>
+${notice}
+<p class="lede">Every game on the site, shared or not. Open one to view the position and history; Remove ends it, leaving the players a notice of the removal.</p>
+<div class="block">
+  <h2>All games</h2>
+  ${table}
+</div>`;
+  return renderShell('Games', body, { user: actor, path: '/admin/games' });
+}
+
 export interface MyGamesView {
   error?: string;
   /** Values to put back in the propose form when it comes back with an error. */

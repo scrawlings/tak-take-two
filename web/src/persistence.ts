@@ -197,6 +197,11 @@ export interface Persistence {
   /** Every game still `proposed` and unjoined, newest first, narrowed by `filters`. */
   listProposedGames(filters: ProposedGameFilters): Result<GameRecord[], string>;
   /**
+   * Every game, any state, newest first — the admin's view of the whole
+   * board (ticket 13: admins may view any game, share state aside).
+   */
+  listAllGames(): Result<GameRecord[], string>;
+  /**
    * Claim a proposal as its opponent and start play. Returns false — changing
    * nothing — when the game is no longer an unjoined proposal, so that two
    * racing joins cannot both succeed.
@@ -484,6 +489,19 @@ export function createPersistence(db: Db): Persistence {
              ORDER BY g.created_at DESC, g.id DESC`,
           )
           .all(...params) as GameRow[];
+        return ok(rows.map(mapGame));
+      } catch (e) {
+        return err(e instanceof Error ? e.message : String(e));
+      }
+    },
+
+    listAllGames(): Result<GameRecord[], string> {
+      try {
+        // No share/hide filtering: an admin may view any game (ticket 13), and
+        // the list is how an admin finds one to view or remove.
+        const rows = db
+          .prepare('SELECT * FROM games ORDER BY created_at DESC, id DESC')
+          .all() as GameRow[];
         return ok(rows.map(mapGame));
       } catch (e) {
         return err(e instanceof Error ? e.message : String(e));

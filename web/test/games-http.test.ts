@@ -243,6 +243,8 @@ describe('games navigation', () => {
     const admin = await signIn(app, 'root', 'a good password');
     const adminHtml = await (await app.request('/account', withCookie({}, admin))).text();
     expect(adminHtml).toContain('href="/admin/users"');
+    // An admin's Games is the whole-site list (ticket 13), never the player's page.
+    expect(adminHtml).toContain('href="/admin/games"');
     expect(adminHtml).not.toContain('href="/games"');
   });
 });
@@ -729,6 +731,79 @@ describe('sharing, hiding, and admin removal at the game screen', () => {
     const { app, aoife } = await inPlayGame();
 
     const res = await app.request('/games/1/admin-delete', withCookie(form({}), aoife));
+
+    expect(res.status).toBe(403);
+  });
+});
+
+describe('the admin games list (ticket 13)', () => {
+  it('lists every game, any state or share, with open and remove actions', async () => {
+    const { app, db } = makeApp();
+    await insertUser(db, { id: 1, username: 'aoife', password: 'pw', displayName: 'Aoife Nolan' });
+    await insertUser(db, { id: 2, username: 'takashi', password: 'pw', displayName: 'Takashi Mori' });
+    await insertUser(db, { id: 3, username: 'root', password: 'pw', role: 'admin' });
+    const aoife = await signIn(app, 'aoife', 'pw');
+    const takashi = await signIn(app, 'takashi', 'pw');
+    const admin = await signIn(app, 'root', 'pw');
+
+    // One game in play, one bare (unshared, invited) proposal.
+    await app.request('/games', withCookie(form({ board_size: '5', join_type: 'open' }), aoife));
+    await app.request('/games/1/join', withCookie(form({}), takashi));
+    await app.request('/games', withCookie(form({ board_size: '6', join_type: 'invited', invited_display_name: 'Takashi Mori' }), aoife));
+
+    const html = await (await app.request('/admin/games', withCookie({}, admin))).text();
+
+    expect(html).toContain('All games');
+    // Both games, share state aside: the invited proposal is unshared and
+    // would never appear on a player's find page.
+    expect(html).toContain('>1</a>');
+    expect(html).toContain('>2</a>');
+    expect(html).toContain('5×5');
+    expect(html).toContain('6×6');
+    expect(html).toContain('Aoife Nolan');
+    expect(html).toContain('Takashi Mori');
+    expect(html).toContain('in play');
+    expect(html).toContain('proposed · invited');
+    // Open leads to the game view; Remove posts the admin-delete route.
+    expect(html).toContain('href="/games/1"');
+    expect(html).toContain('action="/games/1/admin-delete"');
+    expect(html).toContain('action="/games/2/admin-delete"');
+  });
+
+  it('shows the result of a finished game and a flag for a removed one', async () => {
+    const { app, db } = makeApp();
+    await insertUser(db, { id: 1, username: 'aoife', password: 'pw' });
+    await insertUser(db, { id: 2, username: 'takashi', password: 'pw' });
+    await insertUser(db, { id: 3, username: 'root', password: 'pw', role: 'admin' });
+    const aoife = await signIn(app, 'aoife', 'pw');
+    const takashi = await signIn(app, 'takashi', 'pw');
+    const admin = await signIn(app, 'root', 'pw');
+
+    await app.request('/games', withCookie(form({ board_size: '5', join_type: 'open' }), aoife));
+    await app.request('/games/1/join', withCookie(form({}), takashi));
+    await app.request('/games/1/move', withCookie(form({ move: 'a1' }), aoife));
+    await app.request('/games/1/move', withCookie(form({ move: 'e5' }), takashi));
+    // Takashi (P2) resigns: Aoife wins 1-0.
+    await app.request('/games/1/resign', withCookie(form({}), takashi));
+
+    const before = await (await app.request('/admin/games', withCookie({}, admin))).text();
+    expect(before).toContain('finished');
+    expect(before).toContain('1-0');
+    expect(before).not.toContain('removed by an admin');
+
+    // Remove it from the list, then the same list flags it and drops the action.
+    await app.request('/games/1/admin-delete', withCookie(form({}), admin));
+    const after = await (await app.request('/admin/games', withCookie({}, admin))).text();
+    expect(after).toContain('removed by an admin');
+    expect(after).not.toContain('action="/games/1/admin-delete"');
+  });
+
+  it('refuses a player the admin games list', async () => {
+    const { app, db } = makeApp();
+    await insertUser(db, { id: 1, username: 'aoife', password: 'pw' });
+    const aoife = await signIn(app, 'aoife', 'pw');
+
+    const res = await app.request('/admin/games', withCookie({}, aoife));
 
     expect(res.status).toBe(403);
   });

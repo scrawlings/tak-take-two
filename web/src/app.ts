@@ -27,6 +27,7 @@ import {
   renderExportPage,
   renderLoginPage,
   renderFindGamesPage,
+  renderAdminGamesPage,
   renderGamePage,
   renderMyGamesPage,
   renderNotFoundPage,
@@ -589,6 +590,18 @@ export function createApp(deps: AppDeps): App {
   }));
 
   app.get('/admin', requireUser, (c) => c.redirect('/admin/users', 303));
+
+  // Ticket 13's admin face: every game, so an admin can view or remove any of
+  // them. `listAllGames` refuses non-admins, and `pageAction` turns that into
+  // the forbidden page.
+  app.get('/admin/games', requireUser, (c) => {
+    const actor = c.get('user');
+    return pageAction(c, actor, {
+      name: 'list all games',
+      load: () => games.listAllGames(actor),
+      render: (data) => c.html(renderAdminGamesPage(actor, data)),
+    });
+  });
 
   app.get('/admin/users', requireUser, (c) => {
     const actor = c.get('user');

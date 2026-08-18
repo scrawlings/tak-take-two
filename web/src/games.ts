@@ -94,6 +94,8 @@ export interface GameSummary {
   readonly canJoin: boolean;
   /** Whose turn it is, or null while the game is not in play. */
   readonly toMove: PlayerRef | null;
+  /** The stored PTN result (`R-0`, `1/2-1/2`, …), or null while not finished. */
+  readonly result: string | null;
   /** Ticket 13: this game was ended by an admin, not by play or agreement. */
   readonly adminRemoved: boolean;
 }
@@ -253,6 +255,8 @@ export interface Games {
   listMyGames(actor: SessionUser): Result<GameSummary[], GameError>;
   /** Proposals the actor could join: open ones, plus invitations to them. */
   searchProposed(actor: SessionUser, search?: ProposedSearch): Result<GameSummary[], GameError>;
+  /** Every game on the site, newest first — admin only (ticket 13). */
+  listAllGames(actor: SessionUser): Result<GameSummary[], GameError>;
 }
 
 function persistenceError(message: string): GameError {
@@ -1358,6 +1362,7 @@ export function createGames(persistence: Persistence): Games {
       canJoin: joinableBy(game, actor),
       adminRemoved: game.adminRemoved,
       toMove,
+      result: game.result,
     });
   }
 
@@ -1443,6 +1448,18 @@ export function createGames(persistence: Persistence): Games {
         rows.value.filter((game) => joinableBy(game, actor)),
         actor,
       );
+    },
+
+    listAllGames(actor: SessionUser): Result<GameSummary[], GameError> {
+      // Ticket 13: admins may view any game regardless of share state, and may
+      // remove any game. The list is how they find one to open or remove.
+      if (actor.role !== 'admin') {
+        return err({ code: 'forbidden', message: 'Only an admin can list every game.' });
+      }
+
+      const rows = persistence.listAllGames();
+      if (rows.isErr()) return err(persistenceError(rows.error));
+      return summariseAll(rows.value, actor);
     },
   };
 }

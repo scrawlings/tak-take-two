@@ -38,10 +38,14 @@ function navItems(user: NavUser | undefined): NavItem[] {
       { href: '/status', label: 'Status' },
     ];
   }
-  // Admins administer and never play (CONTEXT.md), so Games is a player's link.
+  // Admins administer and never play (CONTEXT.md), so Games is a player's
+  // link. An admin's Games links to the whole-site list (ticket 13).
   const items: NavItem[] =
     user.role === 'admin'
-      ? [{ href: '/admin/users', label: 'Users' }]
+      ? [
+          { href: '/admin/users', label: 'Users' },
+          { href: '/admin/games', label: 'Games' },
+        ]
       : [
           { href: '/games', label: 'Games' },
           { href: '/games/find', label: 'Find' },
