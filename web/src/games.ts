@@ -1,5 +1,5 @@
 import { err, ok, type Result } from 'neverthrow';
-import { createTakGame, fromPtnText } from '@tak/core';
+import { createTakGame, fromPtnText, isBoardFinished } from '@tak/core';
 import type { Player, TakGame } from '@tak/core';
 import type {
   GameBoardSize,
@@ -242,12 +242,9 @@ export function createGames(persistence: Persistence): Games {
     if (loaded.isErr()) {
       return err({ code: 'invalid-ptn', message: `That record is not a legal game: ${loaded.error.message}` });
     }
-    // What bars an import is a *position* the rules have already decided — you
-    // cannot continue from a won board. A `[Result]` tag is only metadata about
-    // the game the record came from: a resignation, an agreed draw, or a prefix
-    // exported with its result line still says nothing about this new game, and
-    // `TakGame.result` folds both together, so read the engine outcome directly.
-    if (loaded.value.state.outcome !== null) {
+    // The *position* bars import, not the record's result tag: a resignation
+    // or agreed draw still leaves the position playable.
+    if (isBoardFinished(loaded.value)) {
       return err({
         code: 'invalid-ptn',
         message: 'That record ends in a won position, so there is nothing left to play.',

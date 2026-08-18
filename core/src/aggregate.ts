@@ -188,6 +188,16 @@ export function isFinished(game: TakGame): boolean {
   return game.result !== null;
 }
 
+/**
+ * Whether the position itself is decided — a road or flat win already exists.
+ * Distinct from `isFinished`: resign and mutual draw end the game while the
+ * position stays undecided. This is the engine's question, not the record's:
+ * a `[Result]` tag never decides a position.
+ */
+export function isBoardFinished(game: TakGame): boolean {
+  return boardEnd(game.state) !== null;
+}
+
 /** The PTN result code for a finished game, or null while in play. */
 export function resultCode(game: TakGame): ResultCode | null {
   const end = game.result;

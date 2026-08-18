@@ -309,6 +309,24 @@ describe('games: propose from PTN', () => {
     expect(h.persistence.findGameById(gameId)._unsafeUnwrap()?.importedPtn).toBe(resigned);
   });
 
+  it('imports a record whose result tag claims a road but the position is open', () => {
+    const h = harness();
+    // The tag is metadata about the game the record came from; only the
+    // position bars import, and this one has no road.
+    const tagged = `${OPENING_PTN}\nR-0`;
+
+    const result = h.games.applyGame(h.aoife, {
+      type: 'propose',
+      boardSize: 5,
+      joinType: 'open',
+      ptn: tagged,
+    });
+
+    expect(result.isOk()).toBe(true);
+    const { gameId } = result._unsafeUnwrap() as { gameId: number };
+    expect(h.persistence.findGameById(gameId)._unsafeUnwrap()?.importedPtn).toBe(tagged);
+  });
+
   it('stores a record the core reloads as fixed history', () => {
     const h = harness();
     const result = h.games.applyGame(h.aoife, {

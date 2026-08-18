@@ -5,6 +5,7 @@ import {
   createTakGame,
   fromPtnText,
   generatePtn,
+  isBoardFinished,
   isFinished,
   mutualDraw,
   playMove,
@@ -170,6 +171,31 @@ describe('resign and mutual draw', () => {
     const r = playMove(g, place('d1', 'flat'), 1);
     expect(r.isErr()).toBe(true);
     if (r.isErr()) expect(r.error.code).toBe('game-finished');
+  });
+});
+
+describe('isBoardFinished', () => {
+  it('is false on a fresh game', () => {
+    expect(isBoardFinished(createTakGame(5))).toBe(false);
+  });
+
+  it('is true once a road win exists', () => {
+    const g = playAll(createTakGame(5), roadWinMoves());
+    expect(isBoardFinished(g)).toBe(true);
+  });
+
+  it('is false after a resignation, though the game is finished', () => {
+    const g = mustTak(resign(createTakGame(5), 1));
+    expect(isFinished(g)).toBe(true);
+    expect(isBoardFinished(g)).toBe(false);
+  });
+
+  it('reads the position, not the record: an R-0 tag on an open position is no board finish', () => {
+    const loaded = mustTak(fromPtnText('[Size "5"]\n1. a1 e5\n2. c3 c4\nR-0'));
+    // The fold records the tag's claim…
+    expect(loaded.result).toEqual({ kind: 'board', outcome: { type: 'road', winner: 1 } });
+    // …but the position is open, so the engine's question answers no.
+    expect(isBoardFinished(loaded)).toBe(false);
   });
 });
 

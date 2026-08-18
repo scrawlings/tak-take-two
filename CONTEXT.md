@@ -19,6 +19,7 @@ A glossary of Tak and this system's domain terms. Vocabulary for the game itself
 - **Road** — an orthogonal chain of a player's flat stones and capstones connecting two opposite edges of the board.
 - **Road win** — completing a road wins immediately. If one move creates a road for both players, the player who made the move wins (the double road / Dragon clause).
 - **Flat win** — if the board becomes completely filled, or a player places their last stone, the game ends; if no road exists, only flat stones on top of stacks (or alone on a square) count, and the player with the higher count wins; an equal count is a draw.
+- **Decided position** — a position in which a road or flat win already exists; the rules engine reports an outcome. Distinct from a finished game: resign and mutual draw end the game while the position stays undecided. Only a decided position bars a PTN import — a `[Result]` tag alone never decides one.
 
 ## Notation
 
@@ -46,7 +47,7 @@ A glossary of Tak and this system's domain terms. Vocabulary for the game itself
 
 ## Imports
 
-- **PTN import** — proposing a game from a PTN record: the moves are validated by replaying from an empty board, and the game continues from the resulting position with the imported history fixed.
+- **PTN import** — proposing a game from a PTN record: the moves are validated by replaying from an empty board, and the game continues from the resulting position with the imported history fixed. A record whose position is decided cannot be imported.
 - **TPS export** — any position in a game may be exported as TPS. (Starting games from a TPS position is deferred.)
 
 ## Sessions & administration

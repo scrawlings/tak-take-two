@@ -6,6 +6,7 @@ export {
   createTakGame,
   fromPtn,
   fromPtnText,
+  isBoardFinished,
   isFinished,
   mutualDraw,
   playMove,
