@@ -459,7 +459,7 @@ p { margin: 0 0 1rem; }
 
 .field { margin-bottom: 1.125rem; }
 
-.field label {
+.field label, .field .label {
   display: block;
   font-family: var(--record);
   font-size: 0.75rem;
@@ -501,6 +501,43 @@ p { margin: 0 0 1rem; }
 .actions { margin: 0; display: flex; gap: 0.625rem; flex-wrap: wrap; align-items: center; }
 
 .hint { font-size: 0.8125rem; color: var(--slate-mid); margin: 0.75rem 0 0; }
+
+/* ---------- stone picker ---------- */
+
+/* The stone-to-place mode as buttons: the board's own glyphs (filled for P1,
+   outlined for P2), each with its name, instead of a bare text select. The
+   selected mode marks itself the way a board source square does — a stone
+   outline. */
+.stone-picker {
+  display: inline-flex;
+  gap: 0.375rem;
+  flex-wrap: wrap;
+}
+
+.stone-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-family: var(--record);
+  font-size: 0.8125rem;
+  color: var(--slate);
+  background: #fff;
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  padding: 0.4375rem 0.75rem;
+  cursor: pointer;
+}
+
+.stone-btn:hover { border-color: var(--slate); }
+
+.stone-btn .stone-glyph { font-size: 1.125rem; line-height: 1; }
+
+.stone-btn.is-selected {
+  border-color: var(--stone);
+  outline: 2px solid var(--stone);
+  outline-offset: -2px;
+  background: var(--panel);
+}
 
 /* ---------- buttons ---------- */
 

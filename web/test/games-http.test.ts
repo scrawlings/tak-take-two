@@ -463,6 +463,14 @@ describe('the game screen', () => {
     // Your colour and the opening-turn colour.
     expect(html).toContain('You play ● (filled)');
     expect(html).toContain('your opening move places your opponent');
+    // The stone-to-place picker: glyph buttons, not a text select. On the
+    // opening the move places an opponent stone, so the glyphs are open.
+    expect(html).toContain('aria-label="Place a flat stone"');
+    expect(html).toContain('x-on:click="stone = \'flat\'"');
+    expect(html).toContain('stone-glyph">○</span>');
+    expect(html).toContain('stone-glyph">△</span>');
+    expect(html).toContain('stone-glyph">□</span>');
+    expect(html).not.toContain('<select');
     // Stones left and the move-syntax summary.
     expect(html).toContain('Stones left');
     expect(html).toContain('Move syntax');
@@ -492,6 +500,11 @@ describe('the game screen', () => {
     expect(html).not.toContain('2.</span>');
     // The hover stack tooltip renders the glyph column.
     expect(html).toContain('class="stack-tip"');
+    // After both openings, aoife's second turn places her own filled stones,
+    // so the picker glyphs switch to filled.
+    expect(html).toContain('stone-glyph">●</span>');
+    expect(html).toContain('stone-glyph">▲</span>');
+    expect(html).toContain('stone-glyph">■</span>');
   });
 
   it('rejects an illegal move with a clear message', async () => {

@@ -637,6 +637,20 @@ function renderGameControls(game: GameView): string {
       parts.push(`<p class="notice">${waiting}</p>`);
     }
   } else if (game.canMove) {
+    // The picker shows the glyph of the stone the viewer is about to place: in
+    // self-play the colour to move; otherwise the viewer's own colour, except
+    // on the opening move, which places an opponent's stone (CONTEXT.md: Place).
+    const viewer = game.viewerSeat ?? 1;
+    const placing: 1 | 2 = game.selfPlay
+      ? game.toMoveSeat ?? viewer
+      : game.opened[viewer]
+        ? viewer
+        : viewer === 1 ? 2 : 1;
+    const stoneButtons = (['flat', 'standing', 'capstone'] as const)
+      .map(
+        (kind) => `<button type="button" class="stone-btn" x-on:click="stone = '${kind}'" :class="{ 'is-selected': stone === '${kind}' }" :aria-pressed="stone === '${kind}'" aria-label="Place a ${kind} stone"><span class="stone-glyph">${stoneGlyph(placing, kind)}</span><span class="stone-btn-name">${kind}</span></button>`,
+      )
+      .join('');
     parts.push(`
 <form class="panel" method="post" action="/games/${game.id}/move">
   <div class="field">
@@ -645,12 +659,10 @@ function renderGameControls(game: GameView): string {
     <p class="hint">Type Portable Tak Notation, or build it by clicking the board above.</p>
   </div>
   <div class="field">
-    <label for="stone">Stone to place</label>
-    <select id="stone" x-model="stone">
-      <option value="flat">flat</option>
-      <option value="standing">standing</option>
-      <option value="capstone">capstone</option>
-    </select>
+    <span class="label" id="stone-label">Stone to place</span>
+    <div class="stone-picker" role="group" aria-labelledby="stone-label">
+      ${stoneButtons}
+    </div>
     <p class="hint" x-show="source !== null">Moving from <span x-text="source ? source.sq : ''"></span> — click a square in a straight line, or the source again to cancel.</p>
   </div>
   <p class="actions"><button type="submit" class="btn">Play move</button></p>
