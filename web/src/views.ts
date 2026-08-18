@@ -667,8 +667,8 @@ function renderReserves(game: GameView): string {
     <table class="data">
       <thead><tr><th>Player</th><th>Colour</th><th>Flats</th><th>Capstones</th></tr></thead>
       <tbody>
-        <tr><td>${label(1, game.proposer.displayName)}</td><td>● filled</td><td class="num">${p1.stones}</td><td class="num">${p1.capstones}</td></tr>
-        <tr><td>${label(2, game.opponent?.displayName ?? 'Opponent')}</td><td>○ open</td><td class="num">${p2.stones}</td><td class="num">${p2.capstones}</td></tr>
+        <tr><td>${label(1, game.proposer.displayName)}</td><td>● filled</td><td class="num">●▲ ${p1.stones}</td><td class="num">■ ${p1.capstones}</td></tr>
+        <tr><td>${label(2, game.opponent?.displayName ?? 'Opponent')}</td><td>○ open</td><td class="num">○△ ${p2.stones}</td><td class="num">□ ${p2.capstones}</td></tr>
       </tbody>
     </table>
   </div>
