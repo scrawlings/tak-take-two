@@ -35,6 +35,7 @@ A glossary of Tak and this system's domain terms. Vocabulary for the game itself
   _Avoid_: request (ambiguous with take-back request)
 - **Open game** — a proposal any player may join; joining implies the game is shared (both players' share toggles start on).
 - **Invited game** — a proposal only a designated player may join; hidden from all other players; share toggles start off.
+- **Self-play** — a game whose proposer also joins (an open game they claim, or an invitation they make to themselves), so one account plays both seats from a single window, for study.
 - **Share** — a per-player toggle on a game controlling whether non-participants can view it; a game is viewable iff both players have shared. Either player may change their share at any time.
   _Avoid_: public, make public (ambiguous in the original brief; this is the one concept)
 - **Hide** — a player removes a game from their own views and stops sharing it; if both players hide a game, it is deleted.

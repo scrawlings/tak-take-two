@@ -497,13 +497,13 @@ const TAK_BOARD_SCRIPT = `<script>
 document.addEventListener('alpine:init', () => {
   Alpine.data('takBoard', (config) => ({
     move: '', stone: 'flat', source: null,
-    canMove: config.canMove, viewerSeat: config.viewerSeat, size: config.size,
+    canMove: config.canMove, viewerSeat: config.viewerSeat, size: config.size, selfPlay: config.selfPlay,
     cellClick(el) {
       if (!this.canMove) return;
       const sq = el.dataset.square;
       const height = Number(el.dataset.height);
       const top = el.dataset.top;
-      const mine = top !== '' && top[0] === String(this.viewerSeat);
+      const mine = top !== '' && (this.selfPlay || top[0] === String(this.viewerSeat));
       if (this.source === null) {
         if (height === 0) {
           const prefix = this.stone === 'standing' ? 'S' : this.stone === 'capstone' ? 'C' : '';
@@ -565,6 +565,23 @@ function renderGameStatus(game: GameView): string {
   if (game.state === 'finished') {
     return `<p class="lede">${escapeHtml(game.resultText ?? 'Finished')}.</p>`;
   }
+
+  if (game.selfPlay) {
+    // One account holds both seats (CONTEXT.md: Self-play), so the only
+    // meaningful "who" is the colour whose turn it is.
+    const youPlay = game.viewerSeat !== null ? 'You play both colours. ' : '';
+    const seat = game.toMoveSeat;
+    if (seat === null) {
+      return `<p class="lede">Self-play — ${escapeHtml(game.proposer.displayName)}. ${youPlay}</p>`;
+    }
+    const colour = seat === 1 ? 'Filled' : 'Open';
+    const other = seat === 1 ? 'open' : 'filled';
+    const turn = game.opened[seat]
+      ? `${colour} to move.`
+      : `${colour}'s opening places an ${other} stone.`;
+    return `<p class="lede">Self-play — ${escapeHtml(game.proposer.displayName)}. ${youPlay}${turn}</p>`;
+  }
+
   const youPlay =
     game.viewerSeat === null
       ? ''
@@ -640,7 +657,8 @@ function renderLegend(): string {
 function renderReserves(game: GameView): string {
   if (game.state === 'proposed') return '';
   const you = game.viewerSeat;
-  const label = (seat: 1 | 2, name: string): string => `${escapeHtml(name)}${you === seat ? ' (you)' : ''}`;
+  const label = (seat: 1 | 2, name: string): string =>
+    `${escapeHtml(name)}${game.selfPlay || you === seat ? ' (you)' : ''}`;
   const p1 = game.reserves[1];
   const p2 = game.reserves[2];
   return `<div class="block">
@@ -679,7 +697,7 @@ ${renderGameStatus(game)}
 ${error}
 ${renderLegend()}
 ${TAK_BOARD_SCRIPT}
-<div x-data="takBoard(${escapeHtml(JSON.stringify({ canMove: game.canMove, viewerSeat: game.viewerSeat, size: game.boardSize }))})" x-cloak>
+<div x-data="takBoard(${escapeHtml(JSON.stringify({ canMove: game.canMove, viewerSeat: game.viewerSeat, size: game.boardSize, selfPlay: game.selfPlay }))})" x-cloak>
   ${renderBoard(game)}
   ${renderGameControls(game)}
 </div>

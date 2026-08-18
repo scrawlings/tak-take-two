@@ -549,3 +549,23 @@ describe('the game screen', () => {
     expect(res.status).toBe(404);
   });
 });
+
+describe('self-play in one window', () => {
+  it('lets one account play both seats and says so in the view', async () => {
+    const { app, db } = makeApp();
+    await insertUser(db, { id: 1, username: 'aoife', password: 'pw', displayName: 'Aoife Nolan' });
+    const aoife = await signIn(app, 'aoife', 'pw');
+    await app.request('/games', withCookie(form({ board_size: '5', join_type: 'open' }), aoife));
+    await app.request('/games/1/join', withCookie(form({ from: 'games' }), aoife));
+
+    const page = await (await app.request('/games/1', withCookie({}, aoife))).text();
+    expect(page).toContain('Self-play');
+    expect(page).toContain('You play both colours');
+    expect(page).not.toContain('Resign');
+    expect(page).not.toContain('Draw by agreement');
+
+    // Both seats' moves come from the same account.
+    expect((await app.request('/games/1/move', withCookie(form({ move: 'a1' }), aoife))).status).toBe(303);
+    expect((await app.request('/games/1/move', withCookie(form({ move: 'e5' }), aoife))).status).toBe(303);
+  });
+});

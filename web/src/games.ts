@@ -125,6 +125,8 @@ export interface GameView {
   readonly imported: boolean;
   /** 1 or 2, or null when the viewer is a spectator. */
   readonly viewerSeat: 1 | 2 | null;
+  /** One account holds both seats (CONTEXT.md: Self-play). */
+  readonly selfPlay: boolean;
   /** Full history, imported first then played. */
   readonly moves: readonly MoveView[];
   /** Rows top-down; each row files left-to-right. */
@@ -251,6 +253,11 @@ function visibleTo(game: GameRecord, actorId: number): boolean {
 /** The proposer is always Player 1 and the joiner Player 2 (CONTEXT.md: Seat). */
 function seatOf(game: GameRecord, player: Player): number | null {
   return player === 1 ? game.proposerId : game.opponentId;
+}
+
+/** Whether one account holds both seats — the proposer joined their own proposal (CONTEXT.md: Self-play). */
+function isSelfPlay(game: GameRecord): boolean {
+  return game.proposerId === game.opponentId;
 }
 
 function parseBoardSize(value: number): Result<GameBoardSize, GameError> {
@@ -634,6 +641,9 @@ export function createGames(persistence: Persistence): Games {
     if (game.state !== 'in_play') {
       return err({ code: 'not-in-play', message: 'This game is not being played right now.' });
     }
+    if (isSelfPlay(game)) {
+      return err({ code: 'forbidden', message: 'You cannot resign against yourself.' });
+    }
 
     const current = currentTakGame(game);
     if (current.isErr()) return err(current.error);
@@ -670,6 +680,9 @@ export function createGames(persistence: Persistence): Games {
     }
     if (game.state !== 'in_play') {
       return err({ code: 'not-in-play', message: 'This game is not being played right now.' });
+    }
+    if (isSelfPlay(game)) {
+      return err({ code: 'forbidden', message: 'You cannot draw against yourself.' });
     }
 
     const current = currentTakGame(game);
@@ -709,6 +722,7 @@ export function createGames(persistence: Persistence): Games {
     const tak = current.value;
 
     const viewerSeat = seatOfActor(game, actor.id);
+    const selfPlay = isSelfPlay(game);
     const toMoveSeat: 1 | 2 | null = game.state === 'in_play' ? tak.state.playerToMove : null;
     const toMove = toMoveSeat === null ? null : toMoveSeat === 1 ? proposer.value : opponent.value;
 
@@ -736,12 +750,13 @@ export function createGames(persistence: Persistence): Games {
       opponent: opponent.value,
       imported: game.importedPtn !== null,
       viewerSeat,
+      selfPlay: isSelfPlay(game),
       moves,
       board: buildBoard(tak.state),
       toMove,
       toMoveSeat,
-      canMove: game.state === 'in_play' && viewerSeat !== null && viewerSeat === toMoveSeat,
-      canEnd: game.state === 'in_play' && viewerSeat !== null,
+      canMove: game.state === 'in_play' && viewerSeat !== null && (selfPlay || viewerSeat === toMoveSeat),
+      canEnd: game.state === 'in_play' && viewerSeat !== null && !selfPlay,
       resultText: resultTextOf(game.result, proposer.value, opponent.value),
       reserves: tak.state.reserves,
       opened: tak.state.opened,

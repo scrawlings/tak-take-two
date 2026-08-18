@@ -1043,3 +1043,42 @@ describe('games: game view', () => {
     expect(h.games.getGame(stranger, gameId)._unsafeUnwrapErr().code).toBe('not-found');
   });
 });
+
+describe('games: self-play', () => {
+  function selfPlayGame(h: Harness): number {
+    const r = h.games.applyGame(h.aoife, { type: 'propose', boardSize: 5, joinType: 'open' });
+    const gameId = (r._unsafeUnwrap() as { gameId: number }).gameId;
+    h.games.applyGame(h.aoife, { type: 'join', gameId });
+    return gameId;
+  }
+
+  it('lets one account play both seats from the single game window', () => {
+    const h = harness();
+    const gameId = selfPlayGame(h);
+
+    // Seat 1 (filled) opens…
+    expect(h.games.applyGame(h.aoife, { type: 'playMove', gameId, move: 'a2' }).isOk()).toBe(true);
+    // …then seat 2 (open) opens — still the same account, and not refused.
+    expect(h.games.applyGame(h.aoife, { type: 'playMove', gameId, move: 'a5' }).isOk()).toBe(true);
+
+    const view = h.games.getGame(h.aoife, gameId)._unsafeUnwrap();
+    expect(view.selfPlay).toBe(true);
+    expect(view.viewerSeat).toBe(1);
+    expect(view.canMove).toBe(true); // whichever seat's turn it is
+    expect(view.canEnd).toBe(false); // no resign/draw against yourself
+  });
+
+  it('refuses a resign in self-play', () => {
+    const h = harness();
+    const gameId = selfPlayGame(h);
+
+    expect(h.games.applyGame(h.aoife, { type: 'resign', gameId })._unsafeUnwrapErr().code).toBe('forbidden');
+  });
+
+  it('refuses a mutual draw in self-play', () => {
+    const h = harness();
+    const gameId = selfPlayGame(h);
+
+    expect(h.games.applyGame(h.aoife, { type: 'mutualDraw', gameId })._unsafeUnwrapErr().code).toBe('forbidden');
+  });
+});
