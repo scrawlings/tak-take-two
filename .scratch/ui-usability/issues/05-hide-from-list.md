@@ -4,12 +4,12 @@
 
 **Blocked by:** None.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Row actions gain a hide button for games the viewer can hide (the same `canHide` rule the game page uses, decided in the module not the view).
-- [ ] The hide POST accepts a `from` param (like join) so it redirects back to the games list instead of the game page.
-- [ ] The row reflects the result like other list actions (the game disappears from the list on reload; the stream region updates).
-- [ ] Tests at the HTTP seam: hiding from the list works, redirects correctly, and the game leaves the viewer's list; a non-participant cannot hide.
+- [x] Row actions gain a hide button for games the viewer can hide (the same `canHide` rule the game page uses, decided in the module not the view).
+- [x] The hide POST accepts a `from` param (like join) so it redirects back to the games list instead of the game page.
+- [x] The row reflects the result like other list actions (the game disappears from the list on reload; the stream region updates).
+- [x] Tests at the HTTP seam: hiding from the list works, redirects correctly, and the game leaves the viewer's list; a non-participant cannot hide.
 
 ## Comments
 
