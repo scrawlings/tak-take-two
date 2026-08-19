@@ -4,12 +4,12 @@
 
 **Blocked by:** None.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `listMyGames` accepts a `showRemoved` option (default false) and omits admin-removed games unless set.
-- [ ] The games page renders the toggle (query-param-driven like 03's controls); the stream route runs the same query.
-- [ ] A removed game's tombstone page stays reachable by direct link (warning + exports) regardless of the toggle.
-- [ ] Tests at the HTTP seam: removed games hidden by default, shown when toggled, tombstone page still reachable, stream honours the param.
+- [x] `listMyGames` accepts a `showRemoved` option (default false) and omits admin-removed games unless set.
+- [x] The games page renders the toggle (query-param-driven like 03's controls); the stream route runs the same query.
+- [x] A removed game's tombstone page stays reachable by direct link (warning + exports) regardless of the toggle.
+- [x] Tests at the HTTP seam: removed games hidden by default, shown when toggled, tombstone page still reachable, stream honours the param.
 
 ## Comments
 
