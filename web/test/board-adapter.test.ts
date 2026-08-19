@@ -11,8 +11,8 @@ import type { BoardConfig } from '../src/client/board-adapter.js';
 const PLAYING: BoardConfig = { canMove: true, viewerSeat: 1, size: 5, selfPlay: false };
 
 /** A board cell as the page renders it. */
-function cell(square: string, height = 0, top = ''): HTMLElement {
-  return { dataset: { square, height: String(height), top } } as unknown as HTMLElement;
+function cell(square: string, height = 0, top = '', stack = ''): HTMLElement {
+  return { dataset: { square, height: String(height), top, stack } } as unknown as HTMLElement;
 }
 
 function board(config: Partial<BoardConfig> = {}): ReturnType<typeof boardComponent> {
@@ -134,5 +134,45 @@ describe('what the templates bind to', () => {
     expect(b.stone).toBe('capstone');
     b.cellClick(cell('c3'));
     expect(b.move).toBe('Cc3');
+  });
+});
+
+describe('the source stack, shown as its own glyphs', () => {
+  it('marks the cut between what stays and what is lifted, unsplit before a direction is chosen', () => {
+    const b = board();
+    b.cellClick(cell('b4', 3, '1|flat', '●●○')); // lifting all 3: nothing stays
+    expect(b.partition).toBe('●●○');
+  });
+
+  it('shows what stays behind when the lift is less than the whole stack', () => {
+    const b = board();
+    b.cellClick(cell('b4', 5, '1|flat', '●●●○○')); // carry limit 5, lifting only 2
+    b.bumpLift(-3);
+    expect(b.partition).toBe('●●● ‖ ○○');
+  });
+
+  it('splits the lifted part into one group per path square, in drop order', () => {
+    const b = board();
+    b.cellClick(cell('b4', 3, '1|flat', '●●○'));
+    b.cellClick(cell('b2', 0)); // b3 gets 1, b2 gets 2
+    expect(b.partition).toBe('● · ●○');
+
+    b.shiftDrop(1, -1); // b3 gets 2, b2 gets 1
+    expect(b.partition).toBe('●● · ○');
+  });
+
+  it('marks both cuts together: what stays, then each square along the path', () => {
+    const b = board();
+    b.cellClick(cell('b4', 5, '1|flat', '●●●○○')); // carry limit 5, lifting only 2
+    b.bumpLift(-3);
+    b.cellClick(cell('b2', 0)); // b3 gets 1, b2 gets 1
+    expect(b.partition).toBe('●●● ‖ ○ · ○');
+  });
+
+  it('clears when the stack is put back down', () => {
+    const b = board();
+    b.cellClick(cell('b4', 3, '1|flat', '●●○'));
+    b.cellClick(cell('b4', 3, '1|flat', '●●○')); // the source again: put it back
+    expect(b.partition).toBe('');
   });
 });

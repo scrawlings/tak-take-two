@@ -602,6 +602,13 @@ p { margin: 0 0 1rem; }
 
 .drop-square { font-size: 0.75rem; color: var(--slate-mid); }
 
+.stack-partition {
+  font-size: 1.125rem;
+  letter-spacing: 0.05em;
+  color: var(--slate);
+  margin: 0 0 0.375rem;
+}
+
 /* ---------- buttons ---------- */
 
 .btn {

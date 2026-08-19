@@ -37,6 +37,8 @@ interface BoardComponent {
   state: BuilderState;
   /** Bound to the move field with `x-model`, so a player may still type over it. */
   move: string;
+  /** The source square's glyphs, bottom to top, read from the DOM at pickup. */
+  sourceStack: string;
   readonly stone: StoneKind;
   readonly source: SourceStack | null;
   readonly sourceSquare: string;
@@ -45,7 +47,8 @@ interface BoardComponent {
   readonly liftCeiling: number;
   readonly liftFloor: number;
   readonly path: readonly PathStep[];
-  apply(next: BuilderState): void;
+  readonly partition: string;
+  apply(next: BuilderState, pickedUpStack?: string): void;
   pick(stone: StoneKind): void;
   cellClick(el: HTMLElement): void;
   isSource(square: SquareRef): boolean;
@@ -60,6 +63,7 @@ export function boardComponent(config: BoardConfig): BoardComponent {
   return {
     state: createBuilder(config.size),
     move: '',
+    sourceStack: '',
 
     get stone(): StoneKind {
       return this.state.stone;
@@ -86,15 +90,42 @@ export function boardComponent(config: BoardConfig): BoardComponent {
     },
 
     /**
-     * Take the builder's next state and keep the move field in step. A
-     * composition fills the field; putting the stack back down empties it,
-     * because a cleared board that still offers the old move to Play is a trap.
-     * Nothing else writes to the field: picking a stack up composes nothing
-     * yet, and blanking it then would throw away what the player typed.
+     * The whole source stack, rendered as its own glyphs — bottom to top,
+     * left to right, the same order the drops consume the hand — split at
+     * where the lift cuts it, and the lifted part split again by the current
+     * path. What stays behind is shown too: it is as much a part of the
+     * decision as what moves, so a `‖` marks the cut and `·` marks the drops.
      */
-    apply(next: BuilderState): void {
+    get partition(): string {
+      const boundary = Math.max(0, this.sourceStack.length - this.state.lift);
+      const staying = this.sourceStack.slice(0, boundary);
+      const hand = this.sourceStack.slice(boundary);
+      const groups: string[] = [];
+      let taken = 0;
+      for (const step of this.state.path) {
+        groups.push(hand.slice(taken, taken + step.drops));
+        taken += step.drops;
+      }
+      const moving = (groups.length > 0 ? groups : [hand]).join(' · ');
+      return staying === '' ? moving : `${staying} ‖ ${moving}`;
+    },
+
+    /**
+     * Take the builder's next state and keep the move field and the carried
+     * stack's glyphs in step. A composition fills the move field; putting the
+     * stack back down empties it, because a cleared board that still offers
+     * the old move to Play is a trap. Nothing else writes to the field:
+     * picking a stack up composes nothing yet, and blanking it then would
+     * throw away what the player typed. `pickedUpStack` is only meaningful on
+     * the click that lifts a stack — the DOM element is the one place that
+     * glyph string exists, so `cellClick` reads it and hands it through.
+     */
+    apply(next: BuilderState, pickedUpStack = ''): void {
       const putBack = this.state.source !== null && next.source === null;
+      const pickedUp = this.state.source === null && next.source !== null;
       this.state = next;
+      if (pickedUp) this.sourceStack = pickedUpStack;
+      else if (putBack) this.sourceStack = '';
       if (next.notation !== '') this.move = next.notation;
       else if (putBack) this.move = '';
     },
@@ -110,7 +141,7 @@ export function boardComponent(config: BoardConfig): BoardComponent {
       const top = el.dataset.top ?? '';
       // `data-top` reads "seat|kind"; an empty square carries neither.
       const mine = top !== '' && (config.selfPlay || top[0] === String(config.viewerSeat));
-      this.apply(clickSquare(this.state, { square, height, mine }));
+      this.apply(clickSquare(this.state, { square, height, mine }), el.dataset.stack ?? '');
     },
 
     isSource(square: SquareRef): boolean {

@@ -605,6 +605,9 @@ function renderBoard(game: GameView): string {
         const topStone = cell.stack.length === 0 ? null : cell.stack[cell.stack.length - 1]!;
         const glyph = topStone === null ? '·' : stoneGlyph(topStone.player, topStone.kind);
         const topAttr = topStone === null ? '' : `${topStone.player}|${topStone.kind}`;
+        // Bottom to top, so the adapter can read off the top `lift` glyphs as
+        // the hand a stack move carries, in the order it drops them.
+        const stackAttr = cell.stack.map((s) => stoneGlyph(s.player, s.kind)).join('');
         const height = cell.stack.length > 1 ? `<span class="cell-height">${cell.stack.length}</span>` : '';
         const square = `${cell.file}${cell.rank}`;
         // What this square receives if the move is played: the builder's own
@@ -617,7 +620,7 @@ function renderBoard(game: GameView): string {
                 .reverse()
                 .map((s) => `<span>${stoneGlyph(s.player, s.kind)}</span>`)
                 .join('')}</span>`;
-        return `<button type="button" class="cell" data-square="${square}" data-height="${cell.stack.length}" data-top="${topAttr}" x-on:click="cellClick($el)" :class="{ 'is-source': isSource('${square}'), 'is-path': dropsOn('${square}') > 0 }" aria-label="${square}">${glyph}${height}${drops}${stackTip}</button>`;
+        return `<button type="button" class="cell" data-square="${square}" data-height="${cell.stack.length}" data-top="${topAttr}" data-stack="${stackAttr}" x-on:click="cellClick($el)" :class="{ 'is-source': isSource('${square}'), 'is-path': dropsOn('${square}') > 0 }" aria-label="${square}">${glyph}${height}${drops}${stackTip}</button>`;
       })
       .join('');
     rows.push(`<span class="axis">${rank}</span>${cells}`);
@@ -744,6 +747,7 @@ function renderGameControls(game: GameView): string {
       <button type="button" class="btn btn-quiet btn-sm" x-on:click="cancel()">Cancel</button>
     </div>
     <p class="hint">Holding <span x-text="lift"></span> from <span class="mono" x-text="sourceSquare"></span> — click a square in a straight line, or the source again to put them back.</p>
+    <p class="stack-partition mono" aria-hidden="true" x-text="partition"></p>
   </div>
   <div class="field" x-show="path.length > 0" x-cloak>
     <span class="label" id="drops-label">Stones dropped</span>
