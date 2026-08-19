@@ -602,8 +602,10 @@ describe('the game screen', () => {
     // One drop adjuster per square of the path, driven by the builder's state.
     expect(html).toContain('Stones dropped');
     expect(html).toContain('x-for="(step, i) in path"');
-    expect(html).toContain('x-on:click="bumpDrop(i, -1)"');
-    expect(html).toContain('x-on:click="bumpDrop(i, 1)"');
+    expect(html).toContain('x-on:click="shiftDrop(i, -1)"');
+    expect(html).toContain('x-on:click="shiftDrop(i, 1)"');
+    // A shift that would do nothing is disabled rather than silently refused.
+    expect(html).toContain(':disabled="!canShiftDrop(i, -1)"');
 
     // Each square shows what it would receive, and lights up on the path.
     expect(html).toContain(`x-text="dropsOn('a1')"`);
@@ -624,7 +626,7 @@ describe('the game screen', () => {
     expect(html).toContain('data-square="a1"'); // the board still renders
     expect(html).not.toContain('Stones to lift');
     // The bundle names these methods, so assert on the markup that calls them.
-    expect(html).not.toContain('x-on:click="bumpDrop(i, -1)"');
+    expect(html).not.toContain('x-on:click="shiftDrop(i, -1)"');
     expect(html).not.toContain('x-on:click="bumpLift(1)"');
   });
 

@@ -62,3 +62,12 @@ Known limits:
 - Templates ask `isSource(square)` and `sourceSquare` rather than reaching through `source`.
 
 Left as it stands: **clicking a highlighted path square re-targets the path rather than adjusting that square's drops.** Ticket 19 lists both readings — "Clicking a destination square in a straight line sets the path" and "Click a highlighted path square (or its +/− controls) to adjust that square's drop count" — and they conflict on the same gesture. The +/− controls satisfy the adjustment requirement; a click keeps one meaning, "this is where the stack goes". Changing the lift likewise re-spreads the drops, since a new total has no faithful way to preserve an old distribution.
+
+**2026-08-19 — Drop adjustment reworked after use.** The first drop control was wrong in practice. It kept +/− semantics per square and took the stone from "the last square that can spare one", so on the opening spread of a long path — `1,1,1,2` over four squares — every square but the tail held a single stone, could not give one, and could only be raised while the tail still had spare. The squares to the left read as stuck at one.
+
+The control is now a shift between neighbours: each path square has ◀ and ▶, and pressing one moves a single stone to the square beside it, doing nothing when the square holds its last stone or the path ends there. Raising a square means pushing a stone into it from its neighbour, which is how the stones actually travel.
+
+- The glyphs changed from `−`/`+` to `◀`/`▶` because the operation is a transfer, not an increment: pressing "+" on a square that then shows one fewer stone would be a lie.
+- Dead shifts are `:disabled` via `canShiftDrop(i, towards)` rather than silently refused, so the control shows what it can do.
+- `adjustDrop` became `moveDrop(state, index, towards)`; the invariants now hold by construction rather than by search — the total cannot change, and a square holding its last stone cannot give it away.
+- The regression net is a completeness property, not an example: a search from the opening spread must reach exactly C(lift−1, squares−1) distributions — every way of splitting the lift across the path. That is the property the old control violated, and examples alone would not have caught it.

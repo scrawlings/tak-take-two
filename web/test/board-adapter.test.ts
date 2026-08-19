@@ -113,9 +113,19 @@ describe('what the templates bind to', () => {
     expect(b.dropsOn('b2')).toBe(2);
     expect(b.dropsOn('a1')).toBe(0);
 
-    b.bumpDrop(0, 1);
+    b.shiftDrop(1, -1); // push a stone from b2 back to b3
     expect(b.dropsOn('b3')).toBe(2);
     expect(b.move).toBe('3b4-21');
+  });
+
+  it('says when a shift would do nothing, so a dead button looks dead', () => {
+    const b = board();
+    b.cellClick(cell('b4', 3, '1|flat'));
+    b.cellClick(cell('b2', 0)); // b3 gets 1, b2 gets 2
+    expect(b.canShiftDrop(0, -1)).toBe(false); // nothing before the first square
+    expect(b.canShiftDrop(0, 1)).toBe(false); // b3 holds its last stone
+    expect(b.canShiftDrop(1, -1)).toBe(true);
+    expect(b.canShiftDrop(1, 1)).toBe(false); // nothing after the last square
   });
 
   it('places the stone the picker chose', () => {

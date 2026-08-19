@@ -1,12 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { formatMove, parseMove } from '@tak/core';
 import {
-  adjustDrop,
   chooseStone,
   clearSelection,
   clickSquare,
   createBuilder,
   maxLift,
+  moveDrop,
   setLift,
 } from '../src/client/move-builder.js';
 import type { BuilderState } from '../src/client/move-builder.js';
@@ -176,53 +176,100 @@ describe('adjusting the lift', () => {
   });
 });
 
-describe('adjusting the drops', () => {
-  /** Lift 5 from b1 across b2, b3, b4 — defaults to 1, 1, 3. */
+describe('shifting stones along the path', () => {
+  /** Lift 5 from b1 across b2, b3, b4 — the opening spread is 1, 1, 3. */
   const spread = (): BuilderState => clickStack(pickSource(createBuilder(5), 'b1', 5), 'b4');
+  const drops = (state: BuilderState): number[] => state.path.map((step) => step.drops);
 
-  it('starts from the default spread', () => {
+  it('starts from the opening spread', () => {
     expect(spread().notation).toBe('5b1+113');
   });
 
-  it('raises a square by taking from one that can spare a stone', () => {
-    const state = adjustDrop(spread(), 0, 1);
-    expect(state.path.map((step) => step.drops)).toEqual([2, 1, 2]);
+  it('moves a stone back to the square before it', () => {
+    const state = moveDrop(spread(), 2, -1);
+    expect(drops(state)).toEqual([1, 2, 2]);
+    expect(state.notation).toBe('5b1+122');
+    expect(roundTrips(state.notation)).toBe(true);
+  });
+
+  it('moves a stone on to the square after it', () => {
+    const state = moveDrop(moveDrop(spread(), 2, -1), 1, 1);
+    expect(drops(state)).toEqual([1, 1, 3]);
+    expect(state.notation).toBe('5b1+113');
+  });
+
+  it('walks a stone up the path, one neighbour at a time', () => {
+    const state = moveDrop(moveDrop(spread(), 2, -1), 1, -1);
+    expect(drops(state)).toEqual([2, 1, 2]);
     expect(state.notation).toBe('5b1+212');
     expect(roundTrips(state.notation)).toBe(true);
   });
 
-  it('lowers a square by giving the stone back', () => {
-    const state = adjustDrop(adjustDrop(spread(), 0, 1), 0, -1);
-    expect(state.path.map((step) => step.drops)).toEqual([1, 1, 3]);
-    expect(state.notation).toBe('5b1+113');
+  it('reaches every square of a long path, not just the last two', () => {
+    // The opening spread of a four-square path leaves three squares holding one
+    // stone; each still has to be raisable, by pushing a stone along to it.
+    const long = clickStack(pickSource(createBuilder(5), 'b1', 5), 'b5');
+    expect(drops(long)).toEqual([1, 1, 1, 2]);
+    const walked = moveDrop(moveDrop(moveDrop(long, 3, -1), 2, -1), 1, -1);
+    expect(drops(walked)).toEqual([2, 1, 1, 1]);
+    expect(walked.notation).toBe('5b1+2111');
+    expect(roundTrips(walked.notation)).toBe(true);
   });
 
-  it('keeps every crossed square at one stone or more', () => {
-    // The middle square is already at its minimum: lowering it is refused.
-    const state = adjustDrop(spread(), 1, -1);
-    expect(state.path.map((step) => step.drops)).toEqual([1, 1, 3]);
+  it('never empties a square: its last stone stays put', () => {
+    expect(drops(moveDrop(spread(), 0, 1))).toEqual([1, 1, 3]);
+    expect(drops(moveDrop(spread(), 1, -1))).toEqual([1, 1, 3]);
   });
 
-  it('refuses to raise when no other square can spare a stone', () => {
-    const even = clickStack(pickSource(createBuilder(5), 'b1', 3), 'b4'); // 1,1,1
-    expect(even.notation).toBe('3b1+111');
-    expect(adjustDrop(even, 0, 1).path.map((step) => step.drops)).toEqual([1, 1, 1]);
+  it('has nowhere to push beyond either end of the path', () => {
+    const ends = moveDrop(moveDrop(spread(), 2, -1), 1, -1); // 2, 1, 2
+    expect(drops(moveDrop(ends, 0, -1))).toEqual([2, 1, 2]);
+    expect(drops(moveDrop(ends, 2, 1))).toEqual([2, 1, 2]);
   });
 
-  it('keeps the drops summing to the lift through any run of adjustments', () => {
+  it('keeps the drops summing to the lift through any run of shifts', () => {
     let state = spread();
-    for (const [index, delta] of [[0, 1], [1, 1], [2, -1], [0, 1], [1, -1], [2, 1]] as const) {
-      state = adjustDrop(state, index, delta);
-      const total = state.path.reduce((sum, step) => sum + step.drops, 0);
-      expect(total).toBe(state.lift);
+    for (const [index, towards] of [[2, -1], [1, -1], [0, 1], [2, -1], [1, 1], [0, -1]] as const) {
+      state = moveDrop(state, index, towards);
+      expect(state.path.reduce((sum, step) => sum + step.drops, 0)).toBe(state.lift);
       expect(state.path.every((step) => step.drops >= 1)).toBe(true);
       expect(roundTrips(state.notation)).toBe(true);
     }
   });
 
   it('ignores an index that is not on the path', () => {
-    expect(adjustDrop(spread(), 7, 1).notation).toBe('5b1+113');
-    expect(adjustDrop(createBuilder(5), 0, 1).notation).toBe('');
+    expect(moveDrop(spread(), 7, -1).notation).toBe('5b1+113');
+    expect(moveDrop(createBuilder(5), 0, 1).notation).toBe('');
+  });
+
+  it('reaches every legal distribution, leaving none unbuildable', () => {
+    // The property the interaction lives or dies by: shifting between
+    // neighbours must reach every way of splitting the lift across the path,
+    // or some distributions could only be typed. Compositions of `lift` into
+    // `n` positive parts number C(lift - 1, n - 1); a search from the opening
+    // spread must find exactly that many.
+    const choose = (n: number, k: number): number => (k === 0 ? 1 : (n * choose(n - 1, k - 1)) / k);
+
+    for (const [size, height, destination] of [[5, 5, 'b4'], [5, 5, 'b5'], [6, 6, 'b6'], [5, 4, 'b3']] as const) {
+      const start = clickStack(pickSource(createBuilder(size), 'b1', height), destination);
+      const squares = start.path.length;
+      const seen = new Set([drops(start).join(',')]);
+      const queue = [start];
+      while (queue.length > 0) {
+        const state = queue.shift()!;
+        for (let i = 0; i < squares; i++) {
+          for (const towards of [1, -1] as const) {
+            const next = moveDrop(state, i, towards);
+            const key = drops(next).join(',');
+            if (seen.has(key)) continue;
+            seen.add(key);
+            queue.push(next);
+            expect(roundTrips(next.notation)).toBe(true);
+          }
+        }
+      }
+      expect(seen.size, `${height} stones over ${squares} squares`).toBe(choose(height - 1, squares - 1));
+    }
   });
 });
 
@@ -241,7 +288,7 @@ describe('everything the builder composes re-parses as core wrote it', () => {
       for (const destination of ['b5', 'b1', 'e3', 'a3']) {
         const from = pickSource(createBuilder(size), 'b3', size);
         const path = record(clickStack(from, destination));
-        record(adjustDrop(path, 0, 1));
+        record(moveDrop(path, path.path.length - 1, -1));
         record(setLift(path, 1));
       }
     }

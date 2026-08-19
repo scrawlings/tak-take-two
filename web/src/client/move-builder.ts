@@ -186,34 +186,25 @@ export function setLift(state: BuilderState, lift: number): BuilderState {
 }
 
 /**
- * Move one stone on or off a square of the path, keeping the two invariants
- * that make the result well formed: every crossed square keeps at least one
- * stone, and the drops still sum to the lift. The stone comes from — or goes
- * back to — the last square that can spare it, and an adjustment no square can
- * pay for is refused rather than half-applied.
+ * Shift one stone from square `index` to the square beside it: `towards` -1
+ * moves it back along the path, +1 moves it on. Every drop count is reached
+ * this way, because a stone only ever crosses between neighbours — raising a
+ * square means pushing a stone into it from the one next door.
+ *
+ * The two invariants that keep the composition well formed hold by
+ * construction: the total never changes, and a square holding its last stone
+ * cannot give it away. A shift off either end of the path, or one no square can
+ * pay for, is refused rather than half-applied.
  */
-export function adjustDrop(state: BuilderState, index: number, delta: 1 | -1): BuilderState {
+export function moveDrop(state: BuilderState, index: number, towards: 1 | -1): BuilderState {
   const drops = state.path.map((step) => step.drops);
+  const neighbour = index + towards;
   if (index < 0 || index >= drops.length) return state;
+  if (neighbour < 0 || neighbour >= drops.length) return state;
+  if (drops[index]! <= 1) return state;
 
-  const canSpare = (i: number): boolean => i !== index && (drops[i] ?? 0) >= 2;
-  const lastWhere = (pays: (i: number) => boolean): number => {
-    for (let i = drops.length - 1; i >= 0; i--) if (pays(i)) return i;
-    return -1;
-  };
-
-  if (delta === 1) {
-    const donor = lastWhere(canSpare);
-    if (donor === -1) return state;
-    drops[index]! += 1;
-    drops[donor]! -= 1;
-  } else {
-    if (drops[index]! <= 1) return state;
-    const recipient = lastWhere((i) => i !== index);
-    if (recipient === -1) return state;
-    drops[index]! -= 1;
-    drops[recipient]! += 1;
-  }
+  drops[index]! -= 1;
+  drops[neighbour]! += 1;
 
   const path = state.path.map((step, i) => ({ square: step.square, drops: drops[i]! }));
   return recomposed({ ...state, path });

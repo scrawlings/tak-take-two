@@ -751,13 +751,13 @@ function renderGameControls(game: GameView): string {
       <template x-for="(step, i) in path" :key="step.square">
         <span class="drop-step">
           <span class="mono drop-square" x-text="step.square"></span>
-          <button type="button" class="step-btn" x-on:click="bumpDrop(i, -1)" :aria-label="'Drop one fewer on ' + step.square">−</button>
+          <button type="button" class="step-btn" x-on:click="shiftDrop(i, -1)" :disabled="!canShiftDrop(i, -1)" :aria-label="'Move a stone from ' + step.square + ' to the square before it'">◀</button>
           <span class="drop-count" x-text="step.drops"></span>
-          <button type="button" class="step-btn" x-on:click="bumpDrop(i, 1)" :aria-label="'Drop one more on ' + step.square">+</button>
+          <button type="button" class="step-btn" x-on:click="shiftDrop(i, 1)" :disabled="!canShiftDrop(i, 1)" :aria-label="'Move a stone from ' + step.square + ' to the square after it'">▶</button>
         </span>
       </template>
     </div>
-    <p class="hint">Every square crossed keeps at least one stone, and the counts always add up to the lift.</p>
+    <p class="hint">The arrows shift one stone to the neighbouring square, so raise a square by pushing a stone into it from the one beside it. Every square crossed keeps at least one stone, and the counts always add up to the lift.</p>
   </div>
   <p class="actions"><button type="submit" class="btn">Play move</button></p>
 </form>`);

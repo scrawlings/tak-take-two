@@ -9,12 +9,12 @@
  */
 
 import {
-  adjustDrop,
   chooseStone,
   clearSelection,
   clickSquare,
   createBuilder,
   maxLift,
+  moveDrop,
   setLift,
 } from './move-builder.js';
 import type { BuilderState, PathStep, SourceStack, SquareRef, StoneKind } from './move-builder.js';
@@ -50,7 +50,8 @@ interface BoardComponent {
   cellClick(el: HTMLElement): void;
   isSource(square: SquareRef): boolean;
   bumpLift(delta: number): void;
-  bumpDrop(index: number, delta: 1 | -1): void;
+  shiftDrop(index: number, towards: 1 | -1): void;
+  canShiftDrop(index: number, towards: 1 | -1): boolean;
   dropsOn(square: SquareRef): number;
   cancel(): void;
 }
@@ -120,8 +121,20 @@ export function boardComponent(config: BoardConfig): BoardComponent {
       this.apply(setLift(this.state, this.state.lift + delta));
     },
 
-    bumpDrop(index: number, delta: 1 | -1): void {
-      this.apply(adjustDrop(this.state, index, delta));
+    /** Push one stone from a path square to its neighbour, back (-1) or on (+1). */
+    shiftDrop(index: number, towards: 1 | -1): void {
+      this.apply(moveDrop(this.state, index, towards));
+    },
+
+    /**
+     * Whether that push would do anything — a square holding its last stone has
+     * none to give, and the ends of the path have nowhere to send one. The
+     * buttons read this so a dead control looks dead.
+     */
+    canShiftDrop(index: number, towards: 1 | -1): boolean {
+      const neighbour = index + towards;
+      if (neighbour < 0 || neighbour >= this.state.path.length) return false;
+      return (this.state.path[index]?.drops ?? 0) > 1;
     },
 
     /** The stones this square receives, or 0 when the path does not cross it. */
