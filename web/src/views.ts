@@ -707,7 +707,14 @@ function renderBoard(game: GameView): string {
                 .reverse()
                 .map((s) => `<span>${stoneGlyph(s.player, s.kind)}</span>`)
                 .join('')}</span>`;
-        return `<button type="button" class="cell" data-square="${square}" data-height="${cell.stack.length}" data-top="${topAttr}" data-stack="${stackAttr}" x-on:click="cellClick($el)" :class="{ 'is-source': isSource('${square}'), 'is-path': dropsOn('${square}') > 0 }" aria-label="${square}">${glyph}${height}${drops}${stackTip}</button>`;
+        // Two overlaid spans per concern, one live and one reviewed, so a
+        // stream swap (which always re-renders this whole cell, ADR-0007)
+        // needs nothing beyond the same `x-show="reviewing"` toggle to keep
+        // showing the reviewed position: Alpine re-binds the fresh nodes
+        // against the surviving review state on every swap.
+        const content = `<span x-show="!reviewing">${glyph}${height}</span><span x-show="reviewing" x-cloak x-html="reviewCell('${square}')"></span>`;
+        const tip = `<span x-show="!reviewing">${stackTip}</span><span x-show="reviewing" x-cloak x-html="reviewStackTip('${square}')"></span>`;
+        return `<button type="button" class="cell" data-square="${square}" data-height="${cell.stack.length}" data-top="${topAttr}" data-stack="${stackAttr}" x-on:click="cellClick($el)" :class="{ 'is-source': isSource('${square}'), 'is-path': dropsOn('${square}') > 0 }" aria-label="${square}">${content}${drops}${tip}</button>`;
       })
       .join('');
     rows.push(`<span class="axis">${rank}</span>${cells}`);
@@ -778,9 +785,29 @@ function renderGameStatus(game: GameView): string {
   return `<p class="lede">${escapeHtml(game.proposer.displayName)} vs ${escapeHtml(game.opponent?.displayName ?? '—')}. ${youPlay}${turn}</p>`;
 }
 
+/**
+ * The sticky bar review mode replaces the move form with (ticket 01): which
+ * move is showing, a snap-to-end button, and — when the live position is
+ * waiting on the viewer while they are scrubbed away — a plain statement of
+ * that, so review can never quietly hide that the game needs them. `canMove`
+ * is server-decided and this region re-renders on every game change (ADR-0007
+ * always replaces `controls`), so the phrase is always current; only its
+ * visibility is client state.
+ */
+function renderReviewBar(game: GameView): string {
+  const waiting = game.canMove ? `<p class="review-waiting">Your turn — they’re waiting on you.</p>` : '';
+  return `<div class="review-bar panel" x-show="reviewing" x-cloak>
+  <p>Viewing move <span x-text="reviewAt"></span> of ${game.moves.length}.</p>
+  <p class="review-pulse" data-total-moves="${game.moves.length}" x-show="newMoveWhileReviewing($el)" x-cloak>New move.</p>
+  ${waiting}
+  <p class="actions"><button type="button" class="btn btn-sm" x-on:click="snapToEnd()">Snap to end</button></p>
+</div>`;
+}
+
 function renderGameControls(game: GameView): string {
-  if (game.state === 'finished') return '';
-  const parts: string[] = [];
+  const reviewBar = renderReviewBar(game);
+  if (game.state === 'finished') return reviewBar;
+  const parts: string[] = [reviewBar];
 
   if (game.pending !== null) {
     // The single pending request/offer: the respondent may accept or reject;
@@ -823,7 +850,7 @@ function renderGameControls(game: GameView): string {
       )
       .join('');
     parts.push(`
-<form class="panel" method="post" action="/games/${game.id}/move">
+<form class="panel" method="post" action="/games/${game.id}/move" x-show="!reviewing" x-cloak>
   <div class="field">
     <label for="move">Your move</label>
     <input id="move" name="move" x-model="move" placeholder="a1, Sa1, or 5b4&gt;212" autocomplete="off" spellcheck="false">
@@ -902,11 +929,16 @@ function renderHistory(game: GameView): string {
     // Even with no moves there is a position to copy — the empty board.
     return `<div class="block"><h2>Moves</h2><p class="lede">No moves yet.</p>${whole}</div>`;
   }
+  const total = game.moves.length;
   const lines: string[] = [];
   for (let i = 0; i < game.moves.length; i += 2) {
     const turn = i / 2 + 1;
+    // Clicking a move scrubs to the position right after it (ticket 01): the
+    // element carries its own TPS and move number, the same self-contained
+    // idiom the board cells use, so the adapter needs nothing beyond the
+    // click target.
     const cell = (m: GameView['moves'][number]): string =>
-      `<span class="mono">${escapeHtml(m.notation)}</span> <span class="dim">${escapeHtml(m.player.displayName)}</span> ${exportLinks(game.id, m.number)}`;
+      `<button type="button" class="move-link mono" data-move-number="${m.number}" data-tps="${escapeHtml(m.tps)}" data-total="${total}" x-on:click="scrubTo($el)" :class="{ 'is-reviewed': reviewAt === ${m.number} }">${escapeHtml(m.notation)}</button> <span class="dim">${escapeHtml(m.player.displayName)}</span> ${exportLinks(game.id, m.number)}`;
     const second = game.moves[i + 1];
     lines.push(`<li><span class="mono">${turn}.</span> ${cell(game.moves[i]!)}${second ? ` ${cell(second)}` : ''}</li>`);
   }
@@ -917,6 +949,11 @@ function renderHistory(game: GameView): string {
 
 function renderLegend(): string {
   return `<p class="hint">● flat (filled) · ○ flat (open) · ▲ wall · ■ capstone — hover a square to read its stack.</p>`;
+}
+
+/** A reserve count: the live figure, or the reviewed one while scrubbed — see `renderBoard`'s cells. */
+function reserveCount(seat: 1 | 2, kind: 'stones' | 'capstones', live: number): string {
+  return `<span x-show="!reviewing">${live}</span><span x-show="reviewing" x-cloak x-text="reviewReserve(${seat}, '${kind}')"></span>`;
 }
 
 function renderReserves(game: GameView): string {
@@ -932,8 +969,8 @@ function renderReserves(game: GameView): string {
     <table class="data">
       <thead><tr><th>Player</th><th>Colour</th><th>Flats</th><th>Capstones</th></tr></thead>
       <tbody>
-        <tr><td>${label(1, game.proposer.displayName)}</td><td>● filled</td><td class="num">●▲ ${p1.stones}</td><td class="num">■ ${p1.capstones}</td></tr>
-        <tr><td>${label(2, game.opponent?.displayName ?? 'Opponent')}</td><td>○ open</td><td class="num">○△ ${p2.stones}</td><td class="num">□ ${p2.capstones}</td></tr>
+        <tr><td>${label(1, game.proposer.displayName)}</td><td>● filled</td><td class="num">●▲ ${reserveCount(1, 'stones', p1.stones)}</td><td class="num">■ ${reserveCount(1, 'capstones', p1.capstones)}</td></tr>
+        <tr><td>${label(2, game.opponent?.displayName ?? 'Opponent')}</td><td>○ open</td><td class="num">○△ ${reserveCount(2, 'stones', p2.stones)}</td><td class="num">□ ${reserveCount(2, 'capstones', p2.capstones)}</td></tr>
       </tbody>
     </table>
   </div>
@@ -1013,10 +1050,12 @@ export function renderGamePage(user: SessionUser, game: GameView, view: GameView
   const boardConfig = { size: game.boardSize };
 
   // The `takBoard` scope sits *inside* the stream wrapper and *outside* the
-  // board and controls regions, so a swap replaces the squares and the form
-  // while the composition state on the scope survives them (ADR-0007). The
+  // board, controls, reserves and moves regions, so a swap replaces them while
+  // the composition and review state on the scope survives (ADR-0007). The
   // swap itself is skipped when the HTML is unchanged, so an idle stream never
-  // touches the board at all.
+  // touches the board at all. Reserves and moves join board and controls here
+  // (ticket 01): review needs to reach all four to show a reviewed position,
+  // the same reason ticket 14 drew that boundary around board and controls.
   const live = `
 ${region('status', regions.status)}
 ${error}
@@ -1024,14 +1063,14 @@ ${renderLegend()}
 <div x-data="takBoard(${escapeHtml(JSON.stringify(boardConfig))})" x-cloak>
   ${region('board', regions.board)}
   ${region('controls', regions.controls)}
-</div>
-${/* Deliberately not a region: share, hide and admin-removal change only by
-     the viewer's own action, which is a POST and a redirect, so there is
-     nothing for a stream to tell them. It sits inside the wrapper because the
-     wrapper touches only what carries `data-region`. */ ''}
-${renderGameManagement(game)}
-${region('reserves', regions.reserves)}
-${region('moves', regions.moves)}`;
+  ${/* Deliberately not a region: share, hide and admin-removal change only by
+       the viewer's own action, which is a POST and a redirect, so there is
+       nothing for a stream to tell them. It sits inside the wrapper because the
+       wrapper touches only what carries `data-region`. */ ''}
+  ${renderGameManagement(game)}
+  ${region('reserves', regions.reserves)}
+  ${region('moves', regions.moves)}
+</div>`;
 
   const body = `
 ${breadcrumb({ href: '/games', label: 'Games' }, `Game ${game.id}`)}

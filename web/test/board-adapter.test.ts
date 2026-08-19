@@ -229,3 +229,97 @@ describe('the source stack, shown as its own glyphs', () => {
     expect(b.partition).toBe('');
   });
 });
+
+/** A history entry's clickable element, as `renderHistory` renders it. */
+function move(number: number, tps: string, total = number): HTMLElement {
+  return { dataset: { moveNumber: String(number), tps, total: String(total) } } as unknown as HTMLElement;
+}
+
+/** The review bar's element, carrying the move total as of its last render. */
+function reviewBar(total: number): HTMLElement {
+  return { dataset: { totalMoves: String(total) } } as unknown as HTMLElement;
+}
+
+const AFTER_MOVE_1 = 'x,2,x3/x5/x5/x5/x5 2 1';
+const AFTER_MOVE_2 = 'x,2,x3/x5/x5/x5/1,x4 1 2';
+
+describe('review mode', () => {
+  it('starts live: not reviewing, nothing to show', () => {
+    const b = board();
+    expect(b.reviewing).toBe(false);
+    expect(b.reviewAt).toBeNull();
+    expect(b.reviewCell('a1')).toBe('');
+  });
+
+  it('enters review at the clicked move, rendering that position', () => {
+    const b = board();
+    b.scrubTo(move(1, AFTER_MOVE_1));
+    expect(b.reviewing).toBe(true);
+    expect(b.reviewAt).toBe(1);
+    expect(b.reviewCell('b5')).toBe('○'); // the opponent's opening flat, placed at b5
+    expect(b.reviewCell('a1')).toBe('·');
+  });
+
+  it('moves between reviewed positions on further clicks', () => {
+    const b = board();
+    b.scrubTo(move(1, AFTER_MOVE_1));
+    b.scrubTo(move(2, AFTER_MOVE_2));
+    expect(b.reviewAt).toBe(2);
+    expect(b.reviewCell('a1')).toBe('●');
+  });
+
+  it('snaps back to live, clearing the reviewed position', () => {
+    const b = board();
+    b.scrubTo(move(1, AFTER_MOVE_1));
+    b.snapToEnd();
+    expect(b.reviewing).toBe(false);
+    expect(b.reviewAt).toBeNull();
+    expect(b.reviewCell('b5')).toBe('');
+  });
+
+  it('ignores a click carrying TPS that will not parse, rather than entering a broken review', () => {
+    const b = board();
+    b.scrubTo(move(1, 'not tps'));
+    expect(b.reviewing).toBe(false);
+  });
+
+  it('refuses every board click while reviewing, however the turn stands', () => {
+    const b = board();
+    b.scrubTo(move(1, AFTER_MOVE_1));
+    b.cellClick(cell('c3', 0, '', '', MY_TURN));
+    expect(b.move).toBe('');
+    expect(b.source).toBeNull();
+  });
+
+  it('drops an in-progress composition on entering review, so no stale path lingers', () => {
+    const b = board();
+    b.cellClick(cell('b4', 3, '1|flat'));
+    expect(b.source).not.toBeNull();
+
+    b.scrubTo(move(1, AFTER_MOVE_1));
+    expect(b.source).toBeNull();
+    expect(b.move).toBe('');
+  });
+
+  it('reads reserves off the reviewed position, and nothing while live', () => {
+    const b = board();
+    expect(b.reviewReserve(1, 'stones')).toBe('');
+
+    b.scrubTo(move(1, AFTER_MOVE_1));
+    // 5x5 starts with 21 stones each; the opening move placed one of player 2's.
+    expect(b.reviewReserve(2, 'stones')).toBe('20');
+    expect(b.reviewReserve(1, 'stones')).toBe('21');
+  });
+
+  it('notices a move streamed in since review started, and stays quiet before that', () => {
+    const b = board();
+    b.scrubTo(move(1, AFTER_MOVE_1, 1));
+    expect(b.newMoveWhileReviewing(reviewBar(1))).toBe(false);
+    expect(b.newMoveWhileReviewing(reviewBar(2))).toBe(true);
+  });
+
+  it('never flags a new move while live — there is nothing to compare against', () => {
+    const b = board();
+    expect(b.newMoveWhileReviewing(reviewBar(2))).toBe(false);
+  });
+});

@@ -429,6 +429,30 @@ p { margin: 0 0 1rem; }
 .moves { padding-left: 1.5rem; margin: 0; }
 .moves li { padding: 0.125rem 0; }
 
+/* A move in the history, clickable into review (ticket 01) — quiet until read,
+   the way the export ticks beside it already are. */
+.move-link {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-color: var(--rule);
+  text-underline-offset: 3px;
+}
+
+.move-link:hover { text-decoration-color: var(--stone); }
+
+.move-link.is-reviewed { color: var(--stone); font-weight: 700; text-decoration: none; }
+
+/* The sticky bar review mode shows in place of the move form. */
+.review-bar p { margin: 0 0 0.5rem; }
+.review-bar p:last-child { margin-bottom: 0; }
+.review-pulse { color: var(--stone); font-weight: 600; }
+.review-waiting { color: var(--oxide); }
+
 /* Export handles sit beside every move, so they must stay quiet enough to read
    past — a bordered pair of ticks, not a pair of buttons. */
 .export-link {

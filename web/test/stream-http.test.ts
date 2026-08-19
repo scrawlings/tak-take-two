@@ -200,6 +200,23 @@ describe('GET /games/:id/stream', () => {
     await stream.close();
   });
 
+  it('grows the scrub set: a streamed move arrives with its own TPS and total', async () => {
+    // The review bar's "of M" and the pulse detection both read the move
+    // total off the controls/moves regions, so a streamed move must carry a
+    // fresh one alongside its own position (ticket 01).
+    const { app, aoife, takashi, gameId } = await gameInPlay();
+    const stream = reader(await openStream(app, `/games/${gameId}/stream`, takashi));
+    await stream.next();
+
+    await app.request(`/games/${gameId}/move`, withCookie(form({ move: 'a1' }), aoife));
+
+    const regions = regionsOf(await stream.next());
+    expect(regions.moves).toContain('data-move-number="1"');
+    expect(regions.moves).toMatch(/data-tps="[^"]* 2 1"/);
+    expect(regions.controls).toContain('data-total-moves="1"');
+    await stream.close();
+  });
+
   it('pushes the board’s own standing, so the click-builder wakes with the turn', async () => {
     // The move form arriving is only half of it: the board must also start
     // accepting clicks. Its standing therefore rides inside the streamed board

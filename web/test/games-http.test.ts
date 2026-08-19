@@ -717,6 +717,88 @@ describe('the game screen', () => {
   });
 });
 
+describe('review mode: the history scrubber (ticket 01)', () => {
+  async function inPlayGame(): Promise<{
+    app: App;
+    db: Database.Database;
+    aoife: string;
+    takashi: string;
+    gameId: number;
+  }> {
+    const { app, db } = makeApp();
+    await insertUser(db, { id: 1, username: 'aoife', password: 'pw', displayName: 'Aoife Nolan' });
+    await insertUser(db, { id: 2, username: 'takashi', password: 'pw', displayName: 'Takashi Mori' });
+    const aoife = await signIn(app, 'aoife', 'pw');
+    const takashi = await signIn(app, 'takashi', 'pw');
+    await app.request('/games', withCookie(form({ board_size: '5', join_type: 'open' }), aoife));
+    await app.request('/games/1/join', withCookie(form({ from: 'find' }), takashi));
+    return { app, db, aoife, takashi, gameId: 1 };
+  }
+
+  it('embeds one TPS per move, each move clickable to scrub to it', async () => {
+    const { app, aoife, takashi, gameId } = await inPlayGame();
+    await app.request(`/games/${gameId}/move`, withCookie(form({ move: 'a1' }), aoife));
+    await app.request(`/games/${gameId}/move`, withCookie(form({ move: 'e5' }), takashi));
+
+    const html = await (await app.request(`/games/${gameId}`, withCookie({}, aoife))).text();
+
+    expect(html).toContain('data-move-number="1"');
+    expect(html).toContain('data-move-number="2"');
+    expect(html).toContain('x-on:click="scrubTo($el)"');
+    // The TPS after move 1: player 2's opening placed a1, so it is their turn.
+    expect(html).toMatch(/data-tps="[^"]* 2 1"/);
+    // The TPS after move 2: back to player 1, move counter advances.
+    expect(html).toMatch(/data-tps="[^"]* 1 2"/);
+    expect(html).toContain(`'is-reviewed': reviewAt === 1`);
+  });
+
+  it('renders the review bar, hidden until the client puts the page into review', async () => {
+    const { app, aoife, gameId } = await inPlayGame();
+
+    const html = await (await app.request(`/games/${gameId}`, withCookie({}, aoife))).text();
+
+    expect(html).toContain('class="review-bar panel"');
+    expect(html).toContain('x-show="reviewing"');
+    expect(html).toContain('x-on:click="snapToEnd()"');
+    expect(html).toContain('Snap to end');
+  });
+
+  it("tells a scrubbed player their move is waiting, when it is their turn live", async () => {
+    const { app, aoife, gameId } = await inPlayGame();
+
+    const html = await (await app.request(`/games/${gameId}`, withCookie({}, aoife))).text();
+
+    // It is the opening: aoife (seat 1) is to move.
+    expect(html).toContain('Your turn — they’re waiting on you.');
+  });
+
+  it('still offers the scrubber on a finished game', async () => {
+    const { app, aoife, gameId } = await inPlayGame();
+    await app.request(`/games/${gameId}/move`, withCookie(form({ move: 'a1' }), aoife));
+    await app.request(`/games/${gameId}/resign`, withCookie(form({}), aoife));
+
+    const html = await (await app.request(`/games/${gameId}`, withCookie({}, aoife))).text();
+
+    expect(html).toContain('data-move-number="1"');
+    expect(html).toContain('class="review-bar panel"');
+    expect(html).not.toContain('Your move'); // the move form is gone, not just hidden
+  });
+
+  it('offers the scrubber to a spectator of a shared game', async () => {
+    const { app, db, aoife, takashi, gameId } = await inPlayGame();
+    await app.request(`/games/${gameId}/move`, withCookie(form({ move: 'a1' }), aoife));
+    await app.request(`/games/${gameId}/share`, withCookie(form({ on: '1' }), aoife));
+    await app.request(`/games/${gameId}/share`, withCookie(form({ on: '1' }), takashi));
+    await insertUser(db, { id: 3, username: 'nuala', password: 'pw', displayName: 'Nuala Byrne' });
+    const stranger = await signIn(app, 'nuala', 'pw');
+
+    const html = await (await app.request(`/games/${gameId}`, withCookie({}, stranger))).text();
+
+    expect(html).toContain('data-move-number="1"');
+    expect(html).toContain('class="review-bar panel"');
+  });
+});
+
 describe('self-play in one window', () => {
   it('lets one account play both seats and says so in the view', async () => {
     const { app, db } = makeApp();

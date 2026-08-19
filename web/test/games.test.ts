@@ -977,6 +977,27 @@ describe('games: play', () => {
     expect(view.canMove).toBe(false);
   });
 
+  it('carries the TPS of the position after each move, for the review scrubber', () => {
+    const h = harness();
+    const gameId = propose(h, h.aoife);
+    h.games.applyGame(h.takashi, { type: 'join', gameId });
+    play(h, h.aoife, gameId, 'a1');
+    play(h, h.takashi, gameId, 'e5');
+
+    const view = h.games.getGame(h.aoife, gameId)._unsafeUnwrap();
+    expect(view.moves).toHaveLength(2);
+    // Matches what `export`'s TPS gives for the same move number.
+    const exported = h.games.applyGame(h.aoife, {
+      type: 'export',
+      gameId,
+      format: 'tps',
+      throughMove: 1,
+    })._unsafeUnwrap();
+    expect(exported.type).toBe('export');
+    expect(view.moves[0]?.tps).toBe((exported as { text: string }).text);
+    expect(view.moves[1]?.tps).toMatch(/ 1 2$/); // player 1 to move, move counter 2
+  });
+
   it('rejects a move when it is not your turn', () => {
     const h = harness();
     const gameId = propose(h, h.aoife);
@@ -1940,14 +1961,23 @@ describe('games: a corrupt record', () => {
     expect(error.message).toContain('stored move 2');
   });
 
-  it('reads the last position rather than replaying: an earlier snapshot is never touched', () => {
+  // Ticket 01: the scrubber renders every move's position, so the view now
+  // reads every live snapshot, not just the last one — unlike a move, which
+  // still needs only the current position to validate against (below).
+  it('the view touches every live position, since the scrubber renders each one', () => {
     const h = harness();
     const gameId = inPlay(h);
     wreck(h, gameId, 2, 'position');
 
-    const view = h.games.getGame(h.aoife, gameId)._unsafeUnwrap();
-    expect(view.moves).toHaveLength(4);
-    expect(view.toMove).toEqual({ id: 1, displayName: 'Aoife Nolan' });
+    expect(h.games.getGame(h.aoife, gameId)._unsafeUnwrapErr().code).toBe('corrupt-record');
+  });
+
+  it('play still reads only the last position: an earlier wreck does not block a legal move', () => {
+    const h = harness();
+    const gameId = inPlay(h);
+    wreck(h, gameId, 2, 'position');
+
+    expect(h.games.applyGame(h.aoife, { type: 'playMove', gameId, move: 'e1' }).isOk()).toBe(true);
   });
 
   it('still catches a wrecked position when it is the one the read path reads', () => {

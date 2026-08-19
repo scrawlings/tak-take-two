@@ -26,6 +26,8 @@ import {
   setLift,
 } from './move-builder.js';
 import type { BuilderState, PathStep, SourceStack, SquareRef, StoneKind } from './move-builder.js';
+import { cellContent, parseReviewPosition, reserveAt, stackTipContent } from './review.js';
+import type { ReviewPosition } from './review.js';
 
 /**
  * What the game page tells the board once and for all. Everything else the
@@ -64,6 +66,12 @@ export interface BoardComponent {
   move: string;
   /** The source square's glyphs, bottom to top, read from the DOM at pickup. */
   sourceStack: string;
+  /** The move number reviewed, or null while showing the live position. */
+  reviewAt: number | null;
+  /** The parsed position at `reviewAt`, or null while not reviewing. */
+  reviewPosition: ReviewPosition | null;
+  /** The move count at the moment review started, so a streamed move can be noticed. */
+  reviewTotal: number | null;
   readonly stone: StoneKind;
   readonly source: SourceStack | null;
   readonly sourceSquare: string;
@@ -73,6 +81,8 @@ export interface BoardComponent {
   readonly liftFloor: number;
   readonly path: readonly PathStep[];
   readonly partition: string;
+  /** Whether the game screen is showing an earlier move rather than the live position. */
+  readonly reviewing: boolean;
   apply(next: BuilderState, pickedUpStack?: string): void;
   pick(stone: StoneKind): void;
   cellClick(el: HTMLElement): void;
@@ -82,6 +92,18 @@ export interface BoardComponent {
   canShiftDrop(index: number, towards: 1 | -1): boolean;
   dropsOn(square: SquareRef): number;
   cancel(): void;
+  /** Enter review at the move a history click named, reading its `data-move-number`/`data-tps`/`data-total`. */
+  scrubTo(el: HTMLElement): void;
+  /** Leave review and show the live position again. */
+  snapToEnd(): void;
+  /** The reviewed glyph and height marker for a square, or '' while not reviewing. */
+  reviewCell(square: SquareRef): string;
+  /** The reviewed stack-tip markup for a square, or '' while not reviewing. */
+  reviewStackTip(square: SquareRef): string;
+  /** A seat's reviewed reserve count, or '' while not reviewing. */
+  reviewReserve(seat: 1 | 2, kind: 'stones' | 'capstones'): string;
+  /** Whether a move has streamed in since review started, read off `data-total-moves`. */
+  newMoveWhileReviewing(el: HTMLElement): boolean;
 }
 
 export function boardComponent(config: BoardConfig): BoardComponent {
@@ -89,6 +111,13 @@ export function boardComponent(config: BoardConfig): BoardComponent {
     state: createBuilder(config.size),
     move: '',
     sourceStack: '',
+    reviewAt: null,
+    reviewPosition: null,
+    reviewTotal: null,
+
+    get reviewing(): boolean {
+      return this.reviewAt !== null;
+    },
 
     get stone(): StoneKind {
       return this.state.stone;
@@ -160,6 +189,7 @@ export function boardComponent(config: BoardConfig): BoardComponent {
     },
 
     cellClick(el: HTMLElement): void {
+      if (this.reviewing) return; // no move can be composed while showing an earlier position
       const standing = standingOf(el);
       if (!standing.canMove) return;
       const square = el.dataset.square ?? '';
@@ -201,6 +231,50 @@ export function boardComponent(config: BoardConfig): BoardComponent {
 
     cancel(): void {
       this.apply(clearSelection(this.state));
+    },
+
+    /**
+     * Enter review at the move a history click named. The element carries its
+     * own `data-move-number`, `data-tps` and `data-total` (the move count as
+     * of that render) rather than this reading some ancestor's — the same
+     * self-contained-element idiom `cellClick` uses, and it means a move
+     * clicked from a page that has since grown still records the total *as
+     * of the click*, which is what `newMoveWhileReviewing` compares against.
+     * Any in-progress composition is dropped: a scrubbed board shows no path.
+     */
+    scrubTo(el: HTMLElement): void {
+      const number = Number(el.dataset.moveNumber ?? '');
+      const position = parseReviewPosition(el.dataset.tps ?? '');
+      if (!Number.isInteger(number) || position === null) return;
+      this.reviewAt = number;
+      this.reviewPosition = position;
+      this.reviewTotal = Number(el.dataset.total ?? number);
+      this.apply(clearSelection(this.state));
+    },
+
+    /** Leave review and show the live position again. */
+    snapToEnd(): void {
+      this.reviewAt = null;
+      this.reviewPosition = null;
+      this.reviewTotal = null;
+    },
+
+    reviewCell(square: SquareRef): string {
+      return this.reviewPosition === null ? '' : cellContent(this.reviewPosition, square);
+    },
+
+    reviewStackTip(square: SquareRef): string {
+      return this.reviewPosition === null ? '' : stackTipContent(this.reviewPosition, square);
+    },
+
+    reviewReserve(seat: 1 | 2, kind: 'stones' | 'capstones'): string {
+      return this.reviewPosition === null ? '' : String(reserveAt(this.reviewPosition, seat, kind));
+    },
+
+    /** A move has streamed in since `scrubTo` recorded the total moves then. */
+    newMoveWhileReviewing(el: HTMLElement): boolean {
+      if (!this.reviewing || this.reviewTotal === null) return false;
+      return Number(el.dataset.totalMoves ?? '0') > this.reviewTotal;
     },
   };
 }

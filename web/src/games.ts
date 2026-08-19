@@ -146,6 +146,8 @@ export interface MoveView {
   readonly notation: string;
   /** Imported (fixed) rather than played on this site. */
   readonly imported: boolean;
+  /** TPS of the position after this move — what the review scrubber renders from. */
+  readonly tps: string;
 }
 
 /** One pending request/offer (ticket 12): a take-back request or a draw offer. */
@@ -689,6 +691,21 @@ export function createGames(persistence: Persistence): Games {
   }
 
   /**
+   * The stored record alongside the playable game it loads to. `export` and
+   * the scrubber's per-move TPS both need the record itself (for `stateAfter`)
+   * as well as what `loadTakGame` gives them, so this reads the rows once and
+   * hands back both rather than each re-deriving `tak` from a `record` it
+   * already has.
+   */
+  function loadStoredGame(game: GameRecord): Result<{ record: StoredGame; tak: TakGame }, GameError> {
+    const record = storedGame(game);
+    if (record.isErr()) return err(record.error);
+    const tak = loadGame(record.value).mapErr((error) => recordError(game.id, error));
+    if (tak.isErr()) return err(tak.error);
+    return ok({ record: record.value, tak: tak.value });
+  }
+
+  /**
    * The atomic finish: mark the game finished with its result code, write the
    * derived game stats, and record the `game-finished` trail event.
    */
@@ -1218,11 +1235,9 @@ export function createGames(persistence: Persistence): Games {
     if (loaded.isErr()) return err(loaded.error);
     const game = loaded.value;
 
-    const record = storedGame(game);
-    if (record.isErr()) return err(record.error);
-    const current = loadGame(record.value).mapErr((error) => recordError(game.id, error));
-    if (current.isErr()) return err(current.error);
-    const full = current.value;
+    const loadedRecord = loadStoredGame(game);
+    if (loadedRecord.isErr()) return err(loadedRecord.error);
+    const { record, tak: full } = loadedRecord.value;
 
     const totalMoves = full.history.length;
     const throughMove = command.throughMove ?? totalMoves;
@@ -1237,7 +1252,7 @@ export function createGames(persistence: Persistence): Games {
     if (format.value === 'tps') {
       // A position needs the board, so the export asks the core for the state
       // after that move — one snapshot read, not a replay.
-      const position = stateAfter(record.value, throughMove).mapErr((error) => recordError(game.id, error));
+      const position = stateAfter(record, throughMove).mapErr((error) => recordError(game.id, error));
       if (position.isErr()) return err(position.error);
       text = generateTps(position.value);
     } else {
@@ -1300,9 +1315,9 @@ export function createGames(persistence: Persistence): Games {
     const opponent = game.opponentId === null ? ok(null) : nameOf(game.opponentId);
     if (opponent.isErr()) return err(opponent.error);
 
-    const current = loadTakGame(game);
-    if (current.isErr()) return err(current.error);
-    const tak = current.value;
+    const loadedRecord = loadStoredGame(game);
+    if (loadedRecord.isErr()) return err(loadedRecord.error);
+    const { record, tak } = loadedRecord.value;
 
     const viewerSeat = seatOfActor(game, actor.id);
     const selfPlay = isSelfPlay(game);
@@ -1334,12 +1349,17 @@ export function createGames(persistence: Persistence): Games {
       const seat: 1 | 2 = i % 2 === 0 ? 1 : 2;
       const ref = seat === 1 ? seat1Ref : seat2Ref;
       if (ref === null) continue; // moves exist only after a join, so the joiner is known
+      // The scrubber renders straight from this: the position after each move,
+      // read the same way `export`'s TPS does (core's `stateAfter`).
+      const position = stateAfter(record, i + 1).mapErr((error) => recordError(game.id, error));
+      if (position.isErr()) return err(position.error);
       moves.push({
         number: i + 1,
         seat,
         player: ref,
         notation: formatMove(rec.move),
         imported: i < tak.fixedMoves,
+        tps: generateTps(position.value),
       });
     }
 
