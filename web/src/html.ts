@@ -453,6 +453,19 @@ p { margin: 0 0 1rem; }
 .review-pulse { color: var(--stone); font-weight: 600; }
 .review-waiting { color: var(--oxide); }
 
+kbd {
+  font-family: var(--record);
+  font-size: 0.75rem;
+  border: 1px solid var(--rule);
+  border-bottom-width: 2px;
+  border-radius: 3px;
+  padding: 0.0625rem 0.375rem;
+  background: var(--panel);
+}
+
+/* The one-line shortcuts panel (ticket 02), toggled by "?". */
+.shortcuts-help { display: flex; align-items: center; gap: 0.75rem; margin: 0 0 1.25rem; }
+
 /* Export handles sit beside every move, so they must stay quiet enough to read
    past — a bordered pair of ticks, not a pair of buttons. */
 .export-link {

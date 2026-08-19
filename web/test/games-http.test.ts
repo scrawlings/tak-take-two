@@ -799,6 +799,41 @@ describe('review mode: the history scrubber (ticket 01)', () => {
   });
 });
 
+describe('keyboard shortcuts on the game screen (ticket 02)', () => {
+  async function inPlayGame(): Promise<{ app: App; db: Database.Database; aoife: string; gameId: number }> {
+    const { app, db } = makeApp();
+    await insertUser(db, { id: 1, username: 'aoife', password: 'pw', displayName: 'Aoife Nolan' });
+    await insertUser(db, { id: 2, username: 'takashi', password: 'pw', displayName: 'Takashi Mori' });
+    const aoife = await signIn(app, 'aoife', 'pw');
+    const takashi = await signIn(app, 'takashi', 'pw');
+    await app.request('/games', withCookie(form({ board_size: '5', join_type: 'open' }), aoife));
+    await app.request('/games/1/join', withCookie(form({ from: 'find' }), takashi));
+    return { app, db, aoife, gameId: 1 };
+  }
+
+  it('carries the shortcuts panel and its window-level key listener', async () => {
+    const { app, aoife, gameId } = await inPlayGame();
+
+    const html = await (await app.request(`/games/${gameId}`, withCookie({}, aoife))).text();
+
+    expect(html).toContain('x-on:keydown.window="handleKey($event)"');
+    expect(html).toContain('class="shortcuts-help panel"');
+    expect(html).toContain('x-show="helpVisible"');
+    expect(html).toContain('x-on:click="toggleHelp()"');
+    expect(html).toContain('Press <kbd>?</kbd> for keyboard shortcuts.');
+  });
+
+  it('ships the shortcuts panel on the game page only, not on the games lists', async () => {
+    const { app, aoife } = await inPlayGame();
+
+    const list = await (await app.request('/games', withCookie({}, aoife))).text();
+    const find = await (await app.request('/games/find', withCookie({}, aoife))).text();
+
+    expect(list).not.toContain('shortcuts-help');
+    expect(find).not.toContain('shortcuts-help');
+  });
+});
+
 describe('self-play in one window', () => {
   it('lets one account play both seats and says so in the view', async () => {
     const { app, db } = makeApp();

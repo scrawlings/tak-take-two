@@ -28,6 +28,8 @@ import {
 import type { BuilderState, PathStep, SourceStack, SquareRef, StoneKind } from './move-builder.js';
 import { cellContent, parseReviewPosition, reserveAt, stackTipContent } from './review.js';
 import type { ReviewPosition } from './review.js';
+import { resolveShortcut, stepReview } from './shortcuts.js';
+import type { FocusTarget, ShortcutKey } from './shortcuts.js';
 
 /**
  * What the game page tells the board once and for all. Everything else the
@@ -60,6 +62,16 @@ function standingOf(cell: HTMLElement): BoardStanding {
   };
 }
 
+/**
+ * The parts of a keyboard event and its target `handleKey` reads (ticket 02).
+ * A plain shape, not `KeyboardEvent`, so a test can drive it without a DOM —
+ * the same reasoning `BoardStanding` and the cell helpers already follow.
+ */
+export interface KeyEvent extends ShortcutKey {
+  readonly target: FocusTarget | null;
+  preventDefault(): void;
+}
+
 export interface BoardComponent {
   state: BuilderState;
   /** Bound to the move field with `x-model`, so a player may still type over it. */
@@ -72,6 +84,11 @@ export interface BoardComponent {
   reviewPosition: ReviewPosition | null;
   /** The move count at the moment review started, so a streamed move can be noticed. */
   reviewTotal: number | null;
+  /** Whether the shortcuts help panel is open. */
+  helpVisible: boolean;
+  /** Alpine's root element, injected by Alpine itself — the wrapper `handleKey`'s
+   *  DOM lookups (move links, the move and take-back forms) search within. */
+  $root?: HTMLElement;
   readonly stone: StoneKind;
   readonly source: SourceStack | null;
   readonly sourceSquare: string;
@@ -104,6 +121,16 @@ export interface BoardComponent {
   reviewReserve(seat: 1 | 2, kind: 'stones' | 'capstones'): string;
   /** Whether a move has streamed in since review started, read off `data-total-moves`. */
   newMoveWhileReviewing(el: HTMLElement): boolean;
+  /** Toggle the shortcuts help panel. */
+  toggleHelp(): void;
+  /** The history's move-link elements, in move order. */
+  moveLinks(): HTMLElement[];
+  /** Step the scrubber one move back (-1) or forward (1); see `handleKey` for the boundary rules. */
+  step(delta: -1 | 1): void;
+  /** Submit the form whose action ends with `suffix` — the same submit its own button performs. */
+  submitForm(suffix: string): void;
+  /** Resolve a keystroke to a shortcut and perform the same affordance a click would (ticket 02). */
+  handleKey(event: KeyEvent): void;
 }
 
 export function boardComponent(config: BoardConfig): BoardComponent {
@@ -114,6 +141,8 @@ export function boardComponent(config: BoardConfig): BoardComponent {
     reviewAt: null,
     reviewPosition: null,
     reviewTotal: null,
+    helpVisible: false,
+    $root: undefined,
 
     get reviewing(): boolean {
       return this.reviewAt !== null;
@@ -275,6 +304,75 @@ export function boardComponent(config: BoardConfig): BoardComponent {
     newMoveWhileReviewing(el: HTMLElement): boolean {
       if (!this.reviewing || this.reviewTotal === null) return false;
       return Number(el.dataset.totalMoves ?? '0') > this.reviewTotal;
+    },
+
+    toggleHelp(): void {
+      this.helpVisible = !this.helpVisible;
+    },
+
+    /**
+     * The history's move-link elements, in move order, so `step` can index
+     * straight to the one it wants and hand it to `scrubTo` — the same
+     * element a click would have carried, just found instead of clicked.
+     */
+    moveLinks(): HTMLElement[] {
+      return Array.from(this.$root?.querySelectorAll<HTMLElement>('.move-link') ?? []);
+    },
+
+    /**
+     * `[` / `]`: step the scrubber. The boundary rule itself — where "the
+     * start" and "live" fall — is pure index arithmetic in `stepReview`
+     * (ADR-0006); this only turns its answer into DOM: find the move-link
+     * for the target move number and hand it to `scrubTo`, the same element
+     * a click would have carried.
+     */
+    step(delta: -1 | 1): void {
+      const links = this.moveLinks();
+      const result = stepReview(this.reviewAt, links.length, delta);
+      if (result.kind === 'noop') return;
+      if (result.kind === 'live') {
+        this.snapToEnd();
+        return;
+      }
+      const el = links[result.move - 1];
+      if (el) this.scrubTo(el);
+    },
+
+    /**
+     * Find the form whose action ends with `suffix` and submit it — the same
+     * submit its own button performs. A take-back form absent because none
+     * may currently be offered, or a move form hidden by review, means
+     * nothing matches, so this is a no-op rather than a special case.
+     */
+    submitForm(suffix: string): void {
+      this.$root?.querySelector<HTMLFormElement>(`form[action$="${suffix}"]`)?.requestSubmit();
+    },
+
+    handleKey(event: KeyEvent): void {
+      const action = resolveShortcut(event, event.target);
+      if (action === null) return;
+      event.preventDefault();
+      switch (action) {
+        case 'help':
+          this.toggleHelp();
+          break;
+        case 'cancel':
+          if (this.reviewing) this.snapToEnd();
+          else this.cancel();
+          break;
+        case 'back':
+          this.step(-1);
+          break;
+        case 'forward':
+          this.step(1);
+          break;
+        case 'play':
+          if (!this.reviewing) this.submitForm('/move');
+          break;
+        case 'takeback':
+          this.submitForm('/take-back');
+          break;
+      }
     },
   };
 }

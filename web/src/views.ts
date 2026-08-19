@@ -948,7 +948,19 @@ function renderHistory(game: GameView): string {
 }
 
 function renderLegend(): string {
-  return `<p class="hint">● flat (filled) · ○ flat (open) · ▲ wall · ■ capstone — hover a square to read its stack.</p>`;
+  return `<p class="hint">● flat (filled) · ○ flat (open) · ▲ wall · ■ capstone — hover a square to read its stack. Press <kbd>?</kbd> for keyboard shortcuts.</p>`;
+}
+
+/**
+ * The one-line shortcuts help panel (ticket 02): server-rendered, toggled by
+ * `helpVisible` on `takBoard` — the same "island" pattern as the review bar,
+ * so there is no client-only copy of this text to keep in step.
+ */
+function renderShortcutsHelp(): string {
+  return `<p class="shortcuts-help panel" x-show="helpVisible" x-cloak>
+  <kbd>Enter</kbd> play the move · <kbd>[</kbd> <kbd>]</kbd> step the history · <kbd>u</kbd> request a take-back · <kbd>Esc</kbd> cancel / snap to live · <kbd>?</kbd> toggle this help
+  <button type="button" class="btn btn-quiet btn-sm" x-on:click="toggleHelp()">Close</button>
+</p>`;
 }
 
 /** A reserve count: the live figure, or the reviewed one while scrubbed — see `renderBoard`'s cells. */
@@ -1056,11 +1068,16 @@ export function renderGamePage(user: SessionUser, game: GameView, view: GameView
   // touches the board at all. Reserves and moves join board and controls here
   // (ticket 01): review needs to reach all four to show a reviewed position,
   // the same reason ticket 14 drew that boundary around board and controls.
+  //
+  // The keydown listener sits on this same wrapper (ticket 02): shortcuts
+  // read and drive the same survives-the-stream state review does, so they
+  // belong on the scope that already owns it rather than a second component.
   const live = `
 ${region('status', regions.status)}
 ${error}
 ${renderLegend()}
-<div x-data="takBoard(${escapeHtml(JSON.stringify(boardConfig))})" x-cloak>
+<div x-data="takBoard(${escapeHtml(JSON.stringify(boardConfig))})" x-cloak x-on:keydown.window="handleKey($event)">
+  ${renderShortcutsHelp()}
   ${region('board', regions.board)}
   ${region('controls', regions.controls)}
   ${/* Deliberately not a region: share, hide and admin-removal change only by

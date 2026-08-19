@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { boardComponent } from '../src/client/board-adapter.js';
 import type { BoardConfig } from '../src/client/board-adapter.js';
 
@@ -321,5 +321,138 @@ describe('review mode', () => {
   it('never flags a new move while live — there is nothing to compare against', () => {
     const b = board();
     expect(b.newMoveWhileReviewing(reviewBar(2))).toBe(false);
+  });
+});
+
+/** A form as `handleKey`'s `submitForm` finds it: only its action and a spy on submit. */
+function form(action: string): HTMLFormElement {
+  return { action, requestSubmit: vi.fn() } as unknown as HTMLFormElement;
+}
+
+/** The page's root, scoped to the move-links and forms a test wants `handleKey` to find. */
+function root(links: HTMLElement[] = [], forms: HTMLFormElement[] = []): HTMLElement {
+  return {
+    querySelectorAll: (selector: string) => (selector === '.move-link' ? links : []),
+    querySelector: (selector: string) => {
+      const suffix = /^form\[action\$="(.+)"\]$/.exec(selector)?.[1];
+      if (suffix === undefined) return null;
+      return forms.find((f) => f.action.endsWith(suffix)) ?? null;
+    },
+  } as unknown as HTMLElement;
+}
+
+/** A keystroke as `handleKey` reads it — a plain object, no DOM. */
+function key(k: string, target: { tagName?: string; isContentEditable?: boolean } | null = null): {
+  key: string;
+  target: typeof target;
+  preventDefault: () => void;
+} {
+  return { key: k, target, preventDefault: vi.fn() };
+}
+
+describe('keyboard shortcuts', () => {
+  it('ignores a key with no binding, and one typed into an input', () => {
+    const b = board();
+    const e = key('x');
+    b.handleKey(e);
+    expect(e.preventDefault).not.toHaveBeenCalled();
+
+    const typing = key('u', { tagName: 'INPUT' });
+    b.handleKey(typing);
+    expect(typing.preventDefault).not.toHaveBeenCalled();
+  });
+
+  it('"?" toggles the help panel', () => {
+    const b = board();
+    b.handleKey(key('?'));
+    expect(b.helpVisible).toBe(true);
+    b.handleKey(key('?'));
+    expect(b.helpVisible).toBe(false);
+  });
+
+  it('Escape cancels an in-progress composition', () => {
+    const b = board();
+    b.cellClick(cell('b4', 3, '1|flat'));
+    expect(b.source).not.toBeNull();
+    b.handleKey(key('Escape'));
+    expect(b.source).toBeNull();
+  });
+
+  it('Escape snaps back to live when reviewing, in preference to cancelling', () => {
+    const b = board();
+    b.$root = root([move(1, AFTER_MOVE_1)]);
+    b.scrubTo(move(1, AFTER_MOVE_1));
+    b.handleKey(key('Escape'));
+    expect(b.reviewing).toBe(false);
+  });
+
+  it('Enter submits the move form', () => {
+    const b = board();
+    const moveForm = form('/games/1/move');
+    b.$root = root([], [moveForm]);
+    b.handleKey(key('Enter'));
+    expect(moveForm.requestSubmit).toHaveBeenCalledOnce();
+  });
+
+  it('Enter does nothing while reviewing — the form is not there to submit', () => {
+    const b = board();
+    const moveForm = form('/games/1/move');
+    const links = [move(1, AFTER_MOVE_1)];
+    b.$root = root(links, [moveForm]);
+    b.scrubTo(links[0]!);
+    b.handleKey(key('Enter'));
+    expect(moveForm.requestSubmit).not.toHaveBeenCalled();
+  });
+
+  it('"u" submits the take-back form when one is offered', () => {
+    const b = board();
+    const takeBackForm = form('/games/1/take-back');
+    b.$root = root([], [takeBackForm]);
+    b.handleKey(key('u'));
+    expect(takeBackForm.requestSubmit).toHaveBeenCalledOnce();
+  });
+
+  it('"u" is a no-op when no take-back form is rendered', () => {
+    const b = board();
+    b.$root = root();
+    expect(() => b.handleKey(key('u'))).not.toThrow();
+  });
+
+  it('"[" from live enters review at the last move', () => {
+    const b = board();
+    const links = [move(1, AFTER_MOVE_1, 2), move(2, AFTER_MOVE_2, 2)];
+    b.$root = root(links);
+    b.handleKey(key('['));
+    expect(b.reviewAt).toBe(2);
+  });
+
+  it('"[" steps further back, stopping at the start', () => {
+    const b = board();
+    const links = [move(1, AFTER_MOVE_1, 2), move(2, AFTER_MOVE_2, 2)];
+    b.$root = root(links);
+    b.scrubTo(links[1]!);
+    b.handleKey(key('['));
+    expect(b.reviewAt).toBe(1);
+    b.handleKey(key('[')); // at the start: no-op
+    expect(b.reviewAt).toBe(1);
+  });
+
+  it('"]" from live is a no-op — there is nothing beyond it', () => {
+    const b = board();
+    const links = [move(1, AFTER_MOVE_1, 1)];
+    b.$root = root(links);
+    b.handleKey(key(']'));
+    expect(b.reviewing).toBe(false);
+  });
+
+  it('"]" steps forward, snapping to live from the last move', () => {
+    const b = board();
+    const links = [move(1, AFTER_MOVE_1, 2), move(2, AFTER_MOVE_2, 2)];
+    b.$root = root(links);
+    b.scrubTo(links[0]!);
+    b.handleKey(key(']'));
+    expect(b.reviewAt).toBe(2);
+    b.handleKey(key(']'));
+    expect(b.reviewing).toBe(false);
   });
 });
