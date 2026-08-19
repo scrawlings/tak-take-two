@@ -7,5 +7,5 @@
     "lib": ["ES2022", "DOM"],
     "types": []
   },
-  "include": ["src/client", "test/board-adapter.test.ts"]
+  "include": ["src/client", "test/board-adapter.test.ts", "test/stream.test.ts"]
 }

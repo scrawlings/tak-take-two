@@ -13,12 +13,12 @@ A website for hosting games of the board game **Tak**. Players reproduce the gam
 Three layers:
 
 1. **Core** (`core/`) — the headless Tak engine: rules validation, PTN/TPS parsing and generation, game-state transitions. Pure TypeScript, no I/O, no framework dependencies, `neverthrow` `Result` everywhere, no exceptions (ADR-0001).
-2. **Server** (`web/`) — Hono on Node; better-sqlite3 persistence; auth; SSE; renders pages and serves datastar signals.
-3. **Client** — server-rendered HTML, **datastar** for live updates over SSE, **Alpine.js** for local interactivity.
+2. **Server** (`web/`) — Hono on Node; better-sqlite3 persistence; auth; hand-rolled SSE; renders pages and pushes re-rendered page regions.
+3. **Client** — server-rendered HTML with **Alpine.js** as the single client runtime (ADR-0007), loaded per page: local interactivity and the SSE component that swaps streamed regions.
 
 ## Tech stack
 
-- TypeScript; **Node** runtime (not Bun); **Hono**; **better-sqlite3**; **datastar**; **Alpine.js**; **neverthrow**; vitest for tests.
+- TypeScript; **Node** runtime (not Bun); **Hono**; **better-sqlite3**; **Alpine.js**; **neverthrow**; vitest for tests. (Datastar was dropped — ADR-0007.)
 - Deployment: a single Node process under **systemd** on a VPS; must also run on a dev machine — everything (DB path, TLS PEM paths, port) configured via env vars with sane defaults.
 - **TLS**: self-termination when PEM cert/key paths are in env; plain HTTP otherwise. No reverse proxy is assumed.
 
@@ -80,7 +80,7 @@ States: **Proposed → In play → Finished.**
 ## UI & real-time
 
 - **Views** — sign-in; my games (proposed / in play / finished); search for proposed games (filters: board size, open vs invited, proposer display name); game view (board grid, full move history, export from any move, live updates); admin section. All views require login.
-- **Real-time** — datastar over SSE; spectators and participants receive move updates live.
+- **Real-time** — hand-rolled SSE (ADR-0007): a stream route re-renders the page's regions through the same view functions the page uses and pushes them as one frame; an Alpine component swaps the regions that changed. Participants, spectators and the two game lists all update live; a stream re-authorises per frame, so a game that stops being shared stops being watchable.
 - **Move entry** — click-to-enter builder (primary) and PTN text with inline validation (power users); one validator underneath.
 
 ## Observability

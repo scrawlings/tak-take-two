@@ -1,11 +1,19 @@
 /**
  * The Alpine adapter over the move builder (ADR-0006): it owns the DOM and the
- * seat rule, the module owns the move. Registering `takBoard` keeps the
- * component name and the `x-data` config the game page already renders.
+ * seat rule, the module owns the move. It is registered as `takBoard` by the
+ * bundle's entry point, which is the one place that names the site's
+ * components.
  *
  * The seat rule lives here because whose stack a square holds is a view
- * concern (CONTEXT.md: Seat) that the Game module decided server-side and
- * passed down as config; the builder itself never learns about seats.
+ * concern (CONTEXT.md: Seat) that the Game module decided server-side; the
+ * builder itself never learns about seats.
+ *
+ * Its *inputs* are read from the board element on every click rather than
+ * taken from the `x-data` config, because they change while the page is open:
+ * a move passes the turn, and a joiner settles a random start. The config the
+ * stream never replaces (ADR-0007) may therefore hold only what cannot change
+ * — the board's size — or a streamed update would leave a live move form above
+ * a board that still refuses every click.
  */
 
 import {
@@ -19,21 +27,38 @@ import {
 } from './move-builder.js';
 import type { BuilderState, PathStep, SourceStack, SquareRef, StoneKind } from './move-builder.js';
 
-/** What the game page tells the board about the viewer and the game. */
+/**
+ * What the game page tells the board once and for all. Everything else the
+ * adapter needs is on the board element, which the stream keeps current.
+ */
 export interface BoardConfig {
-  readonly canMove: boolean;
-  readonly viewerSeat: number | null;
   readonly size: number;
+}
+
+/**
+ * What the viewer may do with this board right now, as the server rendered it
+ * into the streamed board element.
+ */
+interface BoardStanding {
+  /** The viewer may play a move at all. */
+  readonly canMove: boolean;
+  /** The seat the viewer holds, as a string, or '' for a spectator. */
+  readonly viewerSeat: string;
+  /** One account holds both seats, so either colour is theirs to lift. */
   readonly selfPlay: boolean;
 }
 
-interface AlpineGlobal {
-  data(name: string, factory: (config: BoardConfig) => object): void;
+/** Read the standing off the board this cell belongs to. */
+function standingOf(cell: HTMLElement): BoardStanding {
+  const data = cell.closest<HTMLElement>('.board')?.dataset ?? {};
+  return {
+    canMove: data.canMove === '1',
+    viewerSeat: data.viewerSeat ?? '',
+    selfPlay: data.selfPlay === '1',
+  };
 }
 
-declare const Alpine: AlpineGlobal;
-
-interface BoardComponent {
+export interface BoardComponent {
   state: BuilderState;
   /** Bound to the move field with `x-model`, so a player may still type over it. */
   move: string;
@@ -135,12 +160,13 @@ export function boardComponent(config: BoardConfig): BoardComponent {
     },
 
     cellClick(el: HTMLElement): void {
-      if (!config.canMove) return;
+      const standing = standingOf(el);
+      if (!standing.canMove) return;
       const square = el.dataset.square ?? '';
       const height = Number(el.dataset.height ?? '0');
       const top = el.dataset.top ?? '';
       // `data-top` reads "seat|kind"; an empty square carries neither.
-      const mine = top !== '' && (config.selfPlay || top[0] === String(config.viewerSeat));
+      const mine = top !== '' && (standing.selfPlay || top[0] === standing.viewerSeat);
       this.apply(clickSquare(this.state, { square, height, mine }), el.dataset.stack ?? '');
     },
 
@@ -177,12 +203,4 @@ export function boardComponent(config: BoardConfig): BoardComponent {
       this.apply(clearSelection(this.state));
     },
   };
-}
-
-// Guarded so the component can be imported and driven by a test: this module
-// is a browser bundle, but its behaviour is ordinary data and worth pinning.
-if (typeof document !== 'undefined') {
-  document.addEventListener('alpine:init', () => {
-    Alpine.data('takBoard', boardComponent);
-  });
 }

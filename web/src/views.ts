@@ -1,4 +1,3 @@
-import { BOARD_SCRIPT } from './client-script.generated.js';
 import { breadcrumb, escapeHtml, renderShell } from './html.js';
 import type { SessionUser } from './auth.js';
 import type { ExportFormat, GameExport, GameSummary, GameView } from './games.js';
@@ -11,6 +10,35 @@ import type { StoneKind } from '@tak/core';
 
 const ACCOUNT = { href: '/account', label: 'Account' };
 const USERS = { href: '/admin/users', label: 'Users' };
+
+/**
+ * The parts of a page the SSE stream re-renders (ticket 14), keyed by the
+ * `data-region` name the client swaps them into. A region is whole rendered
+ * HTML from the very same view function the page used, so what a stream pushes
+ * and what a reload would serve cannot drift apart.
+ *
+ * Each page names its own regions as a literal union, so a page and its stream
+ * route cannot disagree about which parts exist; `Regions` unparameterised is
+ * what the stream route carries, having stopped caring which page it serves.
+ */
+export type Regions<K extends string = string> = Readonly<Record<K, string>>;
+
+/** Mark a region so the stream component can find and replace it. */
+function region(name: string, html: string): string {
+  return `<div data-region="${name}">${html}</div>`;
+}
+
+/**
+ * The wrapper that holds a page's live connection. It must enclose every
+ * region but nothing whose state the browser owns — a half-typed form, or the
+ * click-builder's composition — because the stream replaces what is inside it.
+ */
+function streamed(url: string, html: string): string {
+  return `<div x-data="takStream(${escapeHtml(JSON.stringify({ url }))})">
+  <p class="hint stream-lapsed" x-show="!live" x-cloak>Live updates have stopped — reload the page to catch up.</p>
+  ${html}
+</div>`;
+}
 
 
 export function renderStatusPageBody(body: string): string {
@@ -371,17 +399,12 @@ function gameActions(game: GameSummary, from: GameListPage): string {
   return `<div class="row-actions">${buttons.join('')}</div>`;
 }
 
-export function renderMyGamesPage(
-  user: SessionUser,
-  games: readonly GameSummary[],
-  view: MyGamesView = {},
-): string {
-  const error = view.error ? `<p class="error">${escapeHtml(view.error)}</p>` : '';
-  const submitted = view.submitted ?? {};
-  const sizeSelected = (size: string): string => (submitted.boardSize === size ? ' selected' : '');
-  const joinSelected = (kind: string): string => (submitted.joinType === kind ? ' selected' : '');
-  const starterSelected = (value: string): string => (submitted.starter === value ? ' selected' : '');
+/** The player's own games as the list draws them — the one streamed region. */
+export function myGamesRegions(user: SessionUser, games: readonly GameSummary[]): Regions<'games'> {
+  return { games: myGamesTable(user, games) };
+}
 
+function myGamesTable(user: SessionUser, games: readonly GameSummary[]): string {
   const rows = games
     .map(
       (game) => `<tr>
@@ -404,13 +427,30 @@ export function renderMyGamesPage(
       <tbody>${rows}</tbody>
     </table>
   </div>`;
+  return table;
+}
+
+export function renderMyGamesPage(
+  user: SessionUser,
+  games: readonly GameSummary[],
+  view: MyGamesView = {},
+): string {
+  const error = view.error ? `<p class="error">${escapeHtml(view.error)}</p>` : '';
+  const submitted = view.submitted ?? {};
+  const sizeSelected = (size: string): string => (submitted.boardSize === size ? ' selected' : '');
+  const joinSelected = (kind: string): string => (submitted.joinType === kind ? ' selected' : '');
+  const starterSelected = (value: string): string => (submitted.starter === value ? ' selected' : '');
+
+  // Only the table streams: the propose form below holds what the player has
+  // typed, and a stream that replaced it would throw their draft away.
+  const list = streamed('/games/stream', region('games', myGamesTable(user, games)));
 
   const body = `
 <h1>Your games</h1>
 ${error}
 <div class="block">
   <h2>In progress</h2>
-  ${table}
+  ${list}
 </div>
 <div class="block">
   <h2>Propose a game</h2>
@@ -459,7 +499,7 @@ ${error}
     <p class="hint">Paste Portable Tak Notation to carry a game in from elsewhere. Its moves are replayed and fixed, and the record sets the board size.</p>
   </form>
 </div>`;
-  return renderShell('Your games', body, { user, path: '/games' });
+  return renderShell('Your games', body, { user, path: '/games', scripts: 'client' });
 }
 
 /**
@@ -472,27 +512,48 @@ function proposalKind(game: GameSummary): string {
     : '<span class="tag">invited to you</span>';
 }
 
+/**
+ * A proposal search as it was submitted, kept as text so the form comes back
+ * the way it was left. The Game module parses it (`ProposedSearch`); this is
+ * only what the page and its stream carry between them.
+ */
+export interface SearchFilters {
+  boardSize?: string | null;
+  joinType?: string | null;
+  proposerDisplayName?: string | null;
+}
+
+/** Whether the search was narrowed at all — one statement of it, so the empty
+ *  message on the page and on a streamed frame cannot disagree. */
+export function isFiltered(filters: SearchFilters): boolean {
+  return Boolean(filters.boardSize || filters.joinType || filters.proposerDisplayName);
+}
+
 export interface FindGamesView {
   error?: string;
   /** The filters as submitted, so the form comes back the way it was left. */
-  filters?: {
-    boardSize?: string | null;
-    joinType?: string | null;
-    proposerDisplayName?: string | null;
-  };
+  filters?: SearchFilters;
 }
 
-export function renderFindGamesPage(
+/**
+ * The matching proposals as the search draws them — the one streamed region.
+ * The filters are the caller's, so the stream route runs the same search and
+ * this renders the same answer.
+ */
+export function findGamesRegions(
   user: SessionUser,
   games: readonly GameSummary[],
-  view: FindGamesView = {},
-): string {
-  const error = view.error ? `<p class="error">${escapeHtml(view.error)}</p>` : '';
-  const filters = view.filters ?? {};
-  const filtered = Boolean(filters.boardSize || filters.joinType || filters.proposerDisplayName);
-  const selected = (value: string | null | undefined, option: string): string =>
-    value === option ? ' selected' : '';
+  filters: SearchFilters = {},
+): Regions<'games'> {
+  return { games: findGamesResults(user, games, filters) };
+}
 
+function findGamesResults(
+  user: SessionUser,
+  games: readonly GameSummary[],
+  filters: SearchFilters,
+): string {
+  const filtered = isFiltered(filters);
   const rows = games
     .map(
       (game) => `<tr>
@@ -518,6 +579,32 @@ export function renderFindGamesPage(
       <tbody>${rows}</tbody>
     </table>
   </div>`;
+  return results;
+}
+
+/** The stream that watches this search: the same filters, so the same answer. */
+function findStreamUrl(filters: SearchFilters): string {
+  const query = new URLSearchParams();
+  if (filters.boardSize) query.set('board_size', filters.boardSize);
+  if (filters.joinType) query.set('join_type', filters.joinType);
+  if (filters.proposerDisplayName) query.set('proposer', filters.proposerDisplayName);
+  const search = query.toString();
+  return search === '' ? '/games/find/stream' : `/games/find/stream?${search}`;
+}
+
+export function renderFindGamesPage(
+  user: SessionUser,
+  games: readonly GameSummary[],
+  view: FindGamesView = {},
+): string {
+  const error = view.error ? `<p class="error">${escapeHtml(view.error)}</p>` : '';
+  const filters = view.filters ?? {};
+  const filtered = isFiltered(filters);
+  const selected = (value: string | null | undefined, option: string): string =>
+    value === option ? ' selected' : '';
+
+  // Only the results stream: the filter form above holds what the player typed.
+  const results = streamed(findStreamUrl(filters), region('games', findGamesResults(user, games, filters)));
 
   const body = `
 <h1>Find a game</h1>
@@ -555,7 +642,7 @@ ${error}
   <h2>${filtered ? 'Matching proposals' : 'Waiting for an opponent'}</h2>
   ${results}
 </div>`;
-  return renderShell('Find a game', body, { user, path: '/games/find' });
+  return renderShell('Find a game', body, { user, path: '/games/find', scripts: 'client' });
 }
 
 export function renderResetPasswordResult(actor: SessionUser, username: string, password: string): string {
@@ -625,7 +712,17 @@ function renderBoard(game: GameView): string {
       .join('');
     rows.push(`<span class="axis">${rank}</span>${cells}`);
   }
-  return `<div class="board" style="grid-template-columns: auto repeat(${game.boardSize}, 2.75rem)">${top}${rows.join('')}</div>`;
+  // What the viewer may do with this board, for the adapter to read on every
+  // click. It belongs here, inside the streamed region, because it changes as
+  // the game does: a move passes the turn, and a joiner settles a random start.
+  // Held in the `x-data` config instead, it would freeze at page load and a
+  // streamed update would leave a live move form above an inert board.
+  const standing = [
+    `data-can-move="${game.canMove ? '1' : '0'}"`,
+    `data-viewer-seat="${game.viewerSeat ?? ''}"`,
+    `data-self-play="${game.selfPlay ? '1' : '0'}"`,
+  ].join(' ');
+  return `<div class="board" ${standing} style="grid-template-columns: auto repeat(${game.boardSize}, 2.75rem)">${top}${rows.join('')}</div>`;
 }
 
 function renderGameStatus(game: GameView): string {
@@ -891,30 +988,61 @@ function renderGameManagement(game: GameView): string {
   }</p><div class="row-actions">${parts.join('')}</div></div>`;
 }
 
+/**
+ * Everything on the game screen that a move changes (ticket 14). The controls
+ * and the reserves are here alongside ADR-0007's three regions because a move
+ * changes them too: a fresh board beside a stale stone count, or beside a move
+ * form that says it is still your turn, is exactly the inconsistency the
+ * stream exists to remove.
+ */
+export function gameRegions(game: GameView): Regions<'status' | 'board' | 'controls' | 'reserves' | 'moves'> {
+  return {
+    status: renderGameStatus(game),
+    board: renderBoard(game),
+    controls: renderGameControls(game),
+    reserves: renderReserves(game),
+    moves: renderHistory(game),
+  };
+}
+
 export function renderGamePage(user: SessionUser, game: GameView, view: GameViewPageView = {}): string {
   const error = view.error ? `<p class="error">${escapeHtml(view.error)}</p>` : '';
+  const regions = gameRegions(game);
+  // Only the board's size: everything else the adapter needs changes while the
+  // page is open, so it rides in the streamed board element instead.
+  const boardConfig = { size: game.boardSize };
+
+  // The `takBoard` scope sits *inside* the stream wrapper and *outside* the
+  // board and controls regions, so a swap replaces the squares and the form
+  // while the composition state on the scope survives them (ADR-0007). The
+  // swap itself is skipped when the HTML is unchanged, so an idle stream never
+  // touches the board at all.
+  const live = `
+${region('status', regions.status)}
+${error}
+${renderLegend()}
+<div x-data="takBoard(${escapeHtml(JSON.stringify(boardConfig))})" x-cloak>
+  ${region('board', regions.board)}
+  ${region('controls', regions.controls)}
+</div>
+${/* Deliberately not a region: share, hide and admin-removal change only by
+     the viewer's own action, which is a POST and a redirect, so there is
+     nothing for a stream to tell them. It sits inside the wrapper because the
+     wrapper touches only what carries `data-region`. */ ''}
+${renderGameManagement(game)}
+${region('reserves', regions.reserves)}
+${region('moves', regions.moves)}`;
+
   const body = `
 ${breadcrumb({ href: '/games', label: 'Games' }, `Game ${game.id}`)}
 <h1>Game ${game.id}</h1>
-${renderGameStatus(game)}
-${error}
-${renderLegend()}
-${/* The move builder, inlined: state machine and Alpine adapter from
-     src/client/, bundled by `npm run build:client -w web` (ADR-0006). Only
-     this page needs them, so only this page carries them. */ ''}
-<script>${BOARD_SCRIPT}</script>
-<div x-data="takBoard(${escapeHtml(JSON.stringify({ canMove: game.canMove, viewerSeat: game.viewerSeat, size: game.boardSize, selfPlay: game.selfPlay }))})" x-cloak>
-  ${renderBoard(game)}
-  ${renderGameControls(game)}
-</div>
-${renderGameManagement(game)}
-${renderReserves(game)}
-${renderHistory(game)}
+${streamed(`/games/${game.id}/stream`, live)}
 ${renderMoveSyntax()}`;
-  return renderShell(`Game ${game.id}`, body, { user, path: '/games' });
+  return renderShell(`Game ${game.id}`, body, { user, path: '/games', scripts: 'client' });
 }
 
-/** Register the copy button as an Alpine component, as the board does. */
+/** Register the copy button as an Alpine component. It stays inline beside
+ *  the one page that uses it, rather than joining the bundle (ADR-0006). */
 const TAK_COPY_SCRIPT = `<script>
 document.addEventListener('alpine:init', () => {
   Alpine.data('takCopy', () => ({
@@ -969,5 +1097,5 @@ ${TAK_COPY_SCRIPT}
   </p>
 </div>
 <p class="hint">Select the record above to copy it by hand.</p>`;
-  return renderShell(`${view.format.toUpperCase()} — game ${gameId}`, body, { user, path: '/games' });
+  return renderShell(`${view.format.toUpperCase()} — game ${gameId}`, body, { user, path: '/games', scripts: 'alpine' });
 }

@@ -1,15 +1,17 @@
 import { Hono, type Context } from 'hono';
 import { routePath } from 'hono/route';
+import { streamSSE } from 'hono/streaming';
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
 import { createMiddleware } from 'hono/factory';
-import { err } from 'neverthrow';
+import { err, type Result } from 'neverthrow';
 import type { Persistence, PersistenceSnapshot } from './persistence.js';
 import { Metrics } from './metrics.js';
 import type { Logger } from './logging.js';
 import { newRequestId } from './logging.js';
 import { escapeHtml, renderShell, siteCss } from './html.js';
 import { createAuth, type Auth, type AuthError, type SessionUser } from './auth.js';
-import { createGames, type GameError, type Games } from './games.js';
+import { createGames, type GameError, type Games, type ProposedSearch } from './games.js';
+import { GAMES_TOPIC, announceGameChanges, createUpdates, gameTopic } from './updates.js';
 import {
   createFormAction,
   createPageAction,
@@ -34,10 +36,15 @@ import {
   renderResetPasswordResult,
   renderRoot,
   renderStatusPageBody,
+  findGamesRegions,
+  gameRegions,
+  myGamesRegions,
   type AdminUsersView,
   type FindGamesView,
   type GameViewPageView,
   type MyGamesView,
+  type Regions,
+  type SearchFilters,
 } from './views.js';
 
 export interface AppDeps {
@@ -46,6 +53,11 @@ export interface AppDeps {
   logger: Logger;
   /** Mark the session cookie Secure. True when TLS terminates at this process. */
   secureCookies?: boolean;
+  /**
+   * How long an SSE stream waits for a change before sending a keep-alive
+   * comment. Injected so tests need not wait on the real one.
+   */
+  heartbeatMs?: number;
 }
 
 type Variables = {
@@ -57,6 +69,14 @@ export type App = Hono<{ Variables: Variables }>;
 
 const SESSION_COOKIE = 'tak_session';
 const SESSION_MAX_AGE_SECONDS = 30 * 24 * 60 * 60;
+
+/**
+ * Long enough to be quiet, short enough that a connection killed silently in
+ * the middle is noticed within the minute. Nothing sits between this process
+ * and the browser by design (no reverse proxy is assumed), so this is only
+ * about the connection itself.
+ */
+const DEFAULT_HEARTBEAT_MS = 25_000;
 
 function renderStatusPage(snapshot: PersistenceSnapshot, httpErrors: number): string {
   const rows: Array<[string, string]> = [
@@ -77,8 +97,13 @@ function renderStatusPage(snapshot: PersistenceSnapshot, httpErrors: number): st
 export function createApp(deps: AppDeps): App {
   const { persistence, metrics, logger } = deps;
   const secureCookies = deps.secureCookies ?? false;
+  const heartbeatMs = deps.heartbeatMs ?? DEFAULT_HEARTBEAT_MS;
   const auth: Auth = createAuth(persistence);
-  const games: Games = createGames(persistence);
+  const updates = createUpdates();
+  // Every successful command wakes the streams watching it. Wrapping the module
+  // once is what keeps real-time delivery at the routes, where ADR-0004 put it,
+  // rather than inside the module it deliberately kept free of events.
+  const games: Games = announceGameChanges(createGames(persistence), updates);
   const app = new Hono<{ Variables: Variables }>();
 
   app.use('*', async (c, next) => {
@@ -237,6 +262,127 @@ export function createApp(deps: AppDeps): App {
     return value === undefined || value.trim() === '' ? undefined : value;
   };
 
+  /**
+   * The proposal search a request asks for, read once and used twice: the page
+   * and its stream must run the same search and describe it the same way, and
+   * reading the parameters in both places is how they would drift apart.
+   */
+  const proposalSearch = (
+    c: Context<{ Variables: Variables }>,
+  ): { search: ProposedSearch; filters: SearchFilters } => {
+    const boardSize = query(c, 'board_size');
+    const joinType = query(c, 'join_type');
+    const proposer = query(c, 'proposer');
+    return {
+      search: {
+        // Anything non-numeric lands as NaN, which the module refuses.
+        boardSize: boardSize === undefined ? undefined : Number(boardSize),
+        joinType,
+        proposerDisplayName: proposer,
+      },
+      filters: {
+        boardSize: boardSize ?? null,
+        joinType: joinType ?? null,
+        proposerDisplayName: proposer ?? null,
+      },
+    };
+  };
+
+  /** What a streamed page needs: a topic to listen on, and how to draw itself. */
+  interface StreamSpec<D> {
+    /** Named for log lines, as the page adapters are. */
+    readonly name: string;
+    /** The change topic this page follows. */
+    readonly topic: string;
+    /** Re-read through the module on every change, so the stream authorises per frame. */
+    load(actor: SessionUser): Result<D, GameError>;
+    regions(data: D): Regions;
+  }
+
+  /**
+   * The stream adapter — the live twin of `pageAction` (ADR-0007's hand-rolled
+   * SSE). It holds the connection open and, whenever the topic changes,
+   * re-reads the page through the Game module and pushes its regions as one
+   * frame.
+   *
+   * Re-reading rather than pushing what the command produced is what gates a
+   * spectator per frame: the moment a share is switched off the module answers
+   * `not-found`, and the stream says so and stops. It is also what keeps the
+   * frames consistent — a stream woken by two moves at once reads the position
+   * after both, never a board and a move list a move apart.
+   */
+  const streamPage = <D>(c: Context<{ Variables: Variables }>, spec: StreamSpec<D>): Response => {
+    const actor = c.get('user');
+    const sessionId = getCookie(c, SESSION_COOKIE) ?? '';
+
+    // Authorise before the stream opens, so a viewer who may not see this page
+    // gets the page's own answer — a status an EventSource treats as final,
+    // rather than a stream it would reconnect to forever. This is exactly
+    // `pageAction`'s branching, so it *is* `pageAction`: the load it does is
+    // the authorising read, and the render it triggers opens the stream. The
+    // loop below reads again for the first frame; one extra read buys the
+    // honest status code.
+    return pageAction(c, actor, {
+      name: spec.name,
+      load: spec.load,
+      render: () => openStream(),
+      // A page they cannot see must read as absent, as the game route has it;
+      // anything else is a bad request, and a stream has no page to say so on.
+      renderError: (error, status) =>
+        error.code === 'not-found'
+          ? c.html(renderShell('Not found', renderNotFoundPage(), { user: actor }), status)
+          : c.text(error.message, status),
+      statusOf: statusForGameError,
+    });
+
+    function openStream(): Response {
+      return streamSSE(c, async (stream) => {
+        const closing = new AbortController();
+        stream.onAbort(() => closing.abort());
+
+        let seen = 0;
+        while (!stream.closed && !closing.signal.aborted) {
+          const change = await updates.next(spec.topic, seen, { signal: closing.signal, waitMs: heartbeatMs });
+          if (change.type === 'closed') return;
+          if (change.type === 'idle') {
+            await stream.writeSSE({ event: 'ping', data: '' });
+            continue;
+          }
+          seen = change.revision;
+
+          // A stream outlives the request that opened it, so the session is
+          // re-checked before every frame: a password change, a sign-out or a
+          // block ends all sessions (ticket 07), and an open stream must be no
+          // exception. Nothing has been sent in the meantime — an idle stream
+          // pushes only contentless heartbeats.
+          const viewer = auth.getSessionUser(sessionId);
+          if (viewer.isErr() || viewer.value.blocked) return;
+
+          // Read after the change, never before: this is the frame's whole
+          // claim to being current. A stream that slept through two moves
+          // reads the position after both.
+          const current = spec.load(viewer.value);
+          if (current.isErr()) {
+            const error = current.error;
+            // The viewer has lost sight of the game — removed, deleted, or no
+            // longer shared. Say so once and stop; the page route is the one
+            // place that decides what they should see instead.
+            if (error.code === 'not-found' || error.code === 'forbidden') {
+              await stream.writeSSE({ event: 'gone', data: '' });
+              return;
+            }
+            logger.log('error', spec.name, { error });
+            return;
+          }
+          await stream.writeSSE({
+            event: 'state',
+            data: JSON.stringify({ regions: spec.regions(current.value) }),
+          });
+        }
+      });
+    }
+  };
+
   app.get('/healthz', (c) => c.json({ status: 'ok' }));
 
   app.get('/readyz', (c) => {
@@ -356,29 +502,39 @@ export function createApp(deps: AppDeps): App {
     });
   });
 
+  // The lists follow one topic: any change anywhere can add a row, remove one,
+  // or move whose turn it is (see `GAMES_TOPIC`).
+  app.get('/games/stream', requireUser, (c) =>
+    streamPage(c, {
+      name: 'stream games',
+      topic: GAMES_TOPIC,
+      load: (actor) => games.listMyGames(actor),
+      regions: (data) => myGamesRegions(c.get('user'), data),
+    }),
+  );
+
+  app.get('/games/find/stream', requireUser, (c) => {
+    const asked = proposalSearch(c);
+    return streamPage(c, {
+      name: 'stream search',
+      topic: GAMES_TOPIC,
+      // The same search the page ran, so the stream's answer is the page's.
+      load: (actor) => games.searchProposed(actor, asked.search),
+      regions: (data) => findGamesRegions(c.get('user'), data, asked.filters),
+    });
+  });
+
   app.get('/games/find', requireUser, (c) => {
     const actor = c.get('user');
-    const boardSize = query(c, 'board_size');
-    const joinType = query(c, 'join_type');
-    const proposer = query(c, 'proposer');
-    const filters = {
-      boardSize: boardSize ?? null,
-      joinType: joinType ?? null,
-      proposerDisplayName: proposer ?? null,
-    };
+    const asked = proposalSearch(c);
 
     return pageAction(c, actor, {
       name: 'search games',
-      load: () =>
-        games.searchProposed(actor, {
-          boardSize: boardSize === undefined ? undefined : Number(boardSize),
-          joinType,
-          proposerDisplayName: proposer,
-        }),
-      render: (data) => c.html(renderFindGamesPage(actor, data, { filters })),
+      load: () => games.searchProposed(actor, asked.search),
+      render: (data) => c.html(renderFindGamesPage(actor, data, { filters: asked.filters })),
       // A bad filter is the user's to fix: keep the form and say what is wrong.
       renderError: (e, status) =>
-        c.html(renderFindGamesPage(actor, [], { error: e.message, filters }), status),
+        c.html(renderFindGamesPage(actor, [], { error: e.message, filters: asked.filters }), status),
       statusOf: statusForGameError,
     });
   });
@@ -441,6 +597,21 @@ export function createApp(deps: AppDeps): App {
       render: (view) => c.html(renderGamePage(actor, view)),
       renderError: (e, status) => c.html(renderShell('Not found', renderNotFoundPage(), { user: actor }), status),
       statusOf: statusForGameError,
+    });
+  });
+
+  app.get('/games/:id/stream', requireUser, (c) => {
+    const id = paramId(c, 'id', 'That game no longer exists.');
+    if (id.isErr()) {
+      return c.html(renderShell('Not found', renderNotFoundPage(), { user: c.get('user') }), 404);
+    }
+    return streamPage(c, {
+      name: 'stream game view',
+      topic: gameTopic(id.value),
+      // `getGame` is the visibility rule (ADR-0003), so the spectator gate on
+      // the stream is the very one on the page — the route decides nothing.
+      load: (actor) => games.getGame(actor, id.value),
+      regions: gameRegions,
     });
   });
 

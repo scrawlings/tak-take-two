@@ -1,5 +1,5 @@
-const DATASTAR_URL =
-  'https://cdn.jsdelivr.net/npm/@starfederation/datastar@1.0.0-beta.11/dist/datastar.js';
+import { CLIENT_SCRIPT } from './client-script.generated.js';
+
 const ALPINE_URL = 'https://cdn.jsdelivr.net/npm/alpinejs@3/dist/cdn.min.js';
 
 export function escapeHtml(value: string): string {
@@ -19,11 +19,21 @@ export interface NavUser {
   readonly forcePasswordChange?: boolean;
 }
 
+/**
+ * What a page needs from the browser (ADR-0007). Alpine is the one runtime;
+ * `client` adds the inlined bundle — the board move builder (ADR-0006) and the
+ * SSE stream component (ticket 14) — for the pages that register those
+ * components. Pages that say nothing ship nothing.
+ */
+export type PageScripts = 'none' | 'alpine' | 'client';
+
 /** What the shell needs to draw navigation: who is here, and where they are. */
 export interface PageContext {
   readonly user?: NavUser;
   /** Request path, used to mark the current destination. */
   readonly path?: string;
+  /** The client runtime this page needs. Defaults to none. */
+  readonly scripts?: PageScripts;
 }
 
 interface NavItem {
@@ -108,9 +118,27 @@ function masthead(ctx: PageContext): string {
 }
 
 /**
- * Base page shell: a shared masthead around the page body, plus the stylesheet.
- * Datastar (SSE plugin included) and Alpine load from CDN so later tickets can
- * build server-driven views on top of it.
+ * The scripts a page carries, in load order. The bundle registers its
+ * components on Alpine's `alpine:init`, so it must run first — it is inline
+ * and synchronous, Alpine's CDN tag is deferred, which orders them.
+ */
+function scriptTags(scripts: PageScripts): string {
+  switch (scripts) {
+    case 'none':
+      return '';
+    case 'alpine':
+      return `\n<script defer src="${ALPINE_URL}"></script>`;
+    case 'client':
+      // ADR-0002 serves no static files, so the bundle travels in the HTML
+      // (ADR-0006), the same way `/site.css` is an inlined string.
+      return `\n<script>${CLIENT_SCRIPT}</script>\n<script defer src="${ALPINE_URL}"></script>`;
+  }
+}
+
+/**
+ * Base page shell: a shared masthead around the page body, plus the stylesheet
+ * and whatever client runtime the page asked for. Scripts load per page
+ * (ADR-0007): a page that needs no client code ships none.
  */
 export function renderShell(title: string, bodyHtml: string, ctx: PageContext = {}): string {
   return `<!doctype html>
@@ -125,9 +153,7 @@ export function renderShell(title: string, bodyHtml: string, ctx: PageContext = 
 ${masthead(ctx)}
 <main class="page">
 ${bodyHtml}
-</main>
-<script type="module" src="${DATASTAR_URL}"></script>
-<script defer src="${ALPINE_URL}"></script>
+</main>${scriptTags(ctx.scripts ?? 'none')}
 </body>
 </html>`;
 }
@@ -451,6 +477,15 @@ p { margin: 0 0 1rem; }
 }
 
 .record-gloss { color: var(--slate-mid); max-width: 32rem; margin: 0; }
+
+/* A live page that has stopped being live. It sits above the thing it is about
+   and must be noticeable without shouting: an oxide rule, not an error box. */
+.stream-lapsed {
+  border-left: 2px solid var(--oxide);
+  padding-left: 0.75rem;
+  color: var(--oxide);
+  margin: 0 0 1rem;
+}
 
 /* ---------- notices ---------- */
 

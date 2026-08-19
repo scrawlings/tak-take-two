@@ -8,11 +8,28 @@ import type { BoardConfig } from '../src/client/board-adapter.js';
  * is an object with methods, so driving it needs no browser.
  */
 
-const PLAYING: BoardConfig = { canMove: true, viewerSeat: 1, size: 5, selfPlay: false };
+const PLAYING: BoardConfig = { size: 5 };
 
-/** A board cell as the page renders it. */
-function cell(square: string, height = 0, top = '', stack = ''): HTMLElement {
-  return { dataset: { square, height: String(height), top, stack } } as unknown as HTMLElement;
+/** The standing the page renders onto the board element, as its dataset. */
+interface Standing {
+  canMove?: string;
+  viewerSeat?: string;
+  selfPlay?: string;
+}
+
+const MY_TURN: Standing = { canMove: '1', viewerSeat: '1', selfPlay: '0' };
+
+/**
+ * A board cell as the page renders it, inside the board it belongs to. The
+ * adapter reads the standing off that board on every click, so a test drives
+ * it the same way the stream does: by changing the board, not the component.
+ */
+function cell(square: string, height = 0, top = '', stack = '', standing: Standing = MY_TURN): HTMLElement {
+  const boardEl = { dataset: standing };
+  return {
+    dataset: { square, height: String(height), top, stack },
+    closest: (selector: string) => (selector === '.board' ? boardEl : null),
+  } as unknown as HTMLElement;
 }
 
 function board(config: Partial<BoardConfig> = {}): ReturnType<typeof boardComponent> {
@@ -33,17 +50,53 @@ describe('the seat rule', () => {
   });
 
   it('lifts either colour in self-play, where one account holds both seats', () => {
-    const b = board({ selfPlay: true, viewerSeat: 1 });
-    b.cellClick(cell('b4', 3, '2|flat'));
+    const b = board();
+    b.cellClick(cell('b4', 3, '2|flat', '', { canMove: '1', viewerSeat: '1', selfPlay: '1' }));
     expect(b.source).toEqual({ square: 'b4', height: 3 });
   });
 
   it('ignores every click when the viewer may not move', () => {
-    const b = board({ canMove: false });
-    b.cellClick(cell('a1'));
-    b.cellClick(cell('b4', 3, '1|flat'));
+    const b = board();
+    const waiting: Standing = { canMove: '0', viewerSeat: '1', selfPlay: '0' };
+    b.cellClick(cell('a1', 0, '', '', waiting));
+    b.cellClick(cell('b4', 3, '1|flat', '', waiting));
     expect(b.move).toBe('');
     expect(b.source).toBeNull();
+  });
+
+  it('leaves a spectator, who holds no seat, unable to compose anything', () => {
+    const b = board();
+    const watching: Standing = { canMove: '0', viewerSeat: '', selfPlay: '0' };
+    b.cellClick(cell('b4', 3, '1|flat', '', watching));
+    expect(b.source).toBeNull();
+  });
+
+  /**
+   * The bug this pins: the standing used to live in the `x-data` config, which
+   * the stream never replaces (ADR-0007), so a board that became playable
+   * mid-page stayed inert — a live move form above squares that refused every
+   * click. Reading it off the streamed board element is what fixes it.
+   */
+  it('becomes playable when a streamed board says the turn has passed to the viewer', () => {
+    const b = board();
+    const waiting: Standing = { canMove: '0', viewerSeat: '1', selfPlay: '0' };
+    b.cellClick(cell('b4', 3, '1|flat', '', waiting));
+    expect(b.source).toBeNull();
+
+    // The opponent moved: the stream swapped in a board whose standing says so.
+    b.cellClick(cell('b4', 3, '1|flat', '', MY_TURN));
+
+    expect(b.source).toEqual({ square: 'b4', height: 3 });
+  });
+
+  it('goes inert again when a streamed board says the turn has passed away', () => {
+    const b = board();
+    b.cellClick(cell('a1'));
+    expect(b.move).toBe('a1');
+
+    b.cellClick(cell('c3', 0, '', '', { canMove: '0', viewerSeat: '1', selfPlay: '0' }));
+
+    expect(b.move).toBe('a1');
   });
 });
 

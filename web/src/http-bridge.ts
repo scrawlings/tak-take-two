@@ -110,6 +110,11 @@ function writePlan(nodeRes: ServerResponse, plan: NodeResponsePlan): void {
   if (setCookies.length > 0) nodeRes.setHeader('set-cookie', setCookies);
   if (plan.body) {
     const stream = Readable.fromWeb(plan.body as unknown as NodeWebReadableStream);
+    // A long-lived response (the SSE streams of ticket 14) outlives the socket
+    // that asked for it. `pipe` alone leaves the source running when the client
+    // goes away; destroying it cancels the web stream, which is what tells the
+    // route to stop rendering frames nobody will read.
+    nodeRes.on('close', () => stream.destroy());
     stream.pipe(nodeRes);
   } else {
     nodeRes.end();

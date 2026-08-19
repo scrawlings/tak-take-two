@@ -10,7 +10,7 @@ import {
   setLift,
 } from '../src/client/move-builder.js';
 import type { BuilderState } from '../src/client/move-builder.js';
-import { BOARD_SCRIPT, BOARD_SCRIPT_SOURCES } from '../src/client-script.generated.js';
+import { CLIENT_SCRIPT, CLIENT_SCRIPT_SOURCES } from '../src/client-script.generated.js';
 import { sourcesFingerprint } from '../scripts/client-fingerprint.js';
 
 /**
@@ -304,13 +304,14 @@ describe('the inlined bundle', () => {
   it('was built from the client sources as they stand', () => {
     // The bundle is committed so nothing needs a build step to run; the cost is
     // that editing src/client/ without rebuilding would serve a stale script.
-    expect(BOARD_SCRIPT_SOURCES, 'run `npm run build:client -w web`').toBe(sourcesFingerprint());
+    expect(CLIENT_SCRIPT_SOURCES, 'run `npm run build:client -w web`').toBe(sourcesFingerprint());
   });
 
-  it('carries the builder and registers the board component', () => {
-    expect(BOARD_SCRIPT).toContain('takBoard');
-    expect(BOARD_SCRIPT).toContain('alpine:init');
+  it('carries the builder and registers every component the site has', () => {
+    expect(CLIENT_SCRIPT).toContain('takBoard');
+    expect(CLIENT_SCRIPT).toContain('takStream');
+    expect(CLIENT_SCRIPT).toContain('alpine:init');
     // It is inlined between script tags, so it must not close one itself.
-    expect(BOARD_SCRIPT).not.toContain('</script>');
+    expect(CLIENT_SCRIPT).not.toContain('</script>');
   });
 });
