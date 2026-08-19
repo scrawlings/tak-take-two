@@ -4,14 +4,26 @@
 
 **Blocked by:** None.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `GameSummary` gains a derived `lastActivity` (from the record's move timestamps or `createdAt`), computed in `summarise` — not stored, so it can never drift.
-- [ ] `listMyGames` accepts a `status` filter and a `sort` key + direction; ordering happens in the module, not the view.
-- [ ] The games page renders the filter/sort controls (selects, consistent with the find form pattern) that re-issue the query via GET params; the stream route runs the same query so the live list matches the controls.
-- [ ] Defaults: no status filter (all), sort by last activity descending.
-- [ ] Tests at the HTTP seam: filter and each sort return the right rows in the right order; `lastActivity` is correct for a not-started game and a game with moves; the stream honours the current params.
+- [x] `GameSummary` gains a derived `lastActivity` (from the record's move timestamps or `createdAt`), computed in `summarise` — not stored, so it can never drift.
+- [x] `listMyGames` accepts a `status` filter and a `sort` key + direction; ordering happens in the module, not the view.
+- [x] The games page renders the filter/sort controls (selects, consistent with the find form pattern) that re-issue the query via GET params; the stream route runs the same query so the live list matches the controls.
+- [x] Defaults: no status filter (all), sort by last activity descending.
+- [x] Tests at the HTTP seam: filter and each sort return the right rows in the right order; `lastActivity` is correct for a not-started game and a game with moves; the stream honours the current params.
 
 ## Comments
 
 **2026-08-19 — Specified in grilling.** Split agreed with the user: "Your games" gets status filter + sorting; "Find a game" gets the allowlist (04) and no status filter (its content is all proposals). Admin games list is out of scope.
+
+**2026-08-19 — Bug noticed alongside the request.** Before grilling further, the user flagged that finished games could not be found or reviewed at all on "Your games": `listMyGames` queried `persistence.listGamesForUser` with a hardcoded `ACTIVE_STATES = ['proposed', 'in_play']`, and separately `gameActions`'s "Open" link only rendered for `state === 'in_play'`. So even the one `finished` row that could ever appear (an admin-removed tombstone, via `listGamesForUser`'s `OR admin_removed = 1` escape hatch) had no way back into its own game screen. This was a real gap, not just a missing filter option, and is fixed as part of this ticket rather than filed separately, since "finished" becoming a real filter choice was the natural place to fix it.
+
+**2026-08-19 — Implemented.** `ACTIVE_STATES` is replaced by `ALL_LIST_STATES = ['proposed', 'in_play', 'finished']` — the default, unfiltered query — with `status` narrowing to one state when given. `lastActivity` is computed in `summarise` from a new batched persistence method, `listLastMoveTimestamps(gameIds)` (one grouped `MAX(played_at) ... GROUP BY game_id` query for the whole list, not one query per game — the lists share a change topic, per ADR-0007, so `listMyGames` can run on every open list stream on any site-wide change, and N+1 there would compound). `sortSummaries` (activity/created/size, asc/desc, id-descending tiebreak) and `parseMyGamesQuery` (validating `status`/`sort`/`direction`, erroring `invalid-status`/`invalid-sort` on a bad value — new `GameErrorCode`s, wired into `statusForGameError`) live in `games.ts`, so ordering and validation stay in the module per the ticket, not the view.
+
+The route layer mirrors `proposalSearch`/`findGamesRegions` exactly: a new `myGamesQuery(c)` reads the three query params once and hands both the parsed `MyGamesQuery` (to the module) and the as-submitted `MyGamesFilters` (to the view) to `/games` and `/games/stream`, so the page and its stream always run the same query — the same "read once, use twice" idiom find already established. `renderMyGamesPage` gained a filter/sort form (three selects: status, sort key, direction) above the streamed table, `method="get" action="/games"`, matching the find form's pattern including a "Clear" link when a status is set.
+
+Fixing the "finished games are unreachable" bug touched two more spots: `gameStatusTag` needed its own `finished` branch (it previously assumed, correctly at the time, that a `finished` row could only mean an admin-removed one), and `gameActions`'s "Open" link condition widened from `state === 'in_play'` to `'in_play' || 'finished'` — a finished game's board and history stay reviewable via ticket 01's review mode, so this is what actually closes the gap the user pointed out, not just the new filter option.
+
+Tests: `games.test.ts` gained a `describe` for the filter/sort/lastActivity behaviour (including the derivation from a real recorded move, not just `createdAt`), and the old `omits finished games` test — which pinned the bug — was rewritten to assert the opposite. `games-http.test.ts` gained an HTTP-seam `describe` (finding and opening a finished game, narrowing by status, rejecting a bad status, sorting by size, the stream URL carrying the same params). One pre-existing test in `stream-http.test.ts` needed its ordering assertion narrowed from a bare `action="/games"` match to `method="post" action="/games"`, since the new filter form also posts (via GET) to `/games`. Full suite green (644 tests), typecheck and lint clean; no client bundle changes (server-only ticket), so nothing to rebuild.
+
+**2026-08-19 — Code review.** Spec found no issues. Standards flagged one hard violation and fixed it: the new filter form defined three near-identical `xSelected` closures instead of reusing the generic `selected(value, option)` pattern `renderFindGamesPage` already had — `selected` is now a shared module-level helper both forms call. Also addressed: `myGamesStreamUrl` and `findStreamUrl` were structurally identical (build a `URLSearchParams` from a few optional fields); both now call a shared `streamUrlWith(base, params)`. Two minor doc nits were also fixed: `MyGamesQuery`'s comment overstated its parallel with `ProposedSearch` (whose `boardSize` is parsed to a number at the route, unlike anything in `MyGamesQuery`), and `parseMyGamesQuery`'s return type is now the named `ParsedMyGamesQuery` rather than an inline anonymous type. Full suite re-verified green after the fixes (644 tests), typecheck and lint clean.

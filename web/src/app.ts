@@ -10,7 +10,7 @@ import type { Logger } from './logging.js';
 import { newRequestId } from './logging.js';
 import { escapeHtml, renderShell, siteCss } from './html.js';
 import { createAuth, type Auth, type AuthError, type SessionUser } from './auth.js';
-import { createGames, type GameError, type Games, type ProposedSearch } from './games.js';
+import { createGames, type GameError, type Games, type MyGamesQuery, type ProposedSearch } from './games.js';
 import { GAMES_TOPIC, announceGameChanges, createUpdates, gameTopic } from './updates.js';
 import {
   createFormAction,
@@ -42,6 +42,7 @@ import {
   type AdminUsersView,
   type FindGamesView,
   type GameViewPageView,
+  type MyGamesFilters,
   type MyGamesView,
   type Regions,
   type SearchFilters,
@@ -288,6 +289,23 @@ export function createApp(deps: AppDeps): App {
     };
   };
 
+  /**
+   * The status filter and sort a request asks for (ticket 03), read once and
+   * used twice: the page and its stream must run the same query and describe
+   * it the same way, exactly as `proposalSearch` does for find.
+   */
+  const myGamesQuery = (
+    c: Context<{ Variables: Variables }>,
+  ): { query: MyGamesQuery; filters: MyGamesFilters } => {
+    const status = query(c, 'status');
+    const sort = query(c, 'sort');
+    const direction = query(c, 'direction');
+    return {
+      query: { status, sort, direction },
+      filters: { status: status ?? null, sort: sort ?? null, direction: direction ?? null },
+    };
+  };
+
   /** What a streamed page needs: a topic to listen on, and how to draw itself. */
   interface StreamSpec<D> {
     /** Named for log lines, as the page adapters are. */
@@ -495,23 +513,30 @@ export function createApp(deps: AppDeps): App {
 
   app.get('/games', requireUser, (c) => {
     const actor = c.get('user');
+    const asked = myGamesQuery(c);
     return pageAction(c, actor, {
       name: 'list games',
-      load: () => games.listMyGames(actor),
-      render: (data) => c.html(renderMyGamesPage(actor, data)),
+      load: () => games.listMyGames(actor, asked.query),
+      render: (data) => c.html(renderMyGamesPage(actor, data, { filters: asked.filters })),
+      // A bad status/sort/direction is the user's to fix: keep the form and say what is wrong.
+      renderError: (e, status) =>
+        c.html(renderMyGamesPage(actor, [], { error: e.message, filters: asked.filters }), status),
+      statusOf: statusForGameError,
     });
   });
 
   // The lists follow one topic: any change anywhere can add a row, remove one,
   // or move whose turn it is (see `GAMES_TOPIC`).
-  app.get('/games/stream', requireUser, (c) =>
-    streamPage(c, {
+  app.get('/games/stream', requireUser, (c) => {
+    const asked = myGamesQuery(c);
+    return streamPage(c, {
       name: 'stream games',
       topic: GAMES_TOPIC,
-      load: (actor) => games.listMyGames(actor),
-      regions: (data) => myGamesRegions(c.get('user'), data),
-    }),
-  );
+      // The same query the page ran, so the stream's answer is the page's.
+      load: (actor) => games.listMyGames(actor, asked.query),
+      regions: (data) => myGamesRegions(c.get('user'), data, asked.filters),
+    });
+  });
 
   app.get('/games/find/stream', requireUser, (c) => {
     const asked = proposalSearch(c);

@@ -485,7 +485,9 @@ describe('the streamed pages', () => {
     const html = await (await app.request('/games', withCookie({}, aoife))).text();
 
     expect(html).toContain('/games/stream');
-    expect(html.indexOf('data-region="games"')).toBeLessThan(html.indexOf('action="/games"'));
+    // The status/sort filter form (ticket 03) also posts to "/games" via GET,
+    // so this pins the propose form specifically — the POST to the same path.
+    expect(html.indexOf('data-region="games"')).toBeLessThan(html.indexOf('method="post" action="/games"'));
   });
 
   it('point the search stream at the filters the page was drawn with', async () => {

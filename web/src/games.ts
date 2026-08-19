@@ -48,8 +48,12 @@ import type { SessionUser } from './auth.js';
  * has no game to address yet. The ADR records the amendment.
  */
 
-/** Lifecycle states a player's own list shows: everything not yet finished. */
-const ACTIVE_STATES: readonly GameLifecycleState[] = ['proposed', 'in_play'];
+/** Every lifecycle state a player's own list can show — the default, unfiltered view (ticket 03). */
+const ALL_LIST_STATES: readonly GameLifecycleState[] = ['proposed', 'in_play', 'finished'];
+
+/** What "Your games" may be sorted by (ticket 03). */
+export type GameListSort = 'activity' | 'created' | 'size';
+const GAME_LIST_SORTS: readonly GameListSort[] = ['activity', 'created', 'size'];
 
 export type GameErrorCode =
   | 'forbidden'
@@ -71,6 +75,8 @@ export type GameErrorCode =
   | 'already-removed'
   | 'invalid-export-format'
   | 'invalid-move-number'
+  | 'invalid-status'
+  | 'invalid-sort'
   /** The stored record no longer parses or replays (ADR-0005); internal, like `persistence`. */
   | 'corrupt-record'
   | 'persistence';
@@ -120,6 +126,12 @@ export interface GameSummary {
   readonly proposerSeat: 1 | 2 | null;
   /** Ticket 13: this game was ended by an admin, not by play or agreement. */
   readonly adminRemoved: boolean;
+  /**
+   * The last played move's timestamp, or `createdAt` for a game with none yet
+   * (ticket 03) — derived here, in `summarise`, from `game_records` at read
+   * time, so it can never drift the way a stored column could.
+   */
+  readonly lastActivity: string;
 }
 
 /** One stone as the board view shows it. */
@@ -217,6 +229,23 @@ export interface ProposedSearch {
   readonly proposerDisplayName?: string;
 }
 
+/**
+ * How a player may narrow and order their own games list (ticket 03). All
+ * optional, and every field a raw string — a route's query params, unparsed,
+ * following the same as-submitted-text idiom `ProposedSearch` does for the
+ * find form (though unlike `ProposedSearch.boardSize`, nothing here is parsed
+ * to a number at the route: `parseMyGamesQuery` alone turns this into the
+ * validated filter the module sorts and filters by).
+ */
+export interface MyGamesQuery {
+  /** `proposed` / `in_play` / `finished`; absent means every state. */
+  readonly status?: string;
+  /** Defaults to `activity`. */
+  readonly sort?: string;
+  /** `asc` or `desc`; defaults to `desc`. */
+  readonly direction?: string;
+}
+
 /** One command per game mutation. The actor is passed to `applyGame`, not embedded here. */
 export type GameCommand =
   | {
@@ -282,8 +311,8 @@ export interface Games {
   applyGame(actor: SessionUser, command: GameCommand): Result<GameCommandResult, GameError>;
   /** The full view of one game, for the game screen. */
   getGame(actor: SessionUser, gameId: number): Result<GameView, GameError>;
-  /** The actor's own proposals and games in play, newest first. */
-  listMyGames(actor: SessionUser): Result<GameSummary[], GameError>;
+  /** The actor's own games, filtered and sorted per `query` (ticket 03); defaults to every state, most recent activity first. */
+  listMyGames(actor: SessionUser, query?: MyGamesQuery): Result<GameSummary[], GameError>;
   /** Proposals the actor could join: open ones, plus invitations to them. */
   searchProposed(actor: SessionUser, search?: ProposedSearch): Result<GameSummary[], GameError>;
   /** Every game on the site, newest first — admin only (ticket 13). */
@@ -1404,6 +1433,7 @@ export function createGames(persistence: Persistence): Games {
     game: GameRecord,
     actor: SessionUser,
     nameOf: (id: number) => Result<PlayerRef, GameError>,
+    lastMoveAt: ReadonlyMap<number, string>,
   ): Result<GameSummary, GameError> {
     const proposer = nameOf(game.proposerId);
     if (proposer.isErr()) return err(proposer.error);
@@ -1453,19 +1483,79 @@ export function createGames(persistence: Persistence): Games {
       toMove,
       result: game.result,
       proposerSeat: game.proposerSeat,
+      lastActivity: lastMoveAt.get(game.id) ?? game.createdAt,
     });
   }
 
-  /** Summarise a batch, sharing one name cache across the whole list. */
+  /** Summarise a batch, sharing one name cache and one last-move-timestamp query across the whole list. */
   function summariseAll(games: readonly GameRecord[], actor: SessionUser): Result<GameSummary[], GameError> {
     const nameOf = nameResolver();
+    const lastMoveAt = persistence.listLastMoveTimestamps(games.map((g) => g.id));
+    if (lastMoveAt.isErr()) return err(persistenceError(lastMoveAt.error));
     const summaries: GameSummary[] = [];
     for (const game of games) {
-      const summary = summarise(game, actor, nameOf);
+      const summary = summarise(game, actor, nameOf, lastMoveAt.value);
       if (summary.isErr()) return err(summary.error);
       summaries.push(summary.value);
     }
     return ok(summaries);
+  }
+
+  /** `listMyGames`'s sort keys (ticket 03), each with a stable id-descending tiebreak. */
+  function sortSummaries(summaries: readonly GameSummary[], sort: GameListSort, direction: 'asc' | 'desc'): GameSummary[] {
+    const key = (g: GameSummary): string | number => {
+      switch (sort) {
+        case 'activity':
+          return g.lastActivity;
+        case 'created':
+          return g.createdAt;
+        case 'size':
+          return g.boardSize;
+      }
+    };
+    const factor = direction === 'asc' ? 1 : -1;
+    return [...summaries].sort((a, b) => {
+      const ka = key(a);
+      const kb = key(b);
+      if (ka < kb) return -factor;
+      if (ka > kb) return factor;
+      return b.id - a.id;
+    });
+  }
+
+  /** `MyGamesQuery`'s raw strings, validated: what `listMyGames` filters and sorts by. */
+  interface ParsedMyGamesQuery {
+    readonly status: GameLifecycleState | null;
+    readonly sort: GameListSort;
+    readonly direction: 'asc' | 'desc';
+  }
+
+  function parseMyGamesQuery(query: MyGamesQuery): Result<ParsedMyGamesQuery, GameError> {
+    let status: GameLifecycleState | null = null;
+    if (query.status !== undefined) {
+      if (!ALL_LIST_STATES.includes(query.status as GameLifecycleState)) {
+        return err({ code: 'invalid-status', message: 'Choose proposed, in play, or finished.' });
+      }
+      status = query.status as GameLifecycleState;
+    }
+
+    let sort: GameListSort = 'activity';
+    if (query.sort !== undefined) {
+      if (!GAME_LIST_SORTS.includes(query.sort as GameListSort)) {
+        return err({ code: 'invalid-sort', message: 'Choose activity, created, or size to sort by.' });
+      }
+      sort = query.sort as GameListSort;
+    }
+
+    let direction: 'asc' | 'desc' = 'desc';
+    if (query.direction !== undefined) {
+      if (query.direction !== 'asc' && query.direction !== 'desc') {
+        return err({ code: 'invalid-sort', message: 'Sort direction must be ascending or descending.' });
+      }
+      direction = query.direction;
+    }
+
+    return ok({ status, sort, direction });
   }
 
   return {
@@ -1508,15 +1598,22 @@ export function createGames(persistence: Persistence): Games {
       return gameView(actor, gameId);
     },
 
-    listMyGames(actor: SessionUser): Result<GameSummary[], GameError> {
+    listMyGames(actor: SessionUser, query: MyGamesQuery = {}): Result<GameSummary[], GameError> {
       // An admin has no games of their own; refusing here keeps the page and the
       // propose command telling the same story.
       const player = requirePlayer(actor);
       if (player.isErr()) return err(player.error);
 
-      const rows = persistence.listGamesForUser(actor.id, ACTIVE_STATES);
+      const filters = parseMyGamesQuery(query);
+      if (filters.isErr()) return err(filters.error);
+
+      const states = filters.value.status === null ? ALL_LIST_STATES : [filters.value.status];
+      const rows = persistence.listGamesForUser(actor.id, states);
       if (rows.isErr()) return err(persistenceError(rows.error));
-      return summariseAll(rows.value, actor);
+
+      const summaries = summariseAll(rows.value, actor);
+      if (summaries.isErr()) return err(summaries.error);
+      return ok(sortSummaries(summaries.value, filters.value.sort, filters.value.direction));
     },
 
     searchProposed(actor: SessionUser, search: ProposedSearch = {}): Result<GameSummary[], GameError> {

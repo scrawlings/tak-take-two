@@ -477,13 +477,125 @@ describe('games: listMyGames', () => {
     expect(h.games.listMyGames(h.root)._unsafeUnwrapErr().code).toBe('forbidden');
   });
 
-  it('omits finished games', () => {
+  it('includes finished games by default — ticket 03 fixes the gap where a finished game had no way back into the list', () => {
     const h = harness();
     const r = h.games.applyGame(h.aoife, { type: 'propose', boardSize: 5, joinType: 'open' });
     const { gameId } = r._unsafeUnwrap() as { gameId: number };
     h.db.prepare("UPDATE games SET state = 'finished' WHERE id = ?").run(gameId);
 
-    expect(h.games.listMyGames(h.aoife)._unsafeUnwrap()).toEqual([]);
+    const mine = h.games.listMyGames(h.aoife)._unsafeUnwrap();
+    expect(mine).toHaveLength(1);
+    expect(mine[0]).toMatchObject({ id: gameId, state: 'finished' });
+  });
+});
+
+describe('games: listMyGames status filter and sorting (ticket 03)', () => {
+  it('narrows to one status when asked', () => {
+    const h = harness();
+    const proposed = h.games.applyGame(h.aoife, { type: 'propose', boardSize: 5, joinType: 'open' })._unsafeUnwrap() as {
+      gameId: number;
+    };
+    const finished = h.games.applyGame(h.aoife, { type: 'propose', boardSize: 5, joinType: 'open' })._unsafeUnwrap() as {
+      gameId: number;
+    };
+    h.db.prepare("UPDATE games SET state = 'finished' WHERE id = ?").run(finished.gameId);
+
+    const onlyProposed = h.games.listMyGames(h.aoife, { status: 'proposed' })._unsafeUnwrap();
+    expect(onlyProposed.map((g) => g.id)).toEqual([proposed.gameId]);
+
+    const onlyFinished = h.games.listMyGames(h.aoife, { status: 'finished' })._unsafeUnwrap();
+    expect(onlyFinished.map((g) => g.id)).toEqual([finished.gameId]);
+  });
+
+  it('refuses a status that is not one of the three lifecycle states', () => {
+    const h = harness();
+    expect(h.games.listMyGames(h.aoife, { status: 'archived' })._unsafeUnwrapErr().code).toBe('invalid-status');
+  });
+
+  it('refuses an unknown sort key or direction', () => {
+    const h = harness();
+    expect(h.games.listMyGames(h.aoife, { sort: 'popularity' })._unsafeUnwrapErr().code).toBe('invalid-sort');
+    expect(h.games.listMyGames(h.aoife, { direction: 'sideways' })._unsafeUnwrapErr().code).toBe('invalid-sort');
+  });
+
+  it('sorts by last activity, newest first, by default', () => {
+    const h = harness();
+    const older = h.games.applyGame(h.aoife, { type: 'propose', boardSize: 5, joinType: 'open' })._unsafeUnwrap() as {
+      gameId: number;
+    };
+    const newer = h.games.applyGame(h.aoife, { type: 'propose', boardSize: 5, joinType: 'open' })._unsafeUnwrap() as {
+      gameId: number;
+    };
+    h.db.prepare('UPDATE games SET created_at = ? WHERE id = ?').run('2020-01-01T00:00:00.000Z', older.gameId);
+    h.db.prepare('UPDATE games SET created_at = ? WHERE id = ?').run('2020-06-01T00:00:00.000Z', newer.gameId);
+
+    const mine = h.games.listMyGames(h.aoife)._unsafeUnwrap();
+    expect(mine.map((g) => g.id)).toEqual([newer.gameId, older.gameId]);
+  });
+
+  it('derives last activity from the last move, not creation, once a game has moves', () => {
+    const h = harness();
+    const opponentOf = (gameId: number): void => {
+      h.db.prepare("UPDATE games SET opponent_id = ?, state = 'in_play' WHERE id = ?").run(h.takashi.id, gameId);
+    };
+    const stale = h.games.applyGame(h.aoife, { type: 'propose', boardSize: 5, joinType: 'open' })._unsafeUnwrap() as {
+      gameId: number;
+    };
+    const active = h.games.applyGame(h.aoife, { type: 'propose', boardSize: 5, joinType: 'open' })._unsafeUnwrap() as {
+      gameId: number;
+    };
+    opponentOf(stale.gameId);
+    opponentOf(active.gameId);
+    // Both created at the same moment; only `active` gets a move, well after.
+    h.db.prepare('UPDATE games SET created_at = ? WHERE id IN (?, ?)').run(
+      '2020-01-01T00:00:00.000Z',
+      stale.gameId,
+      active.gameId,
+    );
+    h.games.applyGame(h.aoife, { type: 'playMove', gameId: active.gameId, move: 'a1' });
+    h.db.prepare('UPDATE game_records SET played_at = ? WHERE game_id = ?').run(
+      '2024-01-01T00:00:00.000Z',
+      active.gameId,
+    );
+
+    const mine = h.games.listMyGames(h.aoife)._unsafeUnwrap();
+    const activeSummary = mine.find((g) => g.id === active.gameId)!;
+    const staleSummary = mine.find((g) => g.id === stale.gameId)!;
+    expect(activeSummary.lastActivity).toBe('2024-01-01T00:00:00.000Z');
+    expect(staleSummary.lastActivity).toBe('2020-01-01T00:00:00.000Z'); // no moves: falls back to createdAt
+    // The moved-on game surfaces first under the default activity sort.
+    expect(mine.map((g) => g.id)).toEqual([active.gameId, stale.gameId]);
+  });
+
+  it('sorts by creation date', () => {
+    const h = harness();
+    const older = h.games.applyGame(h.aoife, { type: 'propose', boardSize: 6, joinType: 'open' })._unsafeUnwrap() as {
+      gameId: number;
+    };
+    const newer = h.games.applyGame(h.aoife, { type: 'propose', boardSize: 5, joinType: 'open' })._unsafeUnwrap() as {
+      gameId: number;
+    };
+    h.db.prepare('UPDATE games SET created_at = ? WHERE id = ?').run('2020-01-01T00:00:00.000Z', older.gameId);
+    h.db.prepare('UPDATE games SET created_at = ? WHERE id = ?').run('2020-06-01T00:00:00.000Z', newer.gameId);
+
+    const mine = h.games.listMyGames(h.aoife, { sort: 'created' })._unsafeUnwrap();
+    expect(mine.map((g) => g.id)).toEqual([newer.gameId, older.gameId]);
+  });
+
+  it('sorts by board size, and a direction of "asc" reverses it', () => {
+    const h = harness();
+    const small = h.games.applyGame(h.aoife, { type: 'propose', boardSize: 5, joinType: 'open' })._unsafeUnwrap() as {
+      gameId: number;
+    };
+    const large = h.games.applyGame(h.aoife, { type: 'propose', boardSize: 6, joinType: 'open' })._unsafeUnwrap() as {
+      gameId: number;
+    };
+
+    const descending = h.games.listMyGames(h.aoife, { sort: 'size' })._unsafeUnwrap();
+    expect(descending.map((g) => g.id)).toEqual([large.gameId, small.gameId]);
+
+    const ascending = h.games.listMyGames(h.aoife, { sort: 'size', direction: 'asc' })._unsafeUnwrap();
+    expect(ascending.map((g) => g.id)).toEqual([small.gameId, large.gameId]);
   });
 
   it('names the invited player and marks an imported game', () => {

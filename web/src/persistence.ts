@@ -234,6 +234,12 @@ export interface Persistence {
   appendMove(input: AppendMoveInput): Result<MoveRecord, string>;
   /** The played moves of a game, in play order (imported history is not here). */
   listMoves(gameId: number): Result<MoveRecord[], string>;
+  /**
+   * The latest move's timestamp for each of `gameIds` that has one played move
+   * or more — one grouped query rather than one per game, for `lastActivity`
+   * (ticket 03), which the Game module derives without a stored column.
+   */
+  listLastMoveTimestamps(gameIds: readonly number[]): Result<ReadonlyMap<number, string>, string>;
   /** Mark a game finished with its PTN result code and a timestamp. */
   finishGame(gameId: number, result: string): Result<void, string>;
   /** Write the derived game-stats row at finish. */
@@ -628,6 +634,22 @@ export function createPersistence(db: Db): Persistence {
           .prepare('SELECT * FROM game_records WHERE game_id = ? ORDER BY move_number')
           .all(gameId) as MoveRow[];
         return ok(rows.map(mapMove));
+      } catch (e) {
+        return err(e instanceof Error ? e.message : String(e));
+      }
+    },
+
+    listLastMoveTimestamps(gameIds: readonly number[]): Result<ReadonlyMap<number, string>, string> {
+      if (gameIds.length === 0) return ok(new Map());
+      try {
+        const placeholders = gameIds.map(() => '?').join(', ');
+        const rows = db
+          .prepare(
+            `SELECT game_id, MAX(played_at) AS last_played_at FROM game_records
+             WHERE game_id IN (${placeholders}) GROUP BY game_id`,
+          )
+          .all(...gameIds) as { game_id: number; last_played_at: string }[];
+        return ok(new Map(rows.map((row) => [row.game_id, row.last_played_at])));
       } catch (e) {
         return err(e instanceof Error ? e.message : String(e));
       }

@@ -331,8 +331,21 @@ ${notice}
   return renderShell('Games', body, { user: actor, path: '/admin/games' });
 }
 
+/**
+ * The status filter and sort as submitted, kept as text so the form and the
+ * stream URL come back the way they were left (ticket 03) — the same
+ * as-submitted-text idiom `SearchFilters` follows for the find form.
+ */
+export interface MyGamesFilters {
+  status?: string | null;
+  sort?: string | null;
+  direction?: string | null;
+}
+
 export interface MyGamesView {
   error?: string;
+  /** The filter/sort controls as submitted, so the form and the list stream match. */
+  filters?: MyGamesFilters;
   /** Values to put back in the propose form when it comes back with an error. */
   submitted?: {
     boardSize?: string | null;
@@ -344,11 +357,13 @@ export interface MyGamesView {
 }
 
 function gameStatusTag(game: GameSummary): string {
-  // listMyGames only ever returns 'finished' rows that are admin-removed
-  // (ACTIVE_STATES excludes 'finished' otherwise), so that is the only
-  // 'finished' case this ever needs to render.
   if (game.adminRemoved) return '<span class="tag tag-flag">removed by an admin</span>';
   if (game.state === 'in_play') return '<span class="tag">in play</span>';
+  // Ticket 03: `listMyGames` now returns finished games too (not only
+  // admin-removed ones), so this needs its own branch, not just the two above.
+  if (game.state === 'finished') {
+    return `<span class="tag">finished${game.result === null ? '' : ` · ${escapeHtml(game.result)}`}</span>`;
+  }
   const kind = game.joinType === 'open' ? 'open' : 'invited';
   return `<span class="tag">proposed · ${kind}</span>`;
 }
@@ -392,19 +407,32 @@ function gameActions(game: GameSummary, from: GameListPage): string {
     game.canDelete
       ? `<form method="post" action="/games/${game.id}/delete"><button type="submit" class="btn btn-danger btn-sm">Delete</button></form>`
       : '',
-    game.state === 'in_play'
+    // A finished game still opens: the board and history stay reviewable
+    // (ticket 01's review mode covers finished games), and this was the row's
+    // only way in — the previous `in_play`-only condition left a filtered-in
+    // finished game with no actions at all.
+    game.state === 'in_play' || game.state === 'finished'
       ? `<a class="btn btn-sm" href="/games/${game.id}">Open</a>`
       : '',
   ].filter(Boolean);
   return `<div class="row-actions">${buttons.join('')}</div>`;
 }
 
-/** The player's own games as the list draws them — the one streamed region. */
-export function myGamesRegions(user: SessionUser, games: readonly GameSummary[]): Regions<'games'> {
-  return { games: myGamesTable(user, games) };
+/** Whether the list was narrowed by status (ticket 03) — sort/direction reorder, they never shrink the set. */
+export function isMyGamesFiltered(filters: MyGamesFilters): boolean {
+  return Boolean(filters.status);
 }
 
-function myGamesTable(user: SessionUser, games: readonly GameSummary[]): string {
+/** The player's own games as the list draws them — the one streamed region. */
+export function myGamesRegions(
+  user: SessionUser,
+  games: readonly GameSummary[],
+  filters: MyGamesFilters = {},
+): Regions<'games'> {
+  return { games: myGamesTable(user, games, filters) };
+}
+
+function myGamesTable(user: SessionUser, games: readonly GameSummary[], filters: MyGamesFilters = {}): string {
   const rows = games
     .map(
       (game) => `<tr>
@@ -420,7 +448,11 @@ function myGamesTable(user: SessionUser, games: readonly GameSummary[]): string 
 
   const table =
     games.length === 0
-      ? `<p class="lede">No games yet. Propose one below and it will appear here.</p>`
+      ? `<p class="lede">${
+          isMyGamesFiltered(filters)
+            ? 'No games match that status.'
+            : 'No games yet. Propose one below and it will appear here.'
+        }</p>`
       : `<div class="table-scroll">
     <table class="data">
       <thead><tr><th>Board</th><th>State</th><th>Opponent</th><th>To move</th><th>Started from</th><th>Actions</th></tr></thead>
@@ -430,6 +462,11 @@ function myGamesTable(user: SessionUser, games: readonly GameSummary[]): string 
   return table;
 }
 
+/** The stream that watches this list: the same filter/sort, so the same answer (ticket 03). */
+function myGamesStreamUrl(filters: MyGamesFilters): string {
+  return streamUrlWith('/games/stream', { status: filters.status, sort: filters.sort, direction: filters.direction });
+}
+
 export function renderMyGamesPage(
   user: SessionUser,
   games: readonly GameSummary[],
@@ -437,19 +474,54 @@ export function renderMyGamesPage(
 ): string {
   const error = view.error ? `<p class="error">${escapeHtml(view.error)}</p>` : '';
   const submitted = view.submitted ?? {};
+  const filters = view.filters ?? {};
   const sizeSelected = (size: string): string => (submitted.boardSize === size ? ' selected' : '');
   const joinSelected = (kind: string): string => (submitted.joinType === kind ? ' selected' : '');
   const starterSelected = (value: string): string => (submitted.starter === value ? ' selected' : '');
+  const sortFilter = filters.sort ?? 'activity';
+  const directionFilter = filters.direction ?? 'desc';
 
   // Only the table streams: the propose form below holds what the player has
   // typed, and a stream that replaced it would throw their draft away.
-  const list = streamed('/games/stream', region('games', myGamesTable(user, games)));
+  const list = streamed(myGamesStreamUrl(filters), region('games', myGamesTable(user, games, filters)));
 
   const body = `
 <h1>Your games</h1>
 ${error}
 <div class="block">
   <h2>In progress</h2>
+  <form class="panel" method="get" action="/games">
+    <div class="field-grid">
+      <div class="field">
+        <label for="status">Status</label>
+        <select id="status" name="status">
+          <option value=""${selected(filters.status, '')}>any</option>
+          <option value="proposed"${selected(filters.status, 'proposed')}>proposed</option>
+          <option value="in_play"${selected(filters.status, 'in_play')}>in play</option>
+          <option value="finished"${selected(filters.status, 'finished')}>finished</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="sort">Sort by</label>
+        <select id="sort" name="sort">
+          <option value="activity"${selected(sortFilter, 'activity')}>last activity</option>
+          <option value="created"${selected(sortFilter, 'created')}>creation date</option>
+          <option value="size"${selected(sortFilter, 'size')}>board size</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="direction">Order</label>
+        <select id="direction" name="direction">
+          <option value="desc"${selected(directionFilter, 'desc')}>descending (newest/largest first)</option>
+          <option value="asc"${selected(directionFilter, 'asc')}>ascending (oldest/smallest first)</option>
+        </select>
+      </div>
+    </div>
+    <p class="actions">
+      <button type="submit" class="btn">Apply</button>
+      ${isMyGamesFiltered(filters) ? '<a class="btn btn-quiet" href="/games">Clear</a>' : ''}
+    </p>
+  </form>
   ${list}
 </div>
 <div class="block">
@@ -582,14 +654,32 @@ function findGamesResults(
   return results;
 }
 
+/** Whether `option` is the one a `<select>`'s current value names — shared by every filter/sort form. */
+function selected(value: string | null | undefined, option: string): string {
+  return value === option ? ' selected' : '';
+}
+
+/**
+ * A streamed list's URL, carrying whatever of `params` is set — the same
+ * query the page was drawn with, so the stream's answer is the page's.
+ * Shared by `findStreamUrl` and `myGamesStreamUrl`.
+ */
+function streamUrlWith(base: string, params: Readonly<Record<string, string | null | undefined>>): string {
+  const query = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value) query.set(key, value);
+  }
+  const search = query.toString();
+  return search === '' ? base : `${base}?${search}`;
+}
+
 /** The stream that watches this search: the same filters, so the same answer. */
 function findStreamUrl(filters: SearchFilters): string {
-  const query = new URLSearchParams();
-  if (filters.boardSize) query.set('board_size', filters.boardSize);
-  if (filters.joinType) query.set('join_type', filters.joinType);
-  if (filters.proposerDisplayName) query.set('proposer', filters.proposerDisplayName);
-  const search = query.toString();
-  return search === '' ? '/games/find/stream' : `/games/find/stream?${search}`;
+  return streamUrlWith('/games/find/stream', {
+    board_size: filters.boardSize,
+    join_type: filters.joinType,
+    proposer: filters.proposerDisplayName,
+  });
 }
 
 export function renderFindGamesPage(
@@ -600,8 +690,6 @@ export function renderFindGamesPage(
   const error = view.error ? `<p class="error">${escapeHtml(view.error)}</p>` : '';
   const filters = view.filters ?? {};
   const filtered = isFiltered(filters);
-  const selected = (value: string | null | undefined, option: string): string =>
-    value === option ? ' selected' : '';
 
   // Only the results stream: the filter form above holds what the player typed.
   const results = streamed(findStreamUrl(filters), region('games', findGamesResults(user, games, filters)));

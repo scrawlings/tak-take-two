@@ -196,6 +196,8 @@ export function statusForGameError(error: GameError): ContentfulStatusCode {
     case 'invalid-move':
     case 'invalid-export-format':
     case 'invalid-move-number':
+    case 'invalid-status':
+    case 'invalid-sort':
       return 400;
     // The request was well formed; the game had moved on.
     case 'already-joined':

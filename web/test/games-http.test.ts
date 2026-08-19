@@ -105,6 +105,63 @@ describe('GET /games', () => {
   });
 });
 
+describe('status filter and sorting on "Your games" (ticket 03)', () => {
+  it('finds a finished game — the gap where a finished game had no way back into the list', async () => {
+    const { app, db, session } = await playerApp();
+    await app.request('/games', withCookie(form({ board_size: '5', join_type: 'open' }), session));
+    db.prepare("UPDATE games SET state = 'finished' WHERE id = 1").run();
+
+    const html = await (await app.request('/games', withCookie({}, session))).text();
+
+    expect(html).toContain('finished');
+    expect(html).toContain(`href="/games/1"`); // reachable to review, not just listed
+  });
+
+  it('narrows the list to one status via the query param', async () => {
+    const { app, db, session } = await playerApp();
+    await app.request('/games', withCookie(form({ board_size: '5', join_type: 'open' }), session));
+    await app.request('/games', withCookie(form({ board_size: '6', join_type: 'open' }), session));
+    db.prepare("UPDATE games SET state = 'finished' WHERE id = 1").run();
+
+    const html = await (await app.request('/games?status=finished', withCookie({}, session))).text();
+
+    // The propose form's board-size select always offers "6×6" as an option,
+    // so this pins the table cell specifically, not the bare text.
+    expect(html).toContain('<td class="num">5×5</td>');
+    expect(html).not.toContain('<td class="num">6×6</td>');
+  });
+
+  it('rejects an unrecognised status with the form kept and the error shown', async () => {
+    const { app, session } = await playerApp();
+
+    const res = await app.request('/games?status=archived', withCookie({}, session));
+
+    expect(res.status).toBe(400);
+    const html = await res.text();
+    expect(html).toContain('proposed, in play, or finished');
+    expect(html).toContain('name="status"');
+  });
+
+  it('sorts by board size when asked', async () => {
+    const { app, session } = await playerApp();
+    await app.request('/games', withCookie(form({ board_size: '5', join_type: 'open' }), session));
+    await app.request('/games', withCookie(form({ board_size: '6', join_type: 'open' }), session));
+
+    const html = await (await app.request('/games?sort=size&direction=asc', withCookie({}, session))).text();
+
+    expect(html.indexOf('5×5')).toBeLessThan(html.indexOf('6×6'));
+  });
+
+  it('points the games stream at the same status and sort the page was drawn with', async () => {
+    const { app, session } = await playerApp();
+
+    const html = await (await app.request('/games?status=proposed&sort=created', withCookie({}, session))).text();
+
+    // The URL rides inside an HTML attribute, so "&" comes back entity-escaped.
+    expect(html).toContain('/games/stream?status=proposed&amp;sort=created');
+  });
+});
+
 describe('POST /games', () => {
   it('proposes a game and redirects back to the list', async () => {
     const { app, db, session } = await playerApp();
