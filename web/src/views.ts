@@ -415,6 +415,14 @@ function gameActions(game: GameSummary, from: GameListPage, extra = ''): string 
     game.state === 'in_play' || game.state === 'finished'
       ? `<a class="btn btn-sm" href="/games/${game.id}">Open</a>`
       : '',
+    // Ticket 05: hide from the row, without opening the game. Restricted to
+    // `games` deliberately, not just by `canHide` happening to be false on
+    // find: the viewer's own open proposal can appear there too (joinable by
+    // themselves for self-play), and `canHide` is already true for it then —
+    // hide belongs to "your games", not to a page for finding one to join.
+    from === 'games' && game.canHide
+      ? `<form method="post" action="/games/${game.id}/hide"><input type="hidden" name="from" value="${from}"><button type="submit" class="btn btn-quiet btn-sm">Hide</button></form>`
+      : '',
     extra,
   ].filter(Boolean);
   return `<div class="row-actions">${buttons.join('')}</div>`;
@@ -1139,7 +1147,10 @@ function renderGameManagement(game: GameView): string {
   }
   if (game.canHide) {
     parts.push(
-      `<form method="post" action="/games/${game.id}/hide"><button type="submit" class="btn btn-quiet btn-sm">Hide from my games</button></form>`,
+      // `from=game` (ticket 05) routes a refusal back to this page rather than
+      // the games list — the same "where did the click come from" idiom the
+      // list row's hide button and the join button share.
+      `<form method="post" action="/games/${game.id}/hide"><input type="hidden" name="from" value="game"><button type="submit" class="btn btn-quiet btn-sm">Hide from my games</button></form>`,
     );
   }
   if (game.canAdminDelete) {

@@ -1121,6 +1121,30 @@ describe('sharing, hiding, and admin removal at the game screen', () => {
     expect((await app.request('/games/1', withCookie({}, aoife))).status).toBe(404);
   });
 
+  it('offers a hide button on the "Your games" row, and hiding from it redirects back to the list (ticket 05)', async () => {
+    const { app, aoife } = await inPlayGame();
+
+    const list = await (await app.request('/games', withCookie({}, aoife))).text();
+    expect(list).toContain('/games/1/hide');
+    expect(list).toContain('name="from" value="games"');
+
+    const res = await app.request('/games/1/hide', withCookie(form({ from: 'games' }), aoife));
+
+    expect(res.status).toBe(303);
+    expect(res.headers.get('location')).toBe('/games');
+    expect(await (await app.request('/games', withCookie({}, aoife))).text()).toContain('No games yet');
+  });
+
+  it('refuses to hide a game the viewer is not part of', async () => {
+    const { app, db } = await inPlayGame();
+    await insertUser(db, { id: 3, username: 'stranger', password: 'pw' });
+    const stranger = await signIn(app, 'stranger', 'pw');
+
+    const res = await app.request('/games/1/hide', withCookie(form({ from: 'games' }), stranger));
+
+    expect(res.status).toBe(403);
+  });
+
   it('lets an admin remove any game, leaving a warning for the players', async () => {
     const { app, db, aoife } = await inPlayGame();
     await insertUser(db, { id: 3, username: 'root', password: 'pw', role: 'admin' });

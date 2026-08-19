@@ -137,6 +137,8 @@ export interface GameSummary {
   readonly followed: boolean;
   /** Whether a follow/unfollow button makes sense here — never true for the viewer's own proposal. */
   readonly canFollow: boolean;
+  /** The viewer is a participant and may hide this game from their own views (ticket 05), same rule as `GameView.canHide`. */
+  readonly canHide: boolean;
 }
 
 /** One stone as the board view shows it. */
@@ -1553,6 +1555,7 @@ export function createGames(persistence: Persistence): Games {
       lastActivity: lastMoveAt.get(game.id) ?? game.createdAt,
       followed: follows.has(game.proposerId),
       canFollow: game.proposerId !== actor.id,
+      canHide: sidesOf(game, actor.id).length > 0,
     });
   }
 

@@ -451,6 +451,8 @@ describe('games: listMyGames', () => {
       opponent: null,
       imported: false,
       canDelete: true,
+      // Ticket 05: a participant may hide any of their own games from the list.
+      canHide: true,
     });
   });
 

@@ -269,6 +269,18 @@ export function createApp(deps: AppDeps): App {
   };
 
   /**
+   * A refused hide (ticket 05) is reported back wherever the button was: the
+   * game page's own hide button stays on the game page, the list row's stays
+   * on the list — the same "where did the click come from" idiom as
+   * `gameJoinError`, just with a two-way split instead of a three-way one.
+   */
+  const gameHideError = (
+    c: Context<{ Variables: Variables }>,
+    error: GameError,
+    from: string | null | undefined,
+  ): Response => (from === 'game' ? gameViewError(c, error) : myGamesError(c, error));
+
+  /**
    * A refused follow/unfollow (ticket 04) is reported back on the find page,
    * re-run with the same search the form carried in its hidden fields — the
    * same "reload with what was submitted" shape `myGamesError` follows.
@@ -841,13 +853,15 @@ export function createApp(deps: AppDeps): App {
   }));
 
   app.post('/games/:id/hide', requireUser, formAction({
-    fields: [],
+    fields: ['from'],
     run: (c) =>
       paramId(c, 'id', 'That game no longer exists.').andThen((id) =>
         games.applyGame(c.get('user'), { type: 'hide', gameId: id }),
       ),
+    // Hiding always leaves the game behind, so success always lands on the
+    // list (ticket 05) — `from` only decides where a refusal is shown.
     onOk: (c) => c.redirect('/games', 303),
-    renderError: (c, e) => myGamesError(c, e),
+    renderError: (c, e, f) => gameHideError(c, e, f.from),
   }));
 
   app.post('/games/:id/admin-delete', requireUser, formAction({
