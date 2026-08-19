@@ -261,6 +261,20 @@ describe('persistence', () => {
       expect(p.listGamesForUser(1, [])._unsafeUnwrap()).toEqual([]);
     });
 
+    it('omits an admin-removed game unless showRemoved is set (ticket 06)', () => {
+      const db = makeDb();
+      insertUser(db, 1, 'aoife');
+      const p = createPersistence(db);
+      const game = p.createGame(openGame(1))._unsafeUnwrap();
+      db.prepare("UPDATE games SET state = 'finished', admin_removed = 1 WHERE id = ?").run(game.id);
+
+      expect(p.listGamesForUser(1, ['proposed', 'in_play', 'finished'])._unsafeUnwrap()).toEqual([]);
+      // Removal always sets state to 'finished', so this is the case that
+      // matters: showRemoved surfaces it even under a narrower status filter.
+      const shown = p.listGamesForUser(1, ['proposed'], true)._unsafeUnwrap();
+      expect(shown.map((g) => g.id)).toEqual([game.id]);
+    });
+
     it('fails when the database is closed', () => {
       const db = makeDb();
       insertUser(db, 1, 'aoife');

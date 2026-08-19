@@ -253,6 +253,8 @@ export interface MyGamesQuery {
   readonly sort?: string;
   /** `asc` or `desc`; defaults to `desc`. */
   readonly direction?: string;
+  /** Ticket 06: include admin-removed tombstones; defaults to false (hidden). */
+  readonly showRemoved?: boolean;
 }
 
 /** One command per game mutation. The actor is passed to `applyGame`, not embedded here. */
@@ -323,7 +325,11 @@ export interface Games {
   applyGame(actor: SessionUser, command: GameCommand): Result<GameCommandResult, GameError>;
   /** The full view of one game, for the game screen. */
   getGame(actor: SessionUser, gameId: number): Result<GameView, GameError>;
-  /** The actor's own games, filtered and sorted per `query` (ticket 03); defaults to every state, most recent activity first. */
+  /**
+   * The actor's own games, filtered and sorted per `query` (ticket 03);
+   * defaults to every state, most recent activity first, and admin-removed
+   * tombstones hidden unless `query.showRemoved` (ticket 06).
+   */
   listMyGames(actor: SessionUser, query?: MyGamesQuery): Result<GameSummary[], GameError>;
   /** Proposals the actor could join: open ones, plus invitations to them. */
   searchProposed(actor: SessionUser, search?: ProposedSearch): Result<GameSummary[], GameError>;
@@ -1603,6 +1609,7 @@ export function createGames(persistence: Persistence): Games {
     readonly status: GameLifecycleState | null;
     readonly sort: GameListSort;
     readonly direction: 'asc' | 'desc';
+    readonly showRemoved: boolean;
   }
 
   function parseMyGamesQuery(query: MyGamesQuery): Result<ParsedMyGamesQuery, GameError> {
@@ -1630,7 +1637,7 @@ export function createGames(persistence: Persistence): Games {
       direction = query.direction;
     }
 
-    return ok({ status, sort, direction });
+    return ok({ status, sort, direction, showRemoved: query.showRemoved ?? false });
   }
 
   return {
@@ -1687,7 +1694,7 @@ export function createGames(persistence: Persistence): Games {
       if (filters.isErr()) return err(filters.error);
 
       const states = filters.value.status === null ? ALL_LIST_STATES : [filters.value.status];
-      const rows = persistence.listGamesForUser(actor.id, states);
+      const rows = persistence.listGamesForUser(actor.id, states, filters.value.showRemoved);
       if (rows.isErr()) return err(persistenceError(rows.error));
 
       const summaries = summariseAll(rows.value, actor);

@@ -214,9 +214,15 @@ export interface Persistence {
   deleteGame(id: number): Result<void, string>;
   /**
    * Games the user takes part in — as proposer or opponent — in any of
-   * `states`, newest first.
+   * `states`, newest first. `showRemoved` (ticket 06) includes admin-removed
+   * tombstones regardless of `states`, matching the pre-ticket-06 behaviour;
+   * defaults to false, which excludes them outright.
    */
-  listGamesForUser(userId: number, states: readonly GameLifecycleState[]): Result<GameRecord[], string>;
+  listGamesForUser(
+    userId: number,
+    states: readonly GameLifecycleState[],
+    showRemoved?: boolean,
+  ): Result<GameRecord[], string>;
   /** Every game still `proposed` and unjoined, newest first, narrowed by `filters`. */
   listProposedGames(filters: ProposedGameFilters): Result<GameRecord[], string>;
   /**
@@ -503,7 +509,11 @@ export function createPersistence(db: Db): Persistence {
       }
     },
 
-    listGamesForUser(userId: number, states: readonly GameLifecycleState[]): Result<GameRecord[], string> {
+    listGamesForUser(
+      userId: number,
+      states: readonly GameLifecycleState[],
+      showRemoved = false,
+    ): Result<GameRecord[], string> {
       if (states.length === 0) return ok([]);
       try {
         const placeholders = states.map(() => '?').join(', ');
@@ -512,10 +522,11 @@ export function createPersistence(db: Db): Persistence {
             `SELECT * FROM games
              WHERE (proposer_id = ? OR opponent_id = ?)
                AND (state IN (${placeholders}) OR admin_removed = 1)
+               AND (admin_removed = 0 OR ?)
                AND NOT ((proposer_id = ? AND proposer_hidden = 1) OR (opponent_id = ? AND opponent_hidden = 1))
              ORDER BY created_at DESC, id DESC`,
           )
-          .all(userId, userId, ...states, userId, userId) as GameRow[];
+          .all(userId, userId, ...states, showRemoved ? 1 : 0, userId, userId) as GameRow[];
         return ok(rows.map(mapGame));
       } catch (e) {
         return err(e instanceof Error ? e.message : String(e));

@@ -367,9 +367,12 @@ export function createApp(deps: AppDeps): App {
     const status = query(c, 'status');
     const sort = query(c, 'sort');
     const direction = query(c, 'direction');
+    // Presence-based, like `curated` on the find form (ticket 04): a checkbox
+    // submits its value only when checked.
+    const showRemoved = query(c, 'show_removed') !== undefined;
     return {
-      query: { status, sort, direction },
-      filters: { status: status ?? null, sort: sort ?? null, direction: direction ?? null },
+      query: { status, sort, direction, showRemoved },
+      filters: { status: status ?? null, sort: sort ?? null, direction: direction ?? null, showRemoved },
     };
   };
 

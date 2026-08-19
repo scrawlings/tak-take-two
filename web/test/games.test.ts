@@ -620,6 +620,44 @@ describe('games: listMyGames status filter and sorting (ticket 03)', () => {
   });
 });
 
+describe('games: listMyGames removed games visibility (ticket 06)', () => {
+  function removed(h: Harness): number {
+    const r = h.games.applyGame(h.aoife, { type: 'propose', boardSize: 5, joinType: 'open' });
+    const gameId = (r._unsafeUnwrap() as { gameId: number }).gameId;
+    h.games.applyGame(h.takashi, { type: 'join', gameId });
+    h.games.applyGame(h.root, { type: 'adminDelete', gameId });
+    return gameId;
+  }
+
+  it('omits an admin-removed game by default', () => {
+    const h = harness();
+    removed(h);
+
+    expect(h.games.listMyGames(h.aoife)._unsafeUnwrap()).toEqual([]);
+  });
+
+  it('includes it once showRemoved is set, regardless of the status filter', () => {
+    const h = harness();
+    const gameId = removed(h);
+
+    const all = h.games.listMyGames(h.aoife, { showRemoved: true })._unsafeUnwrap();
+    expect(all.map((g) => g.id)).toEqual([gameId]);
+
+    // Admin removal always sets state to 'finished', so this is the
+    // meaningful case: asking for a different status still surfaces it.
+    const proposedOnly = h.games.listMyGames(h.aoife, { status: 'proposed', showRemoved: true })._unsafeUnwrap();
+    expect(proposedOnly.map((g) => g.id)).toEqual([gameId]);
+  });
+
+  it('does not hide a non-removed game of the requested status', () => {
+    const h = harness();
+    h.games.applyGame(h.aoife, { type: 'propose', boardSize: 5, joinType: 'open' });
+
+    expect(h.games.listMyGames(h.aoife)._unsafeUnwrap()).toHaveLength(1);
+    expect(h.games.listMyGames(h.aoife, { showRemoved: true })._unsafeUnwrap()).toHaveLength(1);
+  });
+});
+
 describe('games: join', () => {
   function propose(
     h: Harness,
@@ -1850,8 +1888,13 @@ describe('games: admin delete and view', () => {
       'not-in-play',
     );
 
-    // Affected players still see it, marked, in their own list and view.
-    const summary = h.games.listMyGames(h.aoife)._unsafeUnwrap().find((g) => g.id === gameId);
+    // Hidden from the default list (ticket 06), but still reachable with the
+    // toggle on, and marked, in the list and the view.
+    expect(h.games.listMyGames(h.aoife)._unsafeUnwrap().find((g) => g.id === gameId)).toBeUndefined();
+    const summary = h.games
+      .listMyGames(h.aoife, { showRemoved: true })
+      ._unsafeUnwrap()
+      .find((g) => g.id === gameId);
     expect(summary?.adminRemoved).toBe(true);
     expect(h.games.getGame(h.aoife, gameId)._unsafeUnwrap().adminRemoved).toBe(true);
   });

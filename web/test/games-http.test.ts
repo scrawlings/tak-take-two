@@ -1160,8 +1160,12 @@ describe('sharing, hiding, and admin removal at the game screen', () => {
 
     const playerView = await (await app.request('/games/1', withCookie({}, aoife))).text();
     expect(playerView).toContain('This game was removed by an admin');
+    // Ticket 06: removed games are hidden from the list by default, but the
+    // tombstone page (asserted above) stays reachable regardless.
     const list = await (await app.request('/games', withCookie({}, aoife))).text();
-    expect(list).toContain('removed by an admin');
+    expect(list).not.toContain('removed by an admin');
+    const shown = await (await app.request('/games?show_removed=1', withCookie({}, aoife))).text();
+    expect(shown).toContain('removed by an admin');
   });
 
   it('lets an admin view a game that is not shared', async () => {
@@ -1188,6 +1192,61 @@ describe('sharing, hiding, and admin removal at the game screen', () => {
     const res = await app.request('/games/1/admin-delete', withCookie(form({}), aoife));
 
     expect(res.status).toBe(403);
+  });
+});
+
+describe('removed games: hidden by default, toggle to show (ticket 06)', () => {
+  async function removedGame(): Promise<{ app: App; db: Database.Database; aoife: string }> {
+    const { app, db } = makeApp();
+    await insertUser(db, { id: 1, username: 'aoife', password: 'pw', displayName: 'Aoife Nolan' });
+    await insertUser(db, { id: 2, username: 'takashi', password: 'pw', displayName: 'Takashi Mori' });
+    await insertUser(db, { id: 3, username: 'root', password: 'pw', role: 'admin' });
+    const aoife = await signIn(app, 'aoife', 'pw');
+    const admin = await signIn(app, 'root', 'pw');
+    await app.request('/games', withCookie(form({ board_size: '5', join_type: 'open' }), aoife));
+    await app.request('/games/1/join', withCookie(form({}), await signIn(app, 'takashi', 'pw')));
+    await app.request('/games/1/admin-delete', withCookie(form({}), admin));
+    return { app, db, aoife };
+  }
+
+  it('hides a removed game from the list by default, and shows it when toggled on', async () => {
+    const { app, aoife } = await removedGame();
+
+    const hidden = await (await app.request('/games', withCookie({}, aoife))).text();
+    expect(hidden).toContain('No games yet');
+
+    const shown = await (await app.request('/games?show_removed=1', withCookie({}, aoife))).text();
+    expect(shown).not.toContain('No games yet');
+    expect(shown).toContain('removed by an admin');
+  });
+
+  it('keeps the tombstone page reachable by direct link either way', async () => {
+    const { app, aoife } = await removedGame();
+
+    // Toggle off (the default) — the list hides it, but the page still opens.
+    expect((await app.request('/games/1', withCookie({}, aoife))).status).toBe(200);
+
+    // Toggle on too.
+    await app.request('/games?show_removed=1', withCookie({}, aoife));
+    expect((await app.request('/games/1', withCookie({}, aoife))).status).toBe(200);
+  });
+
+  it('points the games stream at the same toggle the page was drawn with', async () => {
+    const { app, aoife } = await removedGame();
+
+    const html = await (await app.request('/games?show_removed=1', withCookie({}, aoife))).text();
+
+    expect(html).toContain('/games/stream?show_removed=1');
+  });
+
+  it('offers a "Clear" link once the toggle is on, even with no status filter set', async () => {
+    const { app, session } = await playerApp();
+
+    const withoutToggle = await (await app.request('/games', withCookie({}, session))).text();
+    expect(withoutToggle).not.toContain('>Clear<');
+
+    const withToggle = await (await app.request('/games?show_removed=1', withCookie({}, session))).text();
+    expect(withToggle).toContain('>Clear<');
   });
 });
 

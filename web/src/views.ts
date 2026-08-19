@@ -340,6 +340,8 @@ export interface MyGamesFilters {
   status?: string | null;
   sort?: string | null;
   direction?: string | null;
+  /** Ticket 06: "Show removed games" — admin-removed tombstones hidden by default. */
+  showRemoved?: boolean;
 }
 
 export interface MyGamesView {
@@ -428,9 +430,15 @@ function gameActions(game: GameSummary, from: GameListPage, extra = ''): string 
   return `<div class="row-actions">${buttons.join('')}</div>`;
 }
 
-/** Whether the list was narrowed by status (ticket 03) — sort/direction reorder, they never shrink the set. */
+/**
+ * Whether the list was narrowed away from its default view — by status
+ * (ticket 03) or by turning removed games on (ticket 06: they're off by
+ * default, so switching them on is the deviation, the same way turning
+ * `curated` on is for `isFiltered`, its find-page analogue). Sort/direction
+ * reorder; they never change what "default" means.
+ */
 export function isMyGamesFiltered(filters: MyGamesFilters): boolean {
-  return Boolean(filters.status);
+  return Boolean(filters.status) || Boolean(filters.showRemoved);
 }
 
 /** The player's own games as the list draws them — the one streamed region. */
@@ -459,7 +467,11 @@ function myGamesTable(user: SessionUser, games: readonly GameSummary[], filters:
   const table =
     games.length === 0
       ? `<p class="lede">${
-          isMyGamesFiltered(filters)
+          // Keyed on `status` specifically, not the broader `isMyGamesFiltered`
+          // (ticket 06 adds `showRemoved` to that): showing removed games only
+          // ever adds rows, so it can't explain an empty list on its own — the
+          // find page's `curated` follows the same one-message-per-toggle idiom.
+          filters.status
             ? 'No games match that status.'
             : 'No games yet. Propose one below and it will appear here.'
         }</p>`
@@ -474,7 +486,12 @@ function myGamesTable(user: SessionUser, games: readonly GameSummary[], filters:
 
 /** The stream that watches this list: the same filter/sort, so the same answer (ticket 03). */
 function myGamesStreamUrl(filters: MyGamesFilters): string {
-  return streamUrlWith('/games/stream', { status: filters.status, sort: filters.sort, direction: filters.direction });
+  return streamUrlWith('/games/stream', {
+    status: filters.status,
+    sort: filters.sort,
+    direction: filters.direction,
+    show_removed: filters.showRemoved ? '1' : undefined,
+  });
 }
 
 export function renderMyGamesPage(
@@ -526,6 +543,9 @@ ${error}
           <option value="asc"${selected(directionFilter, 'asc')}>ascending (oldest/smallest first)</option>
         </select>
       </div>
+    </div>
+    <div class="field">
+      <label class="check"><input type="checkbox" id="show_removed" name="show_removed" value="1"${filters.showRemoved ? ' checked' : ''}> Show removed games</label>
     </div>
     <p class="actions">
       <button type="submit" class="btn">Apply</button>
