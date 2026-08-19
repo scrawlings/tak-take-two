@@ -152,6 +152,12 @@ function changedGame(command: GameCommand, result: GameCommandResult): number | 
     case 'adminDelete':
     case 'export':
       return command.gameId;
+    // No game changes — a follow edits the actor's own prefs. The unconditional
+    // `GAMES_TOPIC` publish below still wakes the find list, which is all a
+    // curated view needs.
+    case 'follow':
+    case 'unfollow':
+      return null;
   }
 }
 

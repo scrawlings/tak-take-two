@@ -51,6 +51,16 @@ export interface SessionRecord {
   readonly createdAt: string;
 }
 
+/**
+ * A user's persisted preferences (ticket 04) — the `user_prefs` row's JSON
+ * blob, decoded. `follows` is the find page's allowlist, kept as user ids
+ * rather than display names: a display name can change (`/account/display-
+ * name`), and an id can't go stale the way a name would.
+ */
+export interface UserPrefs {
+  readonly follows: readonly number[];
+}
+
 /** Board edge length. Mirrors the core's `BoardSize` without depending on it. */
 export type GameBoardSize = 5 | 6;
 
@@ -192,6 +202,11 @@ export interface Persistence {
   updateUserDisplayName(id: number, displayName: string): Result<void, string>;
   setUserBlocked(id: number, blocked: boolean): Result<void, string>;
   setUserForcePasswordChange(id: number, force: boolean): Result<void, string>;
+
+  /** A user's preferences, or the defaults (empty allowlist) when they have never written any. */
+  getUserPrefs(userId: number): Result<UserPrefs, string>;
+  /** Replace a user's preferences wholesale. */
+  setUserPrefs(userId: number, prefs: UserPrefs): Result<void, string>;
 
   /** Insert a game in the `proposed` state. */
   createGame(input: CreateGameInput): Result<GameRecord, string>;
@@ -407,6 +422,35 @@ export function createPersistence(db: Db): Persistence {
     setUserForcePasswordChange(id: number, force: boolean): Result<void, string> {
       try {
         db.prepare('UPDATE users SET force_password_change = ? WHERE id = ?').run(force ? 1 : 0, id);
+        return ok(undefined);
+      } catch (e) {
+        return err(e instanceof Error ? e.message : String(e));
+      }
+    },
+
+    getUserPrefs(userId: number): Result<UserPrefs, string> {
+      try {
+        const row = db.prepare('SELECT prefs FROM user_prefs WHERE user_id = ?').get(userId) as
+          | { prefs: string }
+          | undefined;
+        if (!row) return ok({ follows: [] });
+        // Decoded defensively rather than trusted: this blob is meant to grow
+        // other prefs later, and a row written before `follows` existed (or a
+        // future field this version doesn't know) must not throw.
+        const parsed = JSON.parse(row.prefs) as { follows?: unknown };
+        const follows = Array.isArray(parsed.follows) ? parsed.follows.filter((id) => typeof id === 'number') : [];
+        return ok({ follows });
+      } catch (e) {
+        return err(e instanceof Error ? e.message : String(e));
+      }
+    },
+
+    setUserPrefs(userId: number, prefs: UserPrefs): Result<void, string> {
+      try {
+        db.prepare(
+          `INSERT INTO user_prefs (user_id, prefs) VALUES (?, ?)
+           ON CONFLICT(user_id) DO UPDATE SET prefs = excluded.prefs`,
+        ).run(userId, JSON.stringify(prefs));
         return ok(undefined);
       } catch (e) {
         return err(e instanceof Error ? e.message : String(e));

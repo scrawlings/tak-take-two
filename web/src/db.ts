@@ -91,6 +91,14 @@ const MIGRATIONS: readonly string[] = [
   // game. Decoupling seats from the proposer/opponent split is what lets a
   // player import a past record and replay it from the other side.
   `ALTER TABLE games ADD COLUMN proposer_seat INTEGER CHECK (proposer_seat IN (1, 2));`,
+  // Ticket 04: one JSON blob of preferences per user, additive to the schema
+  // (no column surgery on `users`) — the find page's follow list is the first
+  // pref stored here; a row is created lazily on first write, so most users
+  // have none.
+  `CREATE TABLE user_prefs (
+    user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    prefs TEXT NOT NULL DEFAULT '{}'
+  );`,
 ];
 
 export function openDatabase(path: string): Result<Db, string> {

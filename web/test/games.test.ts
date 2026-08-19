@@ -1046,6 +1046,127 @@ describe('games: searchProposed', () => {
   });
 });
 
+describe('games: follow / unfollow (ticket 04)', () => {
+  it('marks a proposal as followed once the actor follows its proposer', () => {
+    const h = harness();
+    h.games.applyGame(h.takashi, { type: 'propose', boardSize: 5, joinType: 'open' });
+
+    const before = h.games.searchProposed(h.aoife)._unsafeUnwrap();
+    expect(before[0]).toMatchObject({ followed: false, canFollow: true });
+
+    expect(h.games.applyGame(h.aoife, { type: 'follow', userId: h.takashi.id }).isOk()).toBe(true);
+
+    const after = h.games.searchProposed(h.aoife)._unsafeUnwrap();
+    expect(after[0]).toMatchObject({ followed: true });
+  });
+
+  it('unfollow reverses it', () => {
+    const h = harness();
+    h.games.applyGame(h.takashi, { type: 'propose', boardSize: 5, joinType: 'open' });
+    h.games.applyGame(h.aoife, { type: 'follow', userId: h.takashi.id });
+
+    h.games.applyGame(h.aoife, { type: 'unfollow', userId: h.takashi.id });
+
+    expect(h.games.searchProposed(h.aoife)._unsafeUnwrap()[0]).toMatchObject({ followed: false });
+  });
+
+  it('records a trail entry for each follow and unfollow, like other account actions', () => {
+    const h = harness();
+    h.games.applyGame(h.aoife, { type: 'follow', userId: h.takashi.id });
+    h.games.applyGame(h.aoife, { type: 'unfollow', userId: h.takashi.id });
+
+    expect(trailEvents(h.db)).toEqual(['player-followed', 'player-unfollowed']);
+  });
+
+  it('never marks the viewer’s own proposal as followable', () => {
+    const h = harness();
+    h.games.applyGame(h.aoife, { type: 'propose', boardSize: 5, joinType: 'open' });
+
+    expect(h.games.searchProposed(h.aoife)._unsafeUnwrap()[0]).toMatchObject({ canFollow: false, followed: false });
+  });
+
+  it('refuses to follow yourself', () => {
+    const h = harness();
+
+    expect(h.games.applyGame(h.aoife, { type: 'follow', userId: h.aoife.id })._unsafeUnwrapErr().code).toBe(
+      'invalid-follow',
+    );
+  });
+
+  it('refuses to follow a nonexistent user', () => {
+    const h = harness();
+
+    expect(h.games.applyGame(h.aoife, { type: 'follow', userId: 999 })._unsafeUnwrapErr().code).toBe('not-found');
+  });
+
+  it('unfollowing an id never followed is a no-op, not an error', () => {
+    const h = harness();
+
+    expect(h.games.applyGame(h.aoife, { type: 'unfollow', userId: h.takashi.id }).isOk()).toBe(true);
+  });
+
+  it('is idempotent: following twice does not duplicate the entry', () => {
+    const h = harness();
+    h.games.applyGame(h.takashi, { type: 'propose', boardSize: 5, joinType: 'open' });
+
+    h.games.applyGame(h.aoife, { type: 'follow', userId: h.takashi.id });
+    h.games.applyGame(h.aoife, { type: 'follow', userId: h.takashi.id });
+
+    expect(h.persistence.getUserPrefs(h.aoife.id)._unsafeUnwrap()).toEqual({ follows: [h.takashi.id] });
+  });
+
+  it('keeps follow lists private to each account', () => {
+    const h = harness();
+    h.games.applyGame(h.aoife, { type: 'follow', userId: h.takashi.id });
+
+    expect(h.persistence.getUserPrefs(h.takashi.id)._unsafeUnwrap()).toEqual({ follows: [] });
+  });
+});
+
+describe('games: searchProposed curated mode (ticket 04)', () => {
+  it('shows only proposals from followed players when curated is on', () => {
+    const h = harness();
+    insertUser(h.db, { id: 4, username: 'wren', displayName: 'Wren Alvarez' });
+    const wren: SessionUser = {
+      id: 4, username: 'wren', displayName: 'Wren Alvarez', role: 'player',
+      forcePasswordChange: false, blocked: false,
+    };
+    h.games.applyGame(h.takashi, { type: 'propose', boardSize: 5, joinType: 'open' });
+    h.games.applyGame(wren, { type: 'propose', boardSize: 5, joinType: 'open' });
+    h.games.applyGame(h.aoife, { type: 'follow', userId: h.takashi.id });
+
+    const curated = h.games.searchProposed(h.aoife, { curated: true })._unsafeUnwrap();
+
+    expect(curated.map((g) => g.proposer.id)).toEqual([h.takashi.id]);
+  });
+
+  it('shows everything when curated is off, the default', () => {
+    const h = harness();
+    h.games.applyGame(h.takashi, { type: 'propose', boardSize: 5, joinType: 'open' });
+
+    expect(h.games.searchProposed(h.aoife)._unsafeUnwrap()).toHaveLength(1);
+  });
+
+  it('is empty when curated but nobody is followed — no surprise filtering, just nothing to show', () => {
+    const h = harness();
+    h.games.applyGame(h.takashi, { type: 'propose', boardSize: 5, joinType: 'open' });
+
+    expect(h.games.searchProposed(h.aoife, { curated: true })._unsafeUnwrap()).toEqual([]);
+  });
+
+  it('composes with the existing board-size filter', () => {
+    const h = harness();
+    h.games.applyGame(h.takashi, { type: 'propose', boardSize: 5, joinType: 'open' });
+    h.games.applyGame(h.takashi, { type: 'propose', boardSize: 6, joinType: 'open' });
+    h.games.applyGame(h.aoife, { type: 'follow', userId: h.takashi.id });
+
+    const found = h.games.searchProposed(h.aoife, { curated: true, boardSize: 6 })._unsafeUnwrap();
+
+    expect(found).toHaveLength(1);
+    expect(found[0]).toMatchObject({ boardSize: 6 });
+  });
+});
+
 /** A road win for the proposer, played one place at a time (11 half-moves). */
 const ROAD_MOVES = ['a1', 'a5', 'a3', 'a2', 'b3', 'a4', 'c3', 'b4', 'd3', 'b2', 'e3'];
 

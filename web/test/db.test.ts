@@ -46,10 +46,11 @@ describe('runMigrations', () => {
 
     expect(runMigrations(db).isOk()).toBe(true);
 
-    expect(versions(db)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(versions(db)).toEqual([1, 2, 3, 4, 5, 6, 7]);
     expect(columns(db, 'games')).toEqual(
       expect.arrayContaining(['imported_ptn', 'proposer_shared', 'opponent_shared', 'admin_removed', 'proposer_seat']),
     );
+    expect(columns(db, 'user_prefs')).toEqual(['user_id', 'prefs']);
   });
 
   it('is idempotent: re-running applies nothing', () => {
@@ -59,7 +60,7 @@ describe('runMigrations', () => {
 
     expect(runMigrations(db).isOk()).toBe(true);
 
-    expect(versions(db)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(versions(db)).toEqual([1, 2, 3, 4, 5, 6, 7]);
   });
 
   it('upgrades an existing database without disturbing its rows', () => {
@@ -68,7 +69,7 @@ describe('runMigrations', () => {
 
     expect(runMigrations(db).isOk()).toBe(true);
 
-    expect(versions(db)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(versions(db)).toEqual([1, 2, 3, 4, 5, 6, 7]);
     // The existing game survives, gaining an empty record, both share toggles
     // off — the private default, never a silent opening-up — and an unresolved
     // (NULL) starter seat, meaning a coin flip decides who starts on join.

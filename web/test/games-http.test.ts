@@ -434,6 +434,111 @@ describe('GET /games/find', () => {
   });
 });
 
+describe('find a game: curated allowlist (ticket 04)', () => {
+  async function twoProposers(): Promise<{ app: App; db: Database.Database; aoife: string; takashi: string }> {
+    const { app, db } = makeApp();
+    await insertUser(db, { id: 1, username: 'aoife', password: 'pw', displayName: 'Aoife Nolan' });
+    await insertUser(db, { id: 2, username: 'takashi', password: 'pw', displayName: 'Takashi Mori' });
+    await insertUser(db, { id: 3, username: 'wren', password: 'pw', displayName: 'Wren Alvarez' });
+    const aoife = await signIn(app, 'aoife', 'pw');
+    const takashi = await signIn(app, 'takashi', 'pw');
+    const wren = await signIn(app, 'wren', 'pw');
+    await app.request('/games', withCookie(form({ board_size: '5', join_type: 'open' }), takashi));
+    await app.request('/games', withCookie(form({ board_size: '5', join_type: 'open' }), wren));
+    return { app, db, aoife, takashi };
+  }
+
+  it('offers a follow button on another player’s proposal, and none on your own', async () => {
+    const { app, db } = makeApp();
+    await insertUser(db, { id: 1, username: 'aoife', password: 'pw', displayName: 'Aoife Nolan' });
+    await insertUser(db, { id: 2, username: 'takashi', password: 'pw', displayName: 'Takashi Mori' });
+    const aoife = await signIn(app, 'aoife', 'pw');
+    const takashi = await signIn(app, 'takashi', 'pw');
+    await app.request('/games', withCookie(form({ board_size: '5', join_type: 'open' }), aoife));
+    await app.request('/games', withCookie(form({ board_size: '5', join_type: 'open' }), takashi));
+
+    const html = await (await app.request('/games/find', withCookie({}, aoife))).text();
+
+    expect(html).toContain(`action="/games/find/follow"`);
+    expect(html).toContain(`name="user_id" value="2"`);
+    expect(html).not.toContain(`name="user_id" value="1"`);
+  });
+
+  it('follows a player and shows them as followed', async () => {
+    const { app, aoife } = await twoProposers();
+
+    const res = await app.request('/games/find/follow', withCookie(form({ user_id: '2' }), aoife));
+    expect(res.status).toBe(303);
+    expect(res.headers.get('location')).toBe('/games/find');
+
+    const html = await (await app.request('/games/find', withCookie({}, aoife))).text();
+    expect(html).toContain('action="/games/find/unfollow"');
+    expect(html).toContain('<span class="tag">followed</span>');
+  });
+
+  it('unfollows, reverting the row to a plain follow button', async () => {
+    const { app, aoife } = await twoProposers();
+    await app.request('/games/find/follow', withCookie(form({ user_id: '2' }), aoife));
+
+    await app.request('/games/find/unfollow', withCookie(form({ user_id: '2' }), aoife));
+
+    const html = await (await app.request('/games/find', withCookie({}, aoife))).text();
+    expect(html).not.toContain('<span class="tag">followed</span>');
+  });
+
+  it('shows only followed players’ proposals when curated is on', async () => {
+    const { app, aoife } = await twoProposers();
+    await app.request('/games/find/follow', withCookie(form({ user_id: '2' }), aoife));
+
+    const html = await (await app.request('/games/find?curated=1', withCookie({}, aoife))).text();
+
+    expect(html).toContain('Takashi Mori');
+    expect(html).not.toContain('Wren Alvarez');
+  });
+
+  it('shows everything with curated off, the default — no surprise filtering', async () => {
+    const { app, aoife } = await twoProposers();
+
+    const html = await (await app.request('/games/find', withCookie({}, aoife))).text();
+
+    expect(html).toContain('Takashi Mori');
+    expect(html).toContain('Wren Alvarez');
+  });
+
+  it('carries board_size, join_type, proposer, and curated back through a follow redirect', async () => {
+    const { app, aoife } = await twoProposers();
+
+    const res = await app.request(
+      '/games/find/follow',
+      withCookie(form({ user_id: '2', board_size: '5', proposer: 'Takashi', curated: '1' }), aoife),
+    );
+
+    expect(res.headers.get('location')).toBe('/games/find?board_size=5&proposer=Takashi&curated=1');
+  });
+
+  it('points the find stream at the curated mode the page was drawn with', async () => {
+    const { app, aoife } = await twoProposers();
+
+    const html = await (await app.request('/games/find?curated=1', withCookie({}, aoife))).text();
+
+    expect(html).toContain('/games/find/stream?curated=1');
+  });
+
+  it('refuses to follow yourself, keeping the form and its filters', async () => {
+    const { app, aoife } = await twoProposers();
+
+    const res = await app.request(
+      '/games/find/follow',
+      withCookie(form({ user_id: '1', board_size: '5' }), aoife),
+    );
+
+    expect(res.status).toBe(400);
+    const html = await res.text();
+    expect(html).toContain('cannot follow yourself');
+    expect(html).toContain('value="5"'); // the board filter survived the refusal
+  });
+});
+
 describe('POST /games/:id/join', () => {
   async function twoPlayers() {
     const { app, db } = makeApp();

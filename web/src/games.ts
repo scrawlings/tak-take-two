@@ -77,6 +77,7 @@ export type GameErrorCode =
   | 'invalid-move-number'
   | 'invalid-status'
   | 'invalid-sort'
+  | 'invalid-follow'
   /** The stored record no longer parses or replays (ADR-0005); internal, like `persistence`. */
   | 'corrupt-record'
   | 'persistence';
@@ -132,6 +133,10 @@ export interface GameSummary {
    * time, so it can never drift the way a stored column could.
    */
   readonly lastActivity: string;
+  /** Whether the viewer follows the proposer (ticket 04; CONTEXT.md: Follow). */
+  readonly followed: boolean;
+  /** Whether a follow/unfollow button makes sense here — never true for the viewer's own proposal. */
+  readonly canFollow: boolean;
 }
 
 /** One stone as the board view shows it. */
@@ -227,6 +232,8 @@ export interface ProposedSearch {
   readonly boardSize?: number;
   readonly joinType?: string;
   readonly proposerDisplayName?: string;
+  /** Ticket 04: only proposals from players the actor follows. Composes with the filters above. */
+  readonly curated?: boolean;
 }
 
 /**
@@ -273,6 +280,9 @@ export type GameCommand =
   | { readonly type: 'share'; readonly gameId: number; readonly on: boolean }
   | { readonly type: 'hide'; readonly gameId: number }
   | { readonly type: 'adminDelete'; readonly gameId: number }
+  /** Ticket 04: curate the find page (CONTEXT.md: Follow) — no game to address, like `propose`. */
+  | { readonly type: 'follow'; readonly userId: number }
+  | { readonly type: 'unfollow'; readonly userId: number }
   | {
       readonly type: 'export';
       readonly gameId: number;
@@ -1194,6 +1204,62 @@ export function createGames(persistence: Persistence): Games {
   }
 
   /**
+   * Add or drop one id from the actor's follow list and persist the whole
+   * thing back with a trail entry (ticket 04) — `setUserPrefs` replaces
+   * wholesale, so every write reads the current list first rather than
+   * risking two concurrent edits clobbering each other's addition. Shared by
+   * `follow` and `unfollow`, which differ only in the edit and the event.
+   */
+  function editFollows(
+    actor: SessionUser,
+    userId: number,
+    event: 'player-followed' | 'player-unfollowed',
+    edit: (follows: Set<number>) => void,
+  ): Result<GameCommandResult, GameError> {
+    const prefs = persistence.getUserPrefs(actor.id);
+    if (prefs.isErr()) return err(persistenceError(prefs.error));
+    const follows = new Set(prefs.value.follows);
+    edit(follows);
+
+    const persisted = persistence.transaction((): Result<void, string> => {
+      const saved = persistence.setUserPrefs(actor.id, { follows: [...follows] });
+      if (saved.isErr()) return saved;
+      return persistence.appendActivityTrail({ userId: actor.id, event, payload: { followedUserId: userId } });
+    });
+    if (persisted.isErr()) return err(persistenceError(persisted.error));
+
+    return ok({ type: 'ok' });
+  }
+
+  function follow(
+    actor: SessionUser,
+    command: Extract<GameCommand, { type: 'follow' }>,
+  ): Result<GameCommandResult, GameError> {
+    const player = requirePlayer(actor);
+    if (player.isErr()) return err(player.error);
+    if (command.userId === actor.id) {
+      return err({ code: 'invalid-follow', message: 'You cannot follow yourself.' });
+    }
+    const target = persistence.findUserById(command.userId);
+    if (target.isErr()) return err(persistenceError(target.error));
+    if (target.value === null) return err({ code: 'not-found', message: 'That player no longer exists.' });
+
+    return editFollows(actor, command.userId, 'player-followed', (follows) => follows.add(command.userId));
+  }
+
+  function unfollow(
+    actor: SessionUser,
+    command: Extract<GameCommand, { type: 'unfollow' }>,
+  ): Result<GameCommandResult, GameError> {
+    const player = requirePlayer(actor);
+    if (player.isErr()) return err(player.error);
+
+    // No existence check: unfollowing an id that was never followed, or one
+    // whose account is since gone, is a no-op either way — not an error.
+    return editFollows(actor, command.userId, 'player-unfollowed', (follows) => follows.delete(command.userId));
+  }
+
+  /**
    * An admin's forced end to any game. Unlike a mutual hide, the row stays —
    * with any real result it already had — so affected players see why it
    * ended, on the game view and in their lists.
@@ -1434,6 +1500,7 @@ export function createGames(persistence: Persistence): Games {
     actor: SessionUser,
     nameOf: (id: number) => Result<PlayerRef, GameError>,
     lastMoveAt: ReadonlyMap<number, string>,
+    follows: ReadonlySet<number>,
   ): Result<GameSummary, GameError> {
     const proposer = nameOf(game.proposerId);
     if (proposer.isErr()) return err(proposer.error);
@@ -1484,17 +1551,22 @@ export function createGames(persistence: Persistence): Games {
       result: game.result,
       proposerSeat: game.proposerSeat,
       lastActivity: lastMoveAt.get(game.id) ?? game.createdAt,
+      followed: follows.has(game.proposerId),
+      canFollow: game.proposerId !== actor.id,
     });
   }
 
-  /** Summarise a batch, sharing one name cache and one last-move-timestamp query across the whole list. */
+  /** Summarise a batch, sharing one name cache, one last-move-timestamp query, and the actor's follow list across the whole list. */
   function summariseAll(games: readonly GameRecord[], actor: SessionUser): Result<GameSummary[], GameError> {
     const nameOf = nameResolver();
     const lastMoveAt = persistence.listLastMoveTimestamps(games.map((g) => g.id));
     if (lastMoveAt.isErr()) return err(persistenceError(lastMoveAt.error));
+    const prefs = persistence.getUserPrefs(actor.id);
+    if (prefs.isErr()) return err(persistenceError(prefs.error));
+    const follows = new Set(prefs.value.follows);
     const summaries: GameSummary[] = [];
     for (const game of games) {
-      const summary = summarise(game, actor, nameOf, lastMoveAt.value);
+      const summary = summarise(game, actor, nameOf, lastMoveAt.value, follows);
       if (summary.isErr()) return err(summary.error);
       summaries.push(summary.value);
     }
@@ -1591,6 +1663,10 @@ export function createGames(persistence: Persistence): Games {
           return adminDelete(actor, command);
         case 'export':
           return exportGame(actor, command);
+        case 'follow':
+          return follow(actor, command);
+        case 'unfollow':
+          return unfollow(actor, command);
       }
     },
 
@@ -1631,10 +1707,16 @@ export function createGames(persistence: Persistence): Games {
       // proposal reaches only the player it designates — where merely visible
       // would additionally show proposers the invitations they sent, which are
       // already on their own games page.
-      return summariseAll(
+      const summaries = summariseAll(
         rows.value.filter((game) => joinableBy(game, actor)),
         actor,
       );
+      if (summaries.isErr()) return err(summaries.error);
+
+      // Curated mode (ticket 04) composes with the filters above: it narrows
+      // what's already matched, rather than running a separate query.
+      if (!search.curated) return ok(summaries.value);
+      return ok(summaries.value.filter((g) => g.followed));
     },
 
     listAllGames(actor: SessionUser): Result<GameSummary[], GameError> {

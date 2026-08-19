@@ -587,6 +587,21 @@ kbd {
 
 .field-grid { display: grid; gap: 0 1.25rem; grid-template-columns: repeat(2, minmax(0, 1fr)); }
 
+/* A checkbox toggle inside a form, e.g. find's curated allowlist (ticket 04) —
+   distinct from .field label's uppercase field-name styling. */
+.field .check {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-family: inherit;
+  font-size: 0.9375rem;
+  text-transform: none;
+  letter-spacing: normal;
+  color: var(--slate);
+  cursor: pointer;
+}
+.field input[type="checkbox"] { width: auto; }
+
 .actions { margin: 0; display: flex; gap: 0.625rem; flex-wrap: wrap; align-items: center; }
 
 .hint { font-size: 0.8125rem; color: var(--slate-mid); margin: 0.75rem 0 0; }

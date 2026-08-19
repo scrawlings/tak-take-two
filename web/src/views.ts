@@ -392,8 +392,9 @@ function starterHint(game: GameSummary, user: SessionUser): string {
 /** Which list a game action was taken from, so a refusal returns there. */
 export type GameListPage = 'games' | 'find';
 
-/** The actions a viewer may take on a game, as the module decided them. */
-function gameActions(game: GameSummary, from: GameListPage): string {
+/** The actions a viewer may take on a game, as the module decided them. `extra` appends
+ *  pre-rendered buttons that aren't game actions per se (the find page's follow button). */
+function gameActions(game: GameSummary, from: GameListPage, extra = ''): string {
   // Claiming your own proposal starts a self-play game, so the button says
   // what that means rather than a bare “join” (CONTEXT.md: Self-play).
   const join =
@@ -414,6 +415,7 @@ function gameActions(game: GameSummary, from: GameListPage): string {
     game.state === 'in_play' || game.state === 'finished'
       ? `<a class="btn btn-sm" href="/games/${game.id}">Open</a>`
       : '',
+    extra,
   ].filter(Boolean);
   return `<div class="row-actions">${buttons.join('')}</div>`;
 }
@@ -593,12 +595,14 @@ export interface SearchFilters {
   boardSize?: string | null;
   joinType?: string | null;
   proposerDisplayName?: string | null;
+  /** Ticket 04: "Only show games from players I follow". */
+  curated?: boolean;
 }
 
 /** Whether the search was narrowed at all — one statement of it, so the empty
  *  message on the page and on a streamed frame cannot disagree. */
 export function isFiltered(filters: SearchFilters): boolean {
-  return Boolean(filters.boardSize || filters.joinType || filters.proposerDisplayName);
+  return Boolean(filters.boardSize || filters.joinType || filters.proposerDisplayName || filters.curated);
 }
 
 export interface FindGamesView {
@@ -620,6 +624,28 @@ export function findGamesRegions(
   return { games: findGamesResults(user, games, filters) };
 }
 
+/**
+ * The follow/unfollow button on a find-page row (ticket 04; CONTEXT.md:
+ * Follow). Absent for the viewer's own proposal (`canFollow` is false). The
+ * hidden fields carry the current search back to the redirect, so following
+ * someone never drops the filters or the curated toggle the player had set.
+ */
+function followButton(game: GameSummary, filters: SearchFilters): string {
+  if (!game.canFollow) return '';
+  const action = game.followed ? '/games/find/unfollow' : '/games/find/follow';
+  const label = game.followed ? 'Unfollow' : 'Follow';
+  const hidden = (name: string, value: string | null | undefined): string =>
+    value ? `<input type="hidden" name="${name}" value="${escapeHtml(value)}">` : '';
+  return `<form method="post" action="${action}">
+  <input type="hidden" name="user_id" value="${game.proposer.id}">
+  ${hidden('board_size', filters.boardSize)}
+  ${hidden('join_type', filters.joinType)}
+  ${hidden('proposer', filters.proposerDisplayName)}
+  ${filters.curated ? '<input type="hidden" name="curated" value="1">' : ''}
+  <button type="submit" class="btn btn-quiet btn-sm">${label}</button>
+</form>`;
+}
+
 function findGamesResults(
   user: SessionUser,
   games: readonly GameSummary[],
@@ -631,9 +657,9 @@ function findGamesResults(
       (game) => `<tr>
   <td class="num">${game.boardSize}×${game.boardSize}</td>
   <td>${proposalKind(game)}${starterHint(game, user)}</td>
-  <td>${escapeHtml(game.proposer.displayName)}</td>
+  <td>${escapeHtml(game.proposer.displayName)}${game.followed ? ' <span class="tag">followed</span>' : ''}</td>
   <td>${game.imported ? '<span class="tag">imported</span>' : '<span class="dim">empty board</span>'}</td>
-  <td>${gameActions(game, 'find')}</td>
+  <td>${gameActions(game, 'find', followButton(game, filters))}</td>
 </tr>`,
     )
     .join('');
@@ -641,9 +667,11 @@ function findGamesResults(
   const results =
     games.length === 0
       ? `<p class="lede">${
-          filtered
-            ? 'No proposals match those filters. Try widening them.'
-            : 'Nobody is waiting for an opponent right now. Propose a game and someone can join it.'
+          filters.curated
+            ? 'Nobody you follow has proposed a game right now.'
+            : filtered
+              ? 'No proposals match those filters. Try widening them.'
+              : 'Nobody is waiting for an opponent right now. Propose a game and someone can join it.'
         }</p>`
       : `<div class="table-scroll">
     <table class="data">
@@ -664,7 +692,7 @@ function selected(value: string | null | undefined, option: string): string {
  * query the page was drawn with, so the stream's answer is the page's.
  * Shared by `findStreamUrl` and `myGamesStreamUrl`.
  */
-function streamUrlWith(base: string, params: Readonly<Record<string, string | null | undefined>>): string {
+export function streamUrlWith(base: string, params: Readonly<Record<string, string | null | undefined>>): string {
   const query = new URLSearchParams();
   for (const [key, value] of Object.entries(params)) {
     if (value) query.set(key, value);
@@ -679,6 +707,7 @@ function findStreamUrl(filters: SearchFilters): string {
     board_size: filters.boardSize,
     join_type: filters.joinType,
     proposer: filters.proposerDisplayName,
+    curated: filters.curated ? '1' : undefined,
   });
 }
 
@@ -716,6 +745,9 @@ ${error}
         <option value="invited"${selected(filters.joinType, 'invited')}>invitations to me</option>
       </select>
     </div>
+  </div>
+  <div class="field">
+    <label class="check"><input type="checkbox" id="curated" name="curated" value="1"${filters.curated ? ' checked' : ''}> Only show games from players I follow</label>
   </div>
   <div class="field">
     <label for="proposer">Proposed by</label>

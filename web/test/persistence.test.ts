@@ -272,4 +272,67 @@ describe('persistence', () => {
       expect(p.listGamesForUser(1, ['proposed']).isErr()).toBe(true);
     });
   });
+
+  describe('user prefs (ticket 04)', () => {
+    it('defaults to an empty allowlist when a user has never written any prefs', () => {
+      const db = makeDb();
+      insertUser(db, 1, 'aoife');
+      const p = createPersistence(db);
+
+      expect(p.getUserPrefs(1)._unsafeUnwrap()).toEqual({ follows: [] });
+    });
+
+    it('writes and reads back the follow list', () => {
+      const db = makeDb();
+      insertUser(db, 1, 'aoife');
+      insertUser(db, 2, 'takashi');
+      const p = createPersistence(db);
+
+      expect(p.setUserPrefs(1, { follows: [2] }).isOk()).toBe(true);
+
+      expect(p.getUserPrefs(1)._unsafeUnwrap()).toEqual({ follows: [2] });
+    });
+
+    it('overwrites rather than merges on a second write', () => {
+      const db = makeDb();
+      insertUser(db, 1, 'aoife');
+      insertUser(db, 2, 'takashi');
+      insertUser(db, 3, 'nuala');
+      const p = createPersistence(db);
+      p.setUserPrefs(1, { follows: [2] });
+
+      p.setUserPrefs(1, { follows: [3] });
+
+      expect(p.getUserPrefs(1)._unsafeUnwrap()).toEqual({ follows: [3] });
+    });
+
+    it('keeps prefs separate per user', () => {
+      const db = makeDb();
+      insertUser(db, 1, 'aoife');
+      insertUser(db, 2, 'takashi');
+      const p = createPersistence(db);
+      p.setUserPrefs(1, { follows: [2] });
+
+      expect(p.getUserPrefs(2)._unsafeUnwrap()).toEqual({ follows: [] });
+    });
+
+    it('tolerates a prefs blob missing the follows field, rather than throwing', () => {
+      const db = makeDb();
+      insertUser(db, 1, 'aoife');
+      db.prepare('INSERT INTO user_prefs (user_id, prefs) VALUES (?, ?)').run(1, '{}');
+      const p = createPersistence(db);
+
+      expect(p.getUserPrefs(1)._unsafeUnwrap()).toEqual({ follows: [] });
+    });
+
+    it('fails when the database is closed', () => {
+      const db = makeDb();
+      insertUser(db, 1, 'aoife');
+      const p = createPersistence(db);
+      db.close();
+
+      expect(p.getUserPrefs(1).isErr()).toBe(true);
+      expect(p.setUserPrefs(1, { follows: [] }).isErr()).toBe(true);
+    });
+  });
 });

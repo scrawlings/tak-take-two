@@ -20,6 +20,7 @@ import {
   paramId,
   statusForAuthError,
   statusForGameError,
+  type FormFields,
 } from './actions.js';
 import {
   renderAccountPage,
@@ -39,6 +40,7 @@ import {
   findGamesRegions,
   gameRegions,
   myGamesRegions,
+  streamUrlWith,
   type AdminUsersView,
   type FindGamesView,
   type GameViewPageView,
@@ -70,6 +72,35 @@ export type App = Hono<{ Variables: Variables }>;
 
 const SESSION_COOKIE = 'tak_session';
 const SESSION_MAX_AGE_SECONDS = 30 * 24 * 60 * 60;
+
+/**
+ * A proposal search built from its four raw values, whatever read them —
+ * `proposalSearch` from the query string, `findSearchFromForm` from a
+ * follow/unfollow form's hidden fields (ticket 04) — so the two never drift
+ * into separately hand-rolled shapes.
+ */
+function searchAndFilters(
+  boardSize: string | undefined,
+  joinType: string | undefined,
+  proposer: string | undefined,
+  curated: boolean,
+): { search: ProposedSearch; filters: SearchFilters } {
+  return {
+    search: {
+      // Anything non-numeric lands as NaN, which the module refuses.
+      boardSize: boardSize === undefined ? undefined : Number(boardSize),
+      joinType,
+      proposerDisplayName: proposer,
+      curated,
+    },
+    filters: {
+      boardSize: boardSize ?? null,
+      joinType: joinType ?? null,
+      proposerDisplayName: proposer ?? null,
+      curated,
+    },
+  };
+}
 
 /**
  * Long enough to be quiet, short enough that a connection killed silently in
@@ -237,6 +268,46 @@ export function createApp(deps: AppDeps): App {
     );
   };
 
+  /**
+   * A refused follow/unfollow (ticket 04) is reported back on the find page,
+   * re-run with the same search the form carried in its hidden fields — the
+   * same "reload with what was submitted" shape `myGamesError` follows.
+   */
+  const findGamesError = (
+    c: Context<{ Variables: Variables }>,
+    error: GameError,
+    asked: { search: ProposedSearch; filters: SearchFilters },
+  ): Response =>
+    pageError(
+      c,
+      c.get('user'),
+      {
+        name: 'search games',
+        reload: () => games.searchProposed(c.get('user'), asked.search),
+        render: (data, view: FindGamesView, status) => c.html(renderFindGamesPage(c.get('user'), data, view), status),
+        view: (e): FindGamesView => ({ error: e.message, filters: asked.filters }),
+        statusOf: statusForGameError,
+      },
+      error,
+    );
+
+  /**
+   * The find search a follow/unfollow form's hidden fields carried in — the
+   * same fields `proposalSearch` reads from the query string, read from the
+   * form body instead (ticket 04's follow/unfollow POST back to `/games/find`).
+   */
+  const findSearchFromForm = (f: FormFields): { search: ProposedSearch; filters: SearchFilters } =>
+    searchAndFilters(f.board_size ?? undefined, f.join_type ?? undefined, f.proposer ?? undefined, Boolean(f.curated));
+
+  /** Where a follow/unfollow form returns to — `/games/find` carrying the same search it was submitted from. */
+  const findRedirect = (f: FormFields): string =>
+    streamUrlWith('/games/find', {
+      board_size: f.board_size,
+      join_type: f.join_type,
+      proposer: f.proposer,
+      curated: f.curated,
+    });
+
   /** A refused game command on the game screen is reported there, re-read fresh. */
   const gameViewError = (c: Context<{ Variables: Variables }>, error: GameError): Response => {
     const id = paramId(c, 'id', 'That game no longer exists.');
@@ -270,24 +341,8 @@ export function createApp(deps: AppDeps): App {
    */
   const proposalSearch = (
     c: Context<{ Variables: Variables }>,
-  ): { search: ProposedSearch; filters: SearchFilters } => {
-    const boardSize = query(c, 'board_size');
-    const joinType = query(c, 'join_type');
-    const proposer = query(c, 'proposer');
-    return {
-      search: {
-        // Anything non-numeric lands as NaN, which the module refuses.
-        boardSize: boardSize === undefined ? undefined : Number(boardSize),
-        joinType,
-        proposerDisplayName: proposer,
-      },
-      filters: {
-        boardSize: boardSize ?? null,
-        joinType: joinType ?? null,
-        proposerDisplayName: proposer ?? null,
-      },
-    };
-  };
+  ): { search: ProposedSearch; filters: SearchFilters } =>
+    searchAndFilters(query(c, 'board_size'), query(c, 'join_type'), query(c, 'proposer'), query(c, 'curated') !== undefined);
 
   /**
    * The status filter and sort a request asks for (ticket 03), read once and
@@ -563,6 +618,22 @@ export function createApp(deps: AppDeps): App {
       statusOf: statusForGameError,
     });
   });
+
+  app.post('/games/find/follow', requireUser, formAction({
+    fields: ['user_id', 'board_size', 'join_type', 'proposer', 'curated'],
+    run: (c, f) =>
+      games.applyGame(c.get('user'), { type: 'follow', userId: Number(f.user_id) }).map(() => findRedirect(f)),
+    onOk: (c, redirectTo) => c.redirect(redirectTo, 303),
+    renderError: (c, e, f) => findGamesError(c, e, findSearchFromForm(f)),
+  }));
+
+  app.post('/games/find/unfollow', requireUser, formAction({
+    fields: ['user_id', 'board_size', 'join_type', 'proposer', 'curated'],
+    run: (c, f) =>
+      games.applyGame(c.get('user'), { type: 'unfollow', userId: Number(f.user_id) }).map(() => findRedirect(f)),
+    onOk: (c, redirectTo) => c.redirect(redirectTo, 303),
+    renderError: (c, e, f) => findGamesError(c, e, findSearchFromForm(f)),
+  }));
 
   app.post('/games', requireUser, formAction({
     fields: ['board_size', 'join_type', 'invited_display_name', 'starter', 'ptn'],
