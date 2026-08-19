@@ -14,3 +14,4 @@ web/data/
 web/dist-client/
 *.db-shm
 *.db-wal
+.agents
