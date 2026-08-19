@@ -10,7 +10,7 @@ This is the second implementation in TypeScript (earlier work exists in Clojure 
 
 Implemented and playable: all 21 tickets are done. Players can propose games — open, invited to a named player, or carried in from a PTN record — join or self-play them, and build moves on the board — including partial lifts and arbitrary drop distributions — or type PTN. The site validates every move against the official rules, detects road and flat wins, and records the game. Take-backs and draw offers follow a request/accept protocol; games can be shared with spectators, hidden, or removed by an admin; any position exports as PTN or TPS. Moves reach the other player, and any watching spectator, over SSE without a reload, and the two game lists follow along.
 
-Intended extensions: the development of computer opponents and playing/teaching computer coaches and game review.
+Intended extensions, specced under `.scratch/`: computer opponents and a move-suggesting coach (`bots`), a headless training harness (`bot-training`), and UI usability work — a history scrubber, keyboard shortcuts, and list curation (`ui-usability`).
 
 The interesting parts are the hard ones: the Tak rules engine (stack moves, the carry limit, capstone flattening, the decided-position vs finished-game distinction), the PTN/TPS text formats with their round-trip constraints, and the game-lifecycle invariants (share-based visibility, one pending request per game, seat semantics, self-play). The [domain glossary](./CONTEXT.md) is the vocabulary the code and the [architecture decisions](./docs/adr/) speak in.
 

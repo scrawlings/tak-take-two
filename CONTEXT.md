@@ -35,16 +35,31 @@ A glossary of Tak and this system's domain terms. Vocabulary for the game itself
   _Avoid_: request (ambiguous with take-back request)
 - **Open game** — a proposal any player may join; joining implies the game is shared (both players' share toggles start on).
 - **Invited game** — a proposal only a designated player may join; hidden from all other players; share toggles start off.
+- **Humans only** — a flag a proposer may set meaning no bot may play the game; a bot invited to a humans-only game declines, and the game waits for a human. Human proposals default to allowing bots in principle.
+- **Ranked / unranked game** — a categorisation set when a game is proposed and never changed: ranked games count toward a player's standing, unranked games count for nothing. No rating is computed yet — the categorisation is recorded now so future ratings have clean data. Games against bots are always unranked; human players may propose an unranked game (coaching over the shoulder, casual exploration).
+  _Avoid_: rated (there is no rating yet, only the categorisation)
 - **Self-play** — a game whose proposer also joins (an open game they claim, or an invitation they make to themselves), so one account plays both seats from a single window, for study.
 - **Share** — a per-player toggle on a game controlling whether non-participants can view it; a game is viewable iff both players have shared. Either player may change their share at any time.
   _Avoid_: public, make public (ambiguous in the original brief; this is the one concept)
 - **Hide** — a player removes a game from their own views and stops sharing it; if both players hide a game, it is deleted.
   _Avoid_: delete (deletion is permanent; hiding is reversible)
+- **Follow** — a per-player preference marking players whose games they care about: with the curated find view on, only proposals from followed players are shown. Following is one-way and silent.
+  _Avoid_: friend (the site has no friendship concept; following only curates the find view)
 - **Take-back request** — a request to undo the requester's last move, made before the opponent has moved. Only one may be pending; it blocks the opponent until accepted (the move is undone and the requester moves again) or rejected. Only moves played after the game started can be undone, and only while the game is in play.
   _Avoid_: undo (undo is the effect, not the mechanism)
 - **Resign** — a player forfeits the game; the opponent wins (PTN result `1-0` / `0-1`).
 - **Mutual draw** — both players agree to end the game as a draw (PTN result `1/2-1/2`).
 - **Game record** — a game's move history and result, exportable as PTN (the full game, or a replayable prefix from any move) or TPS (the position after any move). Each move records when it was played.
+- **Review mode** — viewing a game at an earlier move from the game screen: the board, reserves, and move list show the position after that move, and the move controls give way to a "viewing move N of M" bar. No move can be made while reviewing; snapping back returns to the live position. Players and spectators can review, on in-play and finished games.
+  _Avoid_: scrub (scrubbing is the mechanism for entering review; review mode is the state)
+
+## Bots & coaching
+
+- **Bot** — a computer opponent: an account with no human behind it whose moves the server generates. Bots never propose games, join open games on their own, or play themselves; they play when a human invites them, or asks to play the computer.
+  _Avoid_: AI (says nothing about how moves are chosen)
+- **Strength level** — a bot's difficulty: Casual, Standard, or Strong — the same engine searching to different depths. A bot's play is deterministic: the same position and level always produce the same move (games are seeded).
+- **Bot game** — a game against a bot. Always unranked, so a bot result can never affect a player's future rating.
+- **Coach** — the computer as a teacher: on a player's turn, the game screen can show what the bot would play and why; the suggestion can be previewed and played. Distinct from a full human game review, which is a future feature.
 
 ## Imports
 

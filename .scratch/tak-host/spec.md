@@ -77,9 +77,10 @@ A website for hosting games of Tak. Players propose games (open to anyone, or in
 
 ## Out of Scope
 
-- Interactive in-browser board (future).
-- Computer players and batch training (future; the headless core is designed for it).
-- Inter-player ratings (future; game stats + activity trail are the seed data).
+- Interactive in-browser board — delivered by tickets 18/19/21; UI usability work continues in `.scratch/ui-usability/spec.md`.
+- Computer opponents — specced: `.scratch/bots/spec.md` (bot accounts, a heuristic engine behind a strategy seam, a move-suggesting coach).
+- Batch training — specced: `.scratch/bot-training/spec.md` (headless harness in a new `train` package; the core runs it headless).
+- Inter-player ratings (future; game stats + activity trail are the seed data; games now carry a ranked/unranked categorisation — see `.scratch/bots/spec.md`).
 - Starting games from a TPS position (deferred; TPS parse/validate is built, import is not).
 - Board sizes other than 5×5/6×6; komi.
 - Open self-registration — admins create all accounts.
