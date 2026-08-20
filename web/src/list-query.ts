@@ -13,13 +13,13 @@ import { err, ok, type Result } from 'neverthrow';
  * parses with it, `games.ts` takes the validated result as its query type,
  * `views.ts` renders labels and builds URLs from it.
  *
- * A validation failure's code is one of `FilterErrorCode` below, a subset of
- * `games.ts`'s `GameErrorCode` — a `FilterError` is structurally a `GameError`
- * (same two fields, a narrower `code` union), so `app.ts` can hand one to
- * `statusForGameError` and `games.ts`'s own error-shaped results without this
- * module importing anything from `games.ts` at all: the dependency runs one
- * way, exactly as the two-way "app.ts and games.ts and views.ts import this;
- * it imports none of them" design called for.
+ * A validation failure's code is one of `FilterErrorCode` below. `game-views.ts`
+ * composes it into `GameErrorCode` (`FilterErrorCode | …`), so a `FilterError`
+ * is structurally a `GameError` (same two fields, the `code` union a subset by
+ * construction) and `app.ts` can hand one to `statusForGameError` without this
+ * module importing anything from `games.ts`/`game-views.ts` at all: the
+ * dependency runs one way — `app.ts`, `game-views.ts`, and `views.ts` import
+ * this module; it imports none of them.
  */
 
 export interface FilterOption<V extends string | number> {

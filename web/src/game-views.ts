@@ -16,7 +16,7 @@ import type {
   JoinType,
 } from './persistence.js';
 import type { SessionUser } from './auth.js';
-import type { MyGamesQuery as ResolvedMyGamesQuery } from './list-query.js';
+import type { FilterErrorCode, MyGamesQuery as ResolvedMyGamesQuery } from './list-query.js';
 
 /**
  * The view assembly for the game screen and the games lists — what a game
@@ -34,11 +34,14 @@ import type { MyGamesQuery as ResolvedMyGamesQuery } from './list-query.js';
  * single statement where the commands enforce it.
  */
 
+// The four list-filter codes are composed in from `list-query.ts`, the one
+// statement of the filter vocabulary (ADR-0013's derivation): the game module
+// owns the lifecycle codes, the filter module owns the four it can fail under,
+// and the parent union can never desync from the child because it contains it.
 export type GameErrorCode =
+  | FilterErrorCode
   | 'forbidden'
   | 'not-found'
-  | 'invalid-board-size'
-  | 'invalid-join-type'
   | 'invalid-invite'
   | 'invalid-starter'
   | 'invalid-ptn'
@@ -54,8 +57,6 @@ export type GameErrorCode =
   | 'already-removed'
   | 'invalid-export-format'
   | 'invalid-move-number'
-  | 'invalid-status'
-  | 'invalid-sort'
   | 'invalid-follow'
   /** The stored record no longer parses or replays (ADR-0005); internal, like `persistence`. */
   | 'corrupt-record'

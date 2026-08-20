@@ -9,8 +9,22 @@ import {
   parseReturnTo,
   queryString,
   resolveQuery,
+  type FilterErrorCode,
   type RawGet,
 } from '../src/list-query.js';
+import type { GameErrorCode } from '../src/game-views.js';
+
+/**
+ * The subset invariant (ADR-0013): every code a filter can fail under must
+ * remain a game error code, because `app.ts` hands a `FilterError` straight to
+ * `statusForGameError`. `game-views.ts` composes `FilterErrorCode` into
+ * `GameErrorCode` by construction, so this can only break if someone
+ * re-decouples the modules — and when it does, this type fails to compile.
+ */
+type _FilterCodesAreGameCodes = FilterErrorCode extends GameErrorCode ? true : never;
+// The type above is the guard — a filter code that stops being a game code
+// turns it into `never`, which fails this compile-time assignment.
+void (null as unknown as _FilterCodesAreGameCodes);
 
 /** A `RawGet` from a plain object, the shape both a query string and a form body reduce to in the tests below. */
 function get(values: Record<string, string | undefined>): RawGet {
