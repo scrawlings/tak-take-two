@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import Database from 'better-sqlite3';
 import { ok, err } from 'neverthrow';
 import { runMigrations } from '../src/db.js';
-import { createPersistence } from '../src/persistence.js';
+import { createPersistence, type Persistence } from '../src/persistence.js';
 
 function makeDb(): Database.Database {
   const db = new Database(':memory:');
