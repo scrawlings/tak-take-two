@@ -1471,49 +1471,20 @@ describe('games: resign and draw', () => {
 });
 
 describe('games: game view', () => {
-  it('renders imported history as fixed and played moves as live', () => {
+  it('lands a played move in the view through the command and read paths', () => {
+    // The wiring half of the shape test (the shape itself lives in
+    // `game-views.test.ts`): a move played through `applyGame` persists and
+    // reaches the view on the next `getGame`.
     const h = harness();
     const r = h.games.applyGame(h.aoife, { type: 'propose', boardSize: 5, joinType: 'open', ptn: OPENING_PTN });
     const gameId = (r._unsafeUnwrap() as { gameId: number }).gameId;
     h.games.applyGame(h.takashi, { type: 'join', gameId });
 
-    const before = h.games.getGame(h.aoife, gameId)._unsafeUnwrap();
-    expect(before.moves).toHaveLength(4);
-    expect(before.moves.every((m) => m.imported)).toBe(true);
-    expect(before.board).toHaveLength(5);
-    expect(before.board[0]).toHaveLength(5);
-
     h.games.applyGame(h.aoife, { type: 'playMove', gameId, move: 'b2' });
 
     const after = h.games.getGame(h.aoife, gameId)._unsafeUnwrap();
     expect(after.moves).toHaveLength(5);
-    expect(after.moves[4]).toMatchObject({
-      number: 5,
-      seat: 1,
-      notation: 'b2',
-      imported: false,
-      player: { id: 1, displayName: 'Aoife Nolan' },
-    });
-  });
-
-  it('marks the viewer seat and whether they may move', () => {
-    const h = harness();
-    const r = h.games.applyGame(h.aoife, { type: 'propose', boardSize: 5, joinType: 'open' });
-    const gameId = (r._unsafeUnwrap() as { gameId: number }).gameId;
-    h.games.applyGame(h.takashi, { type: 'join', gameId });
-
-    const aoifeView = h.games.getGame(h.aoife, gameId)._unsafeUnwrap();
-    expect(aoifeView.viewerSeat).toBe(1);
-    expect(aoifeView.canMove).toBe(true);
-    expect(aoifeView.canResign).toBe(true);
-    expect(aoifeView.canOfferDraw).toBe(true);
-    expect(aoifeView.canOfferTakeBack).toBe(false); // no move of hers yet
-
-    const takashiView = h.games.getGame(h.takashi, gameId)._unsafeUnwrap();
-    expect(takashiView.viewerSeat).toBe(2);
-    expect(takashiView.canMove).toBe(false);
-    expect(takashiView.canResign).toBe(true);
-    expect(takashiView.canOfferDraw).toBe(true);
+    expect(after.moves[4]).toMatchObject({ number: 5, seat: 1, notation: 'b2' });
   });
 
   it('reports not-found for a game the viewer cannot see, and for a stranger to a shared game gives no seat', () => {
@@ -1530,6 +1501,82 @@ describe('games: game view', () => {
 
     // Invited games start unshared, so the stranger cannot see it at all.
     expect(h.games.getGame(stranger, gameId)._unsafeUnwrapErr().code).toBe('not-found');
+  });
+});
+
+describe('games: read delegation (ADR-0011)', () => {
+  function propose(h: Harness): number {
+    const r = h.games.applyGame(h.aoife, { type: 'propose', boardSize: 5, joinType: 'open' });
+    return (r._unsafeUnwrap() as { gameId: number }).gameId;
+  }
+
+  // Each read method's contract with the view assembly: every persistence
+  // touch happens here, batched, and the view module is fed — never reading
+  // for itself. These pin the delegation, so a refactor that moves reads into
+  // `game-views.ts` (or back into per-row loads) fails them.
+  it('getGame reads the record once and names once', () => {
+    const h = harness();
+    const gameId = propose(h);
+    h.games.applyGame(h.takashi, { type: 'join', gameId });
+
+    const findById = vi.spyOn(h.persistence, 'findGameById');
+    const listMoves = vi.spyOn(h.persistence, 'listMoves');
+    const listLastPositions = vi.spyOn(h.persistence, 'listLastPositions');
+
+    h.games.getGame(h.aoife, gameId)._unsafeUnwrap();
+
+    expect(findById).toHaveBeenCalledTimes(1);
+    expect(listMoves).toHaveBeenCalledTimes(1);
+    expect(listLastPositions).not.toHaveBeenCalled();
+  });
+
+  it('listMyGames reads each batch once and never per row', () => {
+    const h = harness();
+    const gameIds = [propose(h), propose(h)];
+    for (const gameId of gameIds) {
+      h.games.applyGame(h.takashi, { type: 'join', gameId });
+      // One move each, so every game has a snapshot and the batched path is
+      // the one taken (the snapshot-less fallback is a separate, rare path).
+      h.games.applyGame(h.aoife, { type: 'playMove', gameId, move: 'a1' });
+    }
+
+    const timestamps = vi.spyOn(h.persistence, 'listLastMoveTimestamps');
+    const positions = vi.spyOn(h.persistence, 'listLastPositions');
+    const listMoves = vi.spyOn(h.persistence, 'listMoves');
+
+    h.games.listMyGames(h.aoife)._unsafeUnwrap();
+
+    expect(timestamps).toHaveBeenCalledTimes(1);
+    expect(positions).toHaveBeenCalledTimes(1);
+    expect(listMoves).not.toHaveBeenCalled();
+  });
+
+  it('searchProposed reads the batch once and never loads a record per row', () => {
+    const h = harness();
+    propose(h);
+
+    const listProposed = vi.spyOn(h.persistence, 'listProposedGames');
+    const listMoves = vi.spyOn(h.persistence, 'listMoves');
+
+    h.games.searchProposed(h.takashi)._unsafeUnwrap();
+
+    expect(listProposed).toHaveBeenCalledTimes(1);
+    expect(listMoves).not.toHaveBeenCalled();
+  });
+
+  it('listAllGames reads the batch once and never loads a record per row', () => {
+    const h = harness();
+    const gameId = propose(h);
+    h.games.applyGame(h.takashi, { type: 'join', gameId });
+    h.games.applyGame(h.aoife, { type: 'playMove', gameId, move: 'a1' });
+
+    const listAll = vi.spyOn(h.persistence, 'listAllGames');
+    const listMoves = vi.spyOn(h.persistence, 'listMoves');
+
+    h.games.listAllGames(h.root)._unsafeUnwrap();
+
+    expect(listAll).toHaveBeenCalledTimes(1);
+    expect(listMoves).not.toHaveBeenCalled();
   });
 });
 
