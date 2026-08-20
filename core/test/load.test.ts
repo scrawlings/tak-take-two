@@ -9,8 +9,8 @@ import {
   generateTps,
   loadGame,
   playMove,
+  positionsOf,
   resultCode,
-  stateAfter,
 } from '../src/index';
 import type { BoardSize, GameState, Move, ResultCode, StoredGame, StoredMove, TakGame } from '../src/index';
 import { move, place, play } from './helpers';
@@ -207,45 +207,57 @@ describe('loadGame: the stored result string decides how the game ended', () => 
   });
 });
 
-describe('stateAfter', () => {
+describe('positionsOf', () => {
   const live = [place('e1', 'flat'), place('e5', 'flat')];
   const all = [...OPENING, ...live];
 
+  /** A position, as `positionsOf` reports it, for cross-checking against a fresh engine replay. */
+  const tpsOf = (moves: readonly Move[], size: BoardSize = 5): string => generateTps(engineReplay(moves, size));
+
   it('is the empty board at 0', () => {
-    expect(mustTak(stateAfter(writeRecord(5, OPENING, live), 0))).toEqual(createGame(5));
+    const positions = mustTak(positionsOf(writeRecord(5, OPENING, live)));
+    expect(positions[0]).toBe(generateTps(createGame(5)));
   });
 
-  it('replays inside imported history (the fallback path)', () => {
+  it('is the position inside imported history at each index', () => {
     const record = writeRecord(5, OPENING, live);
-    expect(mustTak(stateAfter(record, 2))).toEqual(engineReplay(OPENING.slice(0, 2)));
+    const positions = mustTak(positionsOf(record));
+    expect(positions[2]).toBe(tpsOf(OPENING.slice(0, 2)));
   });
 
   it('is the post-import position at fixedMoves', () => {
     const record = writeRecord(5, OPENING, live);
-    expect(mustTak(stateAfter(record, 4))).toEqual(engineReplay(OPENING));
+    const positions = mustTak(positionsOf(record));
+    expect(positions[4]).toBe(tpsOf(OPENING));
   });
 
-  it('reads the stored snapshot inside live moves', () => {
+  it('is the stored snapshot inside live moves, used verbatim', () => {
     const record = writeRecord(5, OPENING, live);
-    expect(mustTak(stateAfter(record, 5))).toEqual(engineReplay(all.slice(0, 5)));
+    const positions = mustTak(positionsOf(record));
+    expect(positions[5]).toBe(record.moves[0]!.position);
+    expect(positions[5]).toBe(tpsOf(all.slice(0, 5)));
+  });
+
+  it('catches a garbled snapshot anywhere in the live moves, not just the last one', () => {
+    // `positionsOf` restores every live move's own snapshot (the same trust
+    // boundary `liveState` uses for the one `loadGame` needs), so a garbled
+    // one is caught wherever it is, not just at the position actually read.
+    const record = writeRecord(5, OPENING, live);
+    const moves = record.moves.map((m, i) => (i === 0 ? { ...m, position: 'nonsense' } : m));
+    expect(mustErr(positionsOf({ ...record, moves })).code).toBe('corrupt-record');
   });
 
   it('is the loaded state at the total', () => {
     const record = writeRecord(5, OPENING, live);
-    expect(mustTak(stateAfter(record, 6))).toEqual(mustTak(loadGame(record)).state);
+    const positions = mustTak(positionsOf(record));
+    expect(positions[6]).toBe(generateTps(mustTak(loadGame(record)).state));
   });
 
   it('falls back to replay when a live snapshot is null', () => {
     const record = writeRecord(5, [], all);
     const moves = record.moves.map((m, i) => (i === 3 ? { ...m, position: null } : m));
-    expect(mustTak(stateAfter({ ...record, moves }, 4))).toEqual(engineReplay(all.slice(0, 4)));
-  });
-
-  it('refuses a move number outside the record', () => {
-    const record = writeRecord(5, OPENING, live);
-    expect(mustErr(stateAfter(record, 7)).code).toBe('invalid-move-number');
-    expect(mustErr(stateAfter(record, -1)).code).toBe('invalid-move-number');
-    expect(mustErr(stateAfter(record, 1.5)).code).toBe('invalid-move-number');
+    const positions = mustTak(positionsOf({ ...record, moves }));
+    expect(positions[4]).toBe(tpsOf(all.slice(0, 4)));
   });
 });
 
@@ -295,10 +307,10 @@ describe('corrupt records', () => {
     expect(corrupt({ ...record, moves })).not.toMatch(/game \d/);
   });
 
-  it('reports corruption from stateAfter too', () => {
+  it('reports corruption from positionsOf too', () => {
     const record = writeRecord(5, [], OPENING);
     const moves = record.moves.map((m, i) => (i === 1 ? { ...m, position: 'nonsense' } : m));
-    expect(mustErr(stateAfter({ ...record, moves }, 2)).code).toBe('corrupt-record');
+    expect(mustErr(positionsOf({ ...record, moves })).code).toBe('corrupt-record');
   });
 });
 

@@ -10,9 +10,9 @@ import {
   loadGame,
   parseMove,
   playMove as corePlayMove,
+  positionsOf,
   resign as coreResign,
   resultCode,
-  stateAfter,
 } from '@tak/core';
 import type {
   GameError as CoreGameError,
@@ -709,11 +709,11 @@ export function createGames(persistence: Persistence): Games {
    * A core loader fault, named for the caller: the core reports what is wrong
    * with the record, this module says which game it belongs to. `corrupt-record`
    * is stored data gone bad, not a failed query — it is answered 500 all the
-   * same. The loader's only other fault is a move number outside the record,
-   * which the export range-checks before asking, so it should not arrive.
+   * same. It is the loader's only possible fault (ADR-0005) — `loadGame` and
+   * `positionsOf` alike — now that `positionsOf` has no move-number bounds of
+   * its own to fail on; the export range-checks `throughMove` before asking.
    */
   function recordError(gameId: number, error: CoreGameError): GameError {
-    if (error.code !== 'corrupt-record') return { code: 'invalid-move-number', message: error.message };
     return { code: 'corrupt-record', message: `game ${gameId}: ${error.message}` };
   }
 
@@ -730,7 +730,7 @@ export function createGames(persistence: Persistence): Games {
 
   /**
    * The stored record alongside the playable game it loads to. `export` and
-   * the scrubber's per-move TPS both need the record itself (for `stateAfter`)
+   * the scrubber's per-move TPS both need the record itself (for `positionsOf`)
    * as well as what `loadTakGame` gives them, so this reads the rows once and
    * hands back both rather than each re-deriving `tak` from a `record` it
    * already has.
@@ -1344,11 +1344,12 @@ export function createGames(persistence: Persistence): Games {
 
     let text: string;
     if (format.value === 'tps') {
-      // A position needs the board, so the export asks the core for the state
-      // after that move — one snapshot read, not a replay.
-      const position = stateAfter(record, throughMove).mapErr((error) => recordError(game.id, error));
-      if (position.isErr()) return err(position.error);
-      text = generateTps(position.value);
+      // A position needs the board, so the export asks the core for every
+      // position the record has and takes the one it wants (core computes
+      // the imported prefix once regardless of how many are asked for).
+      const positions = positionsOf(record).mapErr((error) => recordError(game.id, error));
+      if (positions.isErr()) return err(positions.error);
+      text = positions.value[throughMove]!;
     } else {
       // Who held each seat here. A record that does not name its players is a
       // move list, not a game record (CONTEXT.md: PTN is tags, moves, result).
@@ -1437,23 +1438,25 @@ export function createGames(persistence: Persistence): Games {
     const lastLiveSeat: 1 | 2 | null =
       tak.history.length > tak.fixedMoves ? ((tak.history.length - 1) % 2 === 0 ? 1 : 2) : null;
 
+    // The scrubber renders straight from this: the position after every move,
+    // read the same way `export`'s TPS does — one core call for the whole
+    // record, not one per move (core computes the imported prefix once).
+    const positions = positionsOf(record).mapErr((error) => recordError(game.id, error));
+    if (positions.isErr()) return err(positions.error);
+
     const moves: MoveView[] = [];
     for (let i = 0; i < tak.history.length; i++) {
       const rec = tak.history[i]!;
       const seat: 1 | 2 = i % 2 === 0 ? 1 : 2;
       const ref = seat === 1 ? seat1Ref : seat2Ref;
       if (ref === null) continue; // moves exist only after a join, so the joiner is known
-      // The scrubber renders straight from this: the position after each move,
-      // read the same way `export`'s TPS does (core's `stateAfter`).
-      const position = stateAfter(record, i + 1).mapErr((error) => recordError(game.id, error));
-      if (position.isErr()) return err(position.error);
       moves.push({
         number: i + 1,
         seat,
         player: ref,
         notation: formatMove(rec.move),
         imported: i < tak.fixedMoves,
-        tps: generateTps(position.value),
+        tps: positions.value[i + 1]!,
       });
     }
 

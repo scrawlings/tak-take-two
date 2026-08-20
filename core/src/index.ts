@@ -11,9 +11,9 @@ export {
   loadGame,
   mutualDraw,
   playMove,
+  positionsOf,
   resign,
   resultCode,
-  stateAfter,
   toPtn,
   undo,
 } from './aggregate';

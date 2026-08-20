@@ -8,7 +8,7 @@ import { err, ok } from 'neverthrow';
 import type { Result } from 'neverthrow';
 import { applyMove, computeOutcome, createGame } from './game';
 import { generatePtn, isResultCode, parseMove, parsePtn } from './ptn';
-import { parseTps } from './tps';
+import { generateTps, parseTps } from './tps';
 import { opponent } from './types';
 import type {
   BoardSize,
@@ -57,9 +57,7 @@ export type GameErrorCode =
   | 'no-move-to-undo'
   | 'invalid-move'
   /** A stored record no longer parses or replays: the data is corrupt, not the input. */
-  | 'corrupt-record'
-  /** A move number outside the record's history was asked for. */
-  | 'invalid-move-number';
+  | 'corrupt-record';
 
 export interface GameError {
   readonly code: GameErrorCode;
@@ -72,15 +70,20 @@ function gameError(code: GameErrorCode, message: string, extra: Partial<GameErro
   return { code, message, ...extra };
 }
 
-/** Replay moves from an empty board, returning the final state (or a rule error). */
-function replay(size: BoardSize, moves: readonly Move[]): Result<GameState, RuleError> {
-  let state = createGame(size);
+/**
+ * Replay moves from an empty board, keeping every intermediate state —
+ * index 0 is the empty board, index i is the position after move i — not
+ * just the final one, so a caller that wants a position at any move number
+ * indexes into one replay instead of asking for a fresh one per move.
+ */
+function replay(size: BoardSize, moves: readonly Move[]): Result<readonly GameState[], RuleError> {
+  const states: GameState[] = [createGame(size)];
   for (const m of moves) {
-    const applied = applyMove(state, m);
+    const applied = applyMove(states[states.length - 1]!, m);
     if (applied.isErr()) return err(applied.error);
-    state = applied.value;
+    states.push(applied.value);
   }
-  return ok(state);
+  return ok(states);
 }
 
 /** The aggregate-level end implied by an engine outcome, if any. */
@@ -131,10 +134,11 @@ export function fromPtn(game: PtnGame, options: FromPtnOptions = {}): Result<Tak
       }),
     );
   }
+  const finalState = replayed.value.at(-1)!;
   const playedAt = options.playedAt ?? null;
   const history: RecordedMove[] = game.moves.map((move) => ({ move, playedAt }));
-  const result = boardEnd(replayed.value) ?? endFromCode(game.result);
-  return ok({ state: replayed.value, history, fixedMoves: history.length, result });
+  const result = boardEnd(finalState) ?? endFromCode(game.result);
+  return ok({ state: finalState, history, fixedMoves: history.length, result });
 }
 
 /** Load a PTN record from text (parse + replay-validate + load as fixed history). */
@@ -176,23 +180,39 @@ function corrupt(reason: string): GameError {
   return gameError('corrupt-record', reason);
 }
 
+/** `importedPrefix`'s result: the post-import position as a `TakGame`, and every position along the way (index 0 is the empty board). */
+interface ImportedPrefix {
+  readonly base: TakGame;
+  readonly states: readonly GameState[];
+}
+
 /**
  * The position a record starts its live moves from: the replayed import, or an
- * empty board. The imported record's own result tag is dropped — the stored
- * result string is the only word on how *this* game ended.
+ * empty board — and every position the import passed through, for `positionsOf`.
+ * The imported record's own result tag is dropped — the stored result string is
+ * the only word on how *this* game ended. Parses and replays directly (not via
+ * `fromPtnText`/`fromPtn`) since those discard every position but the last one.
  */
-function importedPrefix(record: StoredGame): Result<TakGame, GameError> {
-  if (record.importedPtn === null) return ok(createTakGame(record.size));
-  const loaded = fromPtnText(record.importedPtn);
-  if (loaded.isErr()) {
-    return err(corrupt(`the imported record no longer replays: ${loaded.error.message}`));
+function importedPrefix(record: StoredGame): Result<ImportedPrefix, GameError> {
+  if (record.importedPtn === null) {
+    return ok({ base: createTakGame(record.size), states: [createGame(record.size)] });
   }
-  if (loaded.value.state.size !== record.size) {
+  const parsed = parsePtn(record.importedPtn);
+  if (parsed.isErr()) {
+    return err(corrupt(`the imported record no longer replays: ${parsed.error.message}`));
+  }
+  if (parsed.value.size !== record.size) {
     return err(
-      corrupt(`the imported record is a ${loaded.value.state.size}x${loaded.value.state.size} game, not ${record.size}x${record.size}`),
+      corrupt(`the imported record is a ${parsed.value.size}x${parsed.value.size} game, not ${record.size}x${record.size}`),
     );
   }
-  return ok({ ...loaded.value, result: null });
+  const replayed = replay(record.size, parsed.value.moves);
+  if (replayed.isErr()) {
+    return err(corrupt(`the imported record no longer replays: ${replayed.error.message}`));
+  }
+  const states = replayed.value;
+  const history: RecordedMove[] = parsed.value.moves.map((move) => ({ move, playedAt: null }));
+  return ok({ base: { state: states.at(-1)!, history, fixedMoves: history.length, result: null }, states });
 }
 
 /**
@@ -235,7 +255,11 @@ function restoreState(position: string, size: BoardSize, last: Move): Result<Gam
 /**
  * The state after the first `count` live moves — the snapshot of move `count`
  * when it has one, else a replay of those moves from the post-import position.
- * `count` is at least 1.
+ * `count` is at least 1. Deliberately touches nothing before `count`: `loadGame`
+ * always asks for the full count, so this is its O(1) read of the last move
+ * alone, not a walk through every move before it (`positionsOf`, which
+ * genuinely needs every position, does its own walk below — the two share a
+ * trust rule, not an implementation; ADR-0009 explains why they stay separate).
  */
 function liveState(base: TakGame, record: StoredGame, count: number): Result<GameState, GameError> {
   const position = record.moves[count - 1]!.position;
@@ -268,7 +292,7 @@ function liveState(base: TakGame, record: StoredGame, count: number): Result<Gam
 export function loadGame(record: StoredGame): Result<TakGame, GameError> {
   const prefix = importedPrefix(record);
   if (prefix.isErr()) return err(prefix.error);
-  const base = prefix.value;
+  const { base } = prefix.value;
 
   const result = storedEnd(record.result);
   if (result.isErr()) return err(result.error);
@@ -297,33 +321,50 @@ export function loadGame(record: StoredGame): Result<TakGame, GameError> {
 }
 
 /**
- * The state after move `n` of a stored record's full history: the empty board
- * at 0, the stored snapshot inside the live moves, and a replay when `n` cuts
- * inside imported history, which no snapshot covers.
+ * Every position in a stored record's full history, as TPS (ADR-0009) —
+ * index 0 is the empty board, index n is the position after move n.
+ * Replaces the old `stateAfter(record, n)`, which computed one position per
+ * call and, for a
+ * record with an imported prefix, re-parsed and re-replayed that whole
+ * prefix on every single call — O(moves × prefix length) for a caller (the
+ * game screen's move-history scrubber) that wants every position at once.
+ * The imported prefix is parsed and replayed once here regardless of how
+ * many positions are asked for. Unlike `liveState` above — which only ever
+ * needs the *last* live move and so never touches an earlier one — every
+ * live move is genuinely wanted here, so each is read through the same
+ * trust boundary `liveState` uses for its one: a present snapshot is
+ * restored (ADR-0005), never blindly replayed past. One failure anywhere
+ * fails the whole result: nothing downstream renders a game past a corrupt
+ * move anyway.
  */
-export function stateAfter(record: StoredGame, n: number): Result<GameState, GameError> {
-  if (!Number.isInteger(n) || n < 0) {
-    return err(gameError('invalid-move-number', `move number ${n} is not a move in this record`));
-  }
-  if (n === 0) return ok(createGame(record.size));
-
+export function positionsOf(record: StoredGame): Result<readonly string[], GameError> {
   const prefix = importedPrefix(record);
   if (prefix.isErr()) return err(prefix.error);
-  const base = prefix.value;
+  const { base, states } = prefix.value;
 
-  const totalMoves = base.fixedMoves + record.moves.length;
-  if (n > totalMoves) {
-    return err(gameError('invalid-move-number', `this record has ${totalMoves} moves; ${n} is beyond it`));
-  }
-  if (n === base.fixedMoves) return ok(base.state);
-  if (n < base.fixedMoves) {
-    const replayed = replay(record.size, base.history.slice(0, n).map((r) => r.move));
-    if (replayed.isErr()) {
-      return err(corrupt(`the imported record no longer replays to move ${n}: ${replayed.error.message}`));
+  const positions = states.map((s) => generateTps(s));
+
+  let state = base.state;
+  for (let i = 0; i < record.moves.length; i++) {
+    const move = storedMove(record, base.fixedMoves, i);
+    if (move.isErr()) return err(move.error);
+    const position = record.moves[i]!.position;
+    if (position !== null) {
+      const restored = restoreState(position, record.size, move.value);
+      if (restored.isErr()) return err(restored.error);
+      state = restored.value;
+      positions.push(position);
+      continue;
     }
-    return ok(replayed.value);
+    const applied = applyMove(state, move.value);
+    if (applied.isErr()) {
+      return err(corrupt(`stored move ${base.fixedMoves + i + 1} no longer replays: ${applied.error.message}`));
+    }
+    state = applied.value;
+    positions.push(generateTps(state));
   }
-  return liveState(base, record, n - base.fixedMoves);
+
+  return ok(positions);
 }
 
 /** Play a move, recording it with a timestamp. */
@@ -352,7 +393,12 @@ export function undo(game: TakGame): Result<TakGame, GameError> {
   if (replayed.isErr()) {
     return err(gameError('invalid-move', replayed.error.message, { ruleError: replayed.error }));
   }
-  return ok({ state: replayed.value, history: game.history.slice(0, -1), fixedMoves: game.fixedMoves, result: null });
+  return ok({
+    state: replayed.value.at(-1)!,
+    history: game.history.slice(0, -1),
+    fixedMoves: game.fixedMoves,
+    result: null,
+  });
 }
 
 /** Resign as `player`; the opponent wins. */
