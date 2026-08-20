@@ -64,18 +64,19 @@ describe('base page shell', () => {
     expect(html).toContain('alpinejs');
   });
 
-  it('loads Alpine and the inlined bundle for a page that asks for the client', () => {
+  it('loads Alpine and the served bundle for a page that asks for the client', () => {
     const html = renderShell('Client', '', { scripts: 'client' });
 
     expect(html).toContain('alpinejs');
-    expect(html).toContain('takBoard');
-    expect(html).toContain('takStream');
+    // The bundle is a served file (ADR-0013), referenced by URL — not inlined.
+    expect(html).toContain('src="/client.js"');
+    expect(html).not.toContain('takBoard'); // it lives in the file, not the page
   });
 
   it('runs the bundle before Alpine, which it registers its components on', () => {
     const html = renderShell('Client', '', { scripts: 'client' });
 
-    expect(html.indexOf('alpine:init')).toBeLessThan(html.indexOf('alpinejs'));
+    expect(html.indexOf('src="/client.js"')).toBeLessThan(html.indexOf('alpinejs'));
   });
 
   it('loads no datastar anywhere — ADR-0007 dropped it', () => {
@@ -90,6 +91,20 @@ describe('base page shell', () => {
     expect(res.status).toBe(200);
     const html = await res.text();
     expect(html).not.toContain('<script');
+  });
+
+  it('serves the stylesheet and the client bundle as files (ADR-0013)', async () => {
+    const app = makeApp();
+
+    const css = await app.request('/site.css');
+    expect(css.status).toBe(200);
+    expect(css.headers.get('content-type')).toContain('text/css');
+    expect(await css.text()).toContain('--stone');
+
+    const js = await app.request('/client.js');
+    expect(js.status).toBe(200);
+    expect(js.headers.get('content-type')).toContain('text/javascript');
+    expect(await js.text()).toContain('takBoard');
   });
 
   it('serves the status page with the same shell and no client runtime', async () => {

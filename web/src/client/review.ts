@@ -115,14 +115,14 @@ export function parseReviewPosition(text: string): ReviewPosition | null {
   };
 }
 
-const GLYPH: Readonly<Record<1 | 2, Readonly<Record<StoneKind, string>>>> = {
-  1: { flat: '●', standing: '▲', capstone: '■' },
-  2: { flat: '○', standing: '△', capstone: '□' },
-};
+import { stoneGlyph as contractStoneGlyph } from '../contract.js';
 
-/** The board glyph for one stone — matches `views.ts`'s `stoneGlyph` exactly. */
+/**
+ * The board glyph for one stone — from the one table in `contract.ts`
+ * (ADR-0013), which `views.ts` renders the live board from too.
+ */
 export function stoneGlyph(stone: ReviewStone): string {
-  return GLYPH[stone.player][stone.kind];
+  return contractStoneGlyph(stone.player, stone.kind);
 }
 
 /** A square's stack in this position, or empty when nothing is there. */

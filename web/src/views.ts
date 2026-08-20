@@ -11,7 +11,30 @@ import {
   type FindGamesSearch,
   type MyGamesQuery,
 } from './list-query.js';
-import type { StoneKind } from '@tak/core';
+import {
+  BOARD_CLASS,
+  CAN_MOVE_ATTR,
+  COMPONENTS,
+  FLAG_OFF,
+  FLAG_ON,
+  HEIGHT_ATTR,
+  METHODS,
+  MOVE_LINK_CLASS,
+  MOVE_MODEL,
+  MOVE_NUMBER_ATTR,
+  REGION_ATTR,
+  SELF_PLAY_ATTR,
+  SQUARE_ATTR,
+  STACK_ATTR,
+  stoneGlyph,
+  TOP_ATTR,
+  TOTAL_ATTR,
+  TOTAL_MOVES_ATTR,
+  TPS_ATTR,
+  VIEWER_SEAT_ATTR,
+  type BoardConfig,
+  type StreamConfig,
+} from './contract.js';
 
 /**
  * Server-rendered auth/admin views. Keep the markup thin: these pages only
@@ -35,7 +58,7 @@ export type Regions<K extends string = string> = Readonly<Record<K, string>>;
 
 /** Mark a region so the stream component can find and replace it. */
 function region(name: string, html: string): string {
-  return `<div data-region="${name}">${html}</div>`;
+  return `<div ${REGION_ATTR}="${name}">${html}</div>`;
 }
 
 /**
@@ -44,7 +67,7 @@ function region(name: string, html: string): string {
  * click-builder's composition — because the stream replaces what is inside it.
  */
 function streamed(url: string, html: string): string {
-  return `<div x-data="takStream(${escapeHtml(JSON.stringify({ url }))})">
+  return `<div x-data="${COMPONENTS.stream}(${escapeHtml(JSON.stringify({ url } satisfies StreamConfig))})">
   <p class="hint stream-lapsed" x-show="!live" x-cloak>Live updates have stopped — reload the page to catch up.</p>
   ${html}
 </div>`;
@@ -762,12 +785,7 @@ export function renderNotFoundPage(): string {
 </div>`;
 }
 
-/** The board glyph for one stone. P1 fills; P2 outlines. */
-function stoneGlyph(player: 1 | 2, kind: StoneKind): string {
-  if (kind === 'flat') return player === 1 ? '●' : '○';
-  if (kind === 'standing') return player === 1 ? '▲' : '△';
-  return player === 1 ? '■' : '□';
-}
+/** The board glyph for one stone — one table for server and bundle, in `contract.ts` (ADR-0013). */
 
 function playerColor(seat: 1 | 2): string {
   return seat === 1 ? '●' : '○';
@@ -795,7 +813,7 @@ function renderBoard(game: GameView): string {
         const square = `${cell.file}${cell.rank}`;
         // What this square receives if the move is played: the builder's own
         // count, so the board shows the distribution rather than just the path.
-        const drops = `<span class="cell-drops" x-show="dropsOn('${square}') > 0" x-cloak x-text="dropsOn('${square}')"></span>`;
+        const drops = `<span class="cell-drops" x-show="${METHODS.dropsOn}('${square}') > 0" x-cloak x-text="${METHODS.dropsOn}('${square}')"></span>`;
         const stackTip =
           cell.stack.length === 0
             ? ''
@@ -808,9 +826,9 @@ function renderBoard(game: GameView): string {
         // needs nothing beyond the same `x-show="reviewing"` toggle to keep
         // showing the reviewed position: Alpine re-binds the fresh nodes
         // against the surviving review state on every swap.
-        const content = `<span x-show="!reviewing">${glyph}${height}</span><span x-show="reviewing" x-cloak x-html="reviewCell('${square}')"></span>`;
-        const tip = `<span x-show="!reviewing">${stackTip}</span><span x-show="reviewing" x-cloak x-html="reviewStackTip('${square}')"></span>`;
-        return `<button type="button" class="cell" data-square="${square}" data-height="${cell.stack.length}" data-top="${topAttr}" data-stack="${stackAttr}" x-on:click="cellClick($el)" :class="{ 'is-source': isSource('${square}'), 'is-path': dropsOn('${square}') > 0 }" aria-label="${square}">${content}${drops}${tip}</button>`;
+        const content = `<span x-show="!reviewing">${glyph}${height}</span><span x-show="reviewing" x-cloak x-html="${METHODS.reviewCell}('${square}')"></span>`;
+        const tip = `<span x-show="!reviewing">${stackTip}</span><span x-show="reviewing" x-cloak x-html="${METHODS.reviewStackTip}('${square}')"></span>`;
+        return `<button type="button" class="cell" ${SQUARE_ATTR}="${square}" ${HEIGHT_ATTR}="${cell.stack.length}" ${TOP_ATTR}="${topAttr}" ${STACK_ATTR}="${stackAttr}" x-on:click="${METHODS.cellClick}($el)" :class="{ 'is-source': ${METHODS.isSource}('${square}'), 'is-path': ${METHODS.dropsOn}('${square}') > 0 }" aria-label="${square}">${content}${drops}${tip}</button>`;
       })
       .join('');
     rows.push(`<span class="axis">${rank}</span>${cells}`);
@@ -821,11 +839,11 @@ function renderBoard(game: GameView): string {
   // Held in the `x-data` config instead, it would freeze at page load and a
   // streamed update would leave a live move form above an inert board.
   const standing = [
-    `data-can-move="${game.canMove ? '1' : '0'}"`,
-    `data-viewer-seat="${game.viewerSeat ?? ''}"`,
-    `data-self-play="${game.selfPlay ? '1' : '0'}"`,
+    `${CAN_MOVE_ATTR}="${game.canMove ? FLAG_ON : FLAG_OFF}"`,
+    `${VIEWER_SEAT_ATTR}="${game.viewerSeat ?? ''}"`,
+    `${SELF_PLAY_ATTR}="${game.selfPlay ? FLAG_ON : FLAG_OFF}"`,
   ].join(' ');
-  return `<div class="board" ${standing} style="grid-template-columns: auto repeat(${game.boardSize}, 2.75rem)">${top}${rows.join('')}</div>`;
+  return `<div class="${BOARD_CLASS}" ${standing} style="grid-template-columns: auto repeat(${game.boardSize}, 2.75rem)">${top}${rows.join('')}</div>`;
 }
 
 function renderGameStatus(game: GameView): string {
@@ -894,9 +912,9 @@ function renderReviewBar(game: GameView): string {
   const waiting = game.canMove ? `<p class="review-waiting">Your turn — they’re waiting on you.</p>` : '';
   return `<div class="review-bar panel" x-show="reviewing" x-cloak>
   <p>Viewing move <span x-text="reviewAt"></span> of ${game.moves.length}.</p>
-  <p class="review-pulse" data-total-moves="${game.moves.length}" x-show="newMoveWhileReviewing($el)" x-cloak>New move.</p>
+  <p class="review-pulse" ${TOTAL_MOVES_ATTR}="${game.moves.length}" x-show="${METHODS.newMoveWhileReviewing}($el)" x-cloak>New move.</p>
   ${waiting}
-  <p class="actions"><button type="button" class="btn btn-sm" x-on:click="snapToEnd()">Snap to end</button></p>
+  <p class="actions"><button type="button" class="btn btn-sm" x-on:click="${METHODS.snapToEnd}()">Snap to end</button></p>
 </div>`;
 }
 
@@ -942,14 +960,14 @@ function renderGameControls(game: GameView): string {
         : viewer === 1 ? 2 : 1;
     const stoneButtons = (['flat', 'standing', 'capstone'] as const)
       .map(
-        (kind) => `<button type="button" class="stone-btn" x-on:click="pick('${kind}')" :class="{ 'is-selected': stone === '${kind}' }" :aria-pressed="stone === '${kind}'" aria-label="Place a ${kind} stone"><span class="stone-glyph">${stoneGlyph(placing, kind)}</span><span class="stone-btn-name">${kind}</span></button>`,
+        (kind) => `<button type="button" class="stone-btn" x-on:click="${METHODS.pick}('${kind}')" :class="{ 'is-selected': stone === '${kind}' }" :aria-pressed="stone === '${kind}'" aria-label="Place a ${kind} stone"><span class="stone-glyph">${stoneGlyph(placing, kind)}</span><span class="stone-btn-name">${kind}</span></button>`,
       )
       .join('');
     parts.push(`
 <form class="panel" method="post" action="/games/${game.id}/move" x-show="!reviewing" x-cloak>
   <div class="field">
     <label for="move">Your move</label>
-    <input id="move" name="move" x-model="move" placeholder="a1, Sa1, or 5b4&gt;212" autocomplete="off" spellcheck="false">
+    <input id="move" name="move" x-model="${MOVE_MODEL}" placeholder="a1, Sa1, or 5b4&gt;212" autocomplete="off" spellcheck="false">
     <p class="hint">Type Portable Tak Notation, or build it by clicking the board above.</p>
   </div>
   <div class="field">
@@ -961,10 +979,10 @@ function renderGameControls(game: GameView): string {
   <div class="field" x-show="source !== null" x-cloak>
     <span class="label" id="lift-label">Stones to lift</span>
     <div class="stepper" role="group" aria-labelledby="lift-label">
-      <button type="button" class="step-btn" x-on:click="bumpLift(-1)" :disabled="lift <= liftFloor" aria-label="Lift one stone fewer">−</button>
+      <button type="button" class="step-btn" x-on:click="${METHODS.bumpLift}(-1)" :disabled="lift <= liftFloor" aria-label="Lift one stone fewer">−</button>
       <span class="stepper-value" x-text="lift + ' of ' + (source ? source.height : 0)"></span>
-      <button type="button" class="step-btn" x-on:click="bumpLift(1)" :disabled="lift >= liftCeiling" aria-label="Lift one stone more">+</button>
-      <button type="button" class="btn btn-quiet btn-sm" x-on:click="cancel()">Cancel</button>
+      <button type="button" class="step-btn" x-on:click="${METHODS.bumpLift}(1)" :disabled="lift >= liftCeiling" aria-label="Lift one stone more">+</button>
+      <button type="button" class="btn btn-quiet btn-sm" x-on:click="${METHODS.cancel}()">Cancel</button>
     </div>
     <p class="hint">Holding <span x-text="lift"></span> from <span class="mono" x-text="sourceSquare"></span> — click a square in a straight line, or the source again to put them back.</p>
     <p class="stack-partition mono" aria-hidden="true" x-text="partition"></p>
@@ -975,9 +993,9 @@ function renderGameControls(game: GameView): string {
       <template x-for="(step, i) in path" :key="step.square">
         <span class="drop-step">
           <span class="mono drop-square" x-text="step.square"></span>
-          <button type="button" class="step-btn" x-on:click="shiftDrop(i, -1)" :disabled="!canShiftDrop(i, -1)" :aria-label="'Move a stone from ' + step.square + ' to the square before it'">◀</button>
+          <button type="button" class="step-btn" x-on:click="${METHODS.shiftDrop}(i, -1)" :disabled="!${METHODS.canShiftDrop}(i, -1)" :aria-label="'Move a stone from ' + step.square + ' to the square before it'">◀</button>
           <span class="drop-count" x-text="step.drops"></span>
-          <button type="button" class="step-btn" x-on:click="shiftDrop(i, 1)" :disabled="!canShiftDrop(i, 1)" :aria-label="'Move a stone from ' + step.square + ' to the square after it'">▶</button>
+          <button type="button" class="step-btn" x-on:click="${METHODS.shiftDrop}(i, 1)" :disabled="!${METHODS.canShiftDrop}(i, 1)" :aria-label="'Move a stone from ' + step.square + ' to the square after it'">▶</button>
         </span>
       </template>
     </div>
@@ -1034,7 +1052,7 @@ function renderHistory(game: GameView): string {
     // idiom the board cells use, so the adapter needs nothing beyond the
     // click target.
     const cell = (m: GameView['moves'][number]): string =>
-      `<button type="button" class="move-link mono" data-move-number="${m.number}" data-tps="${escapeHtml(m.tps)}" data-total="${total}" x-on:click="scrubTo($el)" :class="{ 'is-reviewed': reviewAt === ${m.number} }">${escapeHtml(m.notation)}</button> <span class="dim">${escapeHtml(m.player.displayName)}</span> ${exportLinks(game.id, m.number)}`;
+      `<button type="button" class="${MOVE_LINK_CLASS} mono" ${MOVE_NUMBER_ATTR}="${m.number}" ${TPS_ATTR}="${escapeHtml(m.tps)}" ${TOTAL_ATTR}="${total}" x-on:click="${METHODS.scrubTo}($el)" :class="{ 'is-reviewed': reviewAt === ${m.number} }">${escapeHtml(m.notation)}</button> <span class="dim">${escapeHtml(m.player.displayName)}</span> ${exportLinks(game.id, m.number)}`;
     const second = game.moves[i + 1];
     lines.push(`<li><span class="mono">${turn}.</span> ${cell(game.moves[i]!)}${second ? ` ${cell(second)}` : ''}</li>`);
   }
@@ -1055,13 +1073,13 @@ function renderLegend(): string {
 function renderShortcutsHelp(): string {
   return `<p class="shortcuts-help panel" x-show="helpVisible" x-cloak>
   <kbd>Enter</kbd> play the move · <kbd>[</kbd> <kbd>]</kbd> step the history · <kbd>u</kbd> request a take-back · <kbd>Esc</kbd> cancel / snap to live · <kbd>?</kbd> toggle this help
-  <button type="button" class="btn btn-quiet btn-sm" x-on:click="toggleHelp()">Close</button>
+  <button type="button" class="btn btn-quiet btn-sm" x-on:click="${METHODS.toggleHelp}()">Close</button>
 </p>`;
 }
 
 /** A reserve count: the live figure, or the reviewed one while scrubbed — see `renderBoard`'s cells. */
 function reserveCount(seat: 1 | 2, kind: 'stones' | 'capstones', live: number): string {
-  return `<span x-show="!reviewing">${live}</span><span x-show="reviewing" x-cloak x-text="reviewReserve(${seat}, '${kind}')"></span>`;
+  return `<span x-show="!reviewing">${live}</span><span x-show="reviewing" x-cloak x-text="${METHODS.reviewReserve}(${seat}, '${kind}')"></span>`;
 }
 
 function renderReserves(game: GameView): string {
@@ -1175,7 +1193,7 @@ export function renderGamePage(user: SessionUser, game: GameView, view: GameView
 ${region('status', regions.status)}
 ${error}
 ${renderLegend()}
-<div x-data="takBoard(${escapeHtml(JSON.stringify(boardConfig))})" x-cloak x-on:keydown.window="handleKey($event)">
+<div x-data="${COMPONENTS.board}(${escapeHtml(JSON.stringify(boardConfig satisfies BoardConfig))})" x-cloak x-on:keydown.window="${METHODS.handleKey}($event)">
   ${renderShortcutsHelp()}
   ${region('board', regions.board)}
   ${region('controls', regions.controls)}

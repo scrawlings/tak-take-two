@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { Hono, type Context } from 'hono';
 import { routePath } from 'hono/route';
 import { streamSSE } from 'hono/streaming';
@@ -8,7 +11,11 @@ import type { Persistence, PersistenceSnapshot } from './persistence.js';
 import { Metrics } from './metrics.js';
 import type { Logger } from './logging.js';
 import { newRequestId } from './logging.js';
-import { escapeHtml, renderShell, siteCss } from './html.js';
+import { escapeHtml, renderShell } from './html.js';
+import { SITE_CSS_URL, CLIENT_SCRIPT_URL } from './static-urls.js';
+
+/** The committed static assets (ADR-0013): `web/static/`, one level up from this module's directory. */
+const STATIC_DIR = join(fileURLToPath(new URL('..', import.meta.url)), 'static');
 import { createAuth, type Auth, type AuthError, type SessionUser } from './auth.js';
 import { createGames, type GameError, type Games } from './games.js';
 import { GAMES_TOPIC, announceGameChanges, createUpdates, gameTopic } from './updates.js';
@@ -414,8 +421,21 @@ export function createApp(deps: AppDeps): App {
     });
   });
 
-  app.get('/site.css', (c) =>
-    c.text(siteCss(), 200, { 'content-type': 'text/css; charset=utf-8' }),
+  // The served assets (ADR-0013): committed files in `web/static/`, read per
+  // request so an edit needs no rebuild — the cache headers are the only thing
+  // between the browser and the freshest bytes. `/site.css` and `/client.js`
+  // were previously strings (the latter inlined into every page); serving them
+  // as files is what lets the shell reference them by URL instead.
+  app.get(SITE_CSS_URL, (c) =>
+    c.text(readFileSync(join(STATIC_DIR, 'site.css'), 'utf8'), 200, {
+      'content-type': 'text/css; charset=utf-8',
+    }),
+  );
+  app.get(CLIENT_SCRIPT_URL, (c) =>
+    c.text(readFileSync(join(STATIC_DIR, 'client.js'), 'utf8'), 200, {
+      'content-type': 'text/javascript; charset=utf-8',
+      'cache-control': 'public, max-age=3600',
+    }),
   );
 
   app.get('/status', (c) => {

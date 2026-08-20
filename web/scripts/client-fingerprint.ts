@@ -28,7 +28,13 @@ function filesUnder(dir: string): string[] {
 
 export function sourcesFingerprint(): string {
   const hash = createHash('sha256');
-  const sources = [...filesUnder(join(webRoot, 'src', 'client')), join(webRoot, 'vite.client.config.ts')];
+  // `contract.ts` is bundled too (the client imports it), so it counts as a
+  // source even though it lives outside `src/client/`.
+  const sources = [
+    ...filesUnder(join(webRoot, 'src', 'client')),
+    join(webRoot, 'src', 'contract.ts'),
+    join(webRoot, 'vite.client.config.ts'),
+  ];
   for (const path of sources) {
     // The separators keep two different file lists from hashing alike.
     hash.update(`\0${relative(webRoot, path)}\0`);

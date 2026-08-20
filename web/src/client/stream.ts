@@ -28,11 +28,7 @@
  * move survives being redrawn.
  */
 
-/** What the page tells the stream. */
-export interface StreamConfig {
-  /** The SSE route for this page, already carrying whatever it needs (filters, id). */
-  readonly url: string;
-}
+import { attributeSelector, datasetKey, REGION_ATTR, type StreamConfig } from '../contract.js';
 
 export interface StreamComponent {
   /** Whether the connection is up. The page shows a quiet notice when it is not. */
@@ -55,8 +51,8 @@ export interface StreamComponent {
 function findRegions(root: HTMLElement | undefined): Record<string, HTMLElement> {
   const found: Record<string, HTMLElement> = {};
   if (root === undefined) return found;
-  root.querySelectorAll<HTMLElement>('[data-region]').forEach((element) => {
-    const name = element.dataset.region;
+  root.querySelectorAll<HTMLElement>(attributeSelector(REGION_ATTR)).forEach((element) => {
+    const name = element.dataset[datasetKey(REGION_ATTR)];
     if (name !== undefined && name !== '') found[name] = element;
   });
   return found;

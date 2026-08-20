@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { boardComponent } from '../src/client/board-adapter.js';
-import type { BoardConfig } from '../src/client/board-adapter.js';
+import type { BoardConfig } from '../src/contract.js';
 
 /**
  * The Alpine adapter as plain data: the seat rule, the move field, and the

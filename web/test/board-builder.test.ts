@@ -1,4 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
 import { formatMove, parseMove } from '@tak/core';
 import {
   chooseStone,
@@ -10,8 +13,13 @@ import {
   setLift,
 } from '../src/client/move-builder.js';
 import type { BuilderState } from '../src/client/move-builder.js';
-import { CLIENT_SCRIPT, CLIENT_SCRIPT_SOURCES } from '../src/client-script.generated.js';
 import { sourcesFingerprint } from '../scripts/client-fingerprint.js';
+
+const webRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
+const COMMITTED_BUNDLE = readFileSync(join(webRoot, 'static', 'client.js'), 'utf8');
+const COMMITTED_FINGERPRINT = JSON.parse(
+  readFileSync(join(webRoot, 'static', 'client.fingerprint.json'), 'utf8'),
+) as { fingerprint: string };
 
 /**
  * The board move builder at its interface: clicks and adjustments in, composed
@@ -300,18 +308,18 @@ describe('everything the builder composes re-parses as core wrote it', () => {
   });
 });
 
-describe('the inlined bundle', () => {
+describe('the committed bundle', () => {
   it('was built from the client sources as they stand', () => {
     // The bundle is committed so nothing needs a build step to run; the cost is
     // that editing src/client/ without rebuilding would serve a stale script.
-    expect(CLIENT_SCRIPT_SOURCES, 'run `npm run build:client -w web`').toBe(sourcesFingerprint());
+    expect(COMMITTED_FINGERPRINT.fingerprint, 'run `npm run build:client -w web`').toBe(sourcesFingerprint());
   });
 
   it('carries the builder and registers every component the site has', () => {
-    expect(CLIENT_SCRIPT).toContain('takBoard');
-    expect(CLIENT_SCRIPT).toContain('takStream');
-    expect(CLIENT_SCRIPT).toContain('alpine:init');
-    // It is inlined between script tags, so it must not close one itself.
-    expect(CLIENT_SCRIPT).not.toContain('</script>');
+    expect(COMMITTED_BUNDLE).toContain('takBoard');
+    expect(COMMITTED_BUNDLE).toContain('takStream');
+    expect(COMMITTED_BUNDLE).toContain('alpine:init');
+    // It is served as a file now (ADR-0013), so the inline-tag constraint is
+    // gone — but nothing in the sources writes a closing tag anyway.
   });
 });

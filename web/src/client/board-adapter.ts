@@ -30,14 +30,26 @@ import { cellContent, parseReviewPosition, reserveAt, stackTipContent } from './
 import type { ReviewPosition } from './review.js';
 import { resolveShortcut, stepReview } from './shortcuts.js';
 import type { FocusTarget, ShortcutKey } from './shortcuts.js';
-
-/**
- * What the game page tells the board once and for all. Everything else the
- * adapter needs is on the board element, which the stream keeps current.
- */
-export interface BoardConfig {
-  readonly size: number;
-}
+import {
+  BOARD_CLASS,
+  CAN_MOVE_ATTR,
+  datasetKey,
+  FLAG_ON,
+  HEIGHT_ATTR,
+  MOVE_ACTION_SUFFIX,
+  MOVE_LINK_CLASS,
+  MOVE_NUMBER_ATTR,
+  SELF_PLAY_ATTR,
+  SQUARE_ATTR,
+  STACK_ATTR,
+  TAKE_BACK_ACTION_SUFFIX,
+  TOP_ATTR,
+  TOTAL_ATTR,
+  TOTAL_MOVES_ATTR,
+  TPS_ATTR,
+  VIEWER_SEAT_ATTR,
+  type BoardConfig,
+} from '../contract.js';
 
 /**
  * What the viewer may do with this board right now, as the server rendered it
@@ -54,11 +66,11 @@ interface BoardStanding {
 
 /** Read the standing off the board this cell belongs to. */
 function standingOf(cell: HTMLElement): BoardStanding {
-  const data = cell.closest<HTMLElement>('.board')?.dataset ?? {};
+  const data = cell.closest<HTMLElement>(`.${BOARD_CLASS}`)?.dataset ?? {};
   return {
-    canMove: data.canMove === '1',
-    viewerSeat: data.viewerSeat ?? '',
-    selfPlay: data.selfPlay === '1',
+    canMove: data[datasetKey(CAN_MOVE_ATTR)] === FLAG_ON,
+    viewerSeat: data[datasetKey(VIEWER_SEAT_ATTR)] ?? '',
+    selfPlay: data[datasetKey(SELF_PLAY_ATTR)] === FLAG_ON,
   };
 }
 
@@ -221,12 +233,12 @@ export function boardComponent(config: BoardConfig): BoardComponent {
       if (this.reviewing) return; // no move can be composed while showing an earlier position
       const standing = standingOf(el);
       if (!standing.canMove) return;
-      const square = el.dataset.square ?? '';
-      const height = Number(el.dataset.height ?? '0');
-      const top = el.dataset.top ?? '';
+      const square = el.dataset[datasetKey(SQUARE_ATTR)] ?? '';
+      const height = Number(el.dataset[datasetKey(HEIGHT_ATTR)] ?? '0');
+      const top = el.dataset[datasetKey(TOP_ATTR)] ?? '';
       // `data-top` reads "seat|kind"; an empty square carries neither.
       const mine = top !== '' && (standing.selfPlay || top[0] === standing.viewerSeat);
-      this.apply(clickSquare(this.state, { square, height, mine }), el.dataset.stack ?? '');
+      this.apply(clickSquare(this.state, { square, height, mine }), el.dataset[datasetKey(STACK_ATTR)] ?? '');
     },
 
     isSource(square: SquareRef): boolean {
@@ -272,12 +284,12 @@ export function boardComponent(config: BoardConfig): BoardComponent {
      * Any in-progress composition is dropped: a scrubbed board shows no path.
      */
     scrubTo(el: HTMLElement): void {
-      const number = Number(el.dataset.moveNumber ?? '');
-      const position = parseReviewPosition(el.dataset.tps ?? '');
+      const number = Number(el.dataset[datasetKey(MOVE_NUMBER_ATTR)] ?? '');
+      const position = parseReviewPosition(el.dataset[datasetKey(TPS_ATTR)] ?? '');
       if (!Number.isInteger(number) || position === null) return;
       this.reviewAt = number;
       this.reviewPosition = position;
-      this.reviewTotal = Number(el.dataset.total ?? number);
+      this.reviewTotal = Number(el.dataset[datasetKey(TOTAL_ATTR)] ?? number);
       this.apply(clearSelection(this.state));
     },
 
@@ -303,7 +315,7 @@ export function boardComponent(config: BoardConfig): BoardComponent {
     /** A move has streamed in since `scrubTo` recorded the total moves then. */
     newMoveWhileReviewing(el: HTMLElement): boolean {
       if (!this.reviewing || this.reviewTotal === null) return false;
-      return Number(el.dataset.totalMoves ?? '0') > this.reviewTotal;
+      return Number(el.dataset[datasetKey(TOTAL_MOVES_ATTR)] ?? '0') > this.reviewTotal;
     },
 
     toggleHelp(): void {
@@ -316,7 +328,7 @@ export function boardComponent(config: BoardConfig): BoardComponent {
      * element a click would have carried, just found instead of clicked.
      */
     moveLinks(): HTMLElement[] {
-      return Array.from(this.$root?.querySelectorAll<HTMLElement>('.move-link') ?? []);
+      return Array.from(this.$root?.querySelectorAll<HTMLElement>(`.${MOVE_LINK_CLASS}`) ?? []);
     },
 
     /**
@@ -367,10 +379,10 @@ export function boardComponent(config: BoardConfig): BoardComponent {
           this.step(1);
           break;
         case 'play':
-          if (!this.reviewing) this.submitForm('/move');
+          if (!this.reviewing) this.submitForm(MOVE_ACTION_SUFFIX);
           break;
         case 'takeback':
-          this.submitForm('/take-back');
+          this.submitForm(TAKE_BACK_ACTION_SUFFIX);
           break;
       }
     },

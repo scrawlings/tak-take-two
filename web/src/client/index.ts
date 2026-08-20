@@ -11,6 +11,7 @@
 
 import { boardComponent } from './board-adapter.js';
 import { streamComponent } from './stream.js';
+import { COMPONENTS } from '../contract.js';
 
 interface AlpineGlobal {
   data<C>(name: string, factory: (config: C) => object): void;
@@ -19,6 +20,6 @@ interface AlpineGlobal {
 declare const Alpine: AlpineGlobal;
 
 document.addEventListener('alpine:init', () => {
-  Alpine.data('takBoard', boardComponent);
-  Alpine.data('takStream', streamComponent);
+  Alpine.data(COMPONENTS.board, boardComponent);
+  Alpine.data(COMPONENTS.stream, streamComponent);
 });

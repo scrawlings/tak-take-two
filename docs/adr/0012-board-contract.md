@@ -1,0 +1,22 @@
+# The board's server↔client contract lives in one constants module
+
+The board's markup contract — `data-square`, `data-height`, `data-top`, `data-region`, the `'1'`/`'0'` flags, the `seat|kind` encoding, the `/move` and `/take-back` action suffixes, and the Alpine vocabulary (`takBoard`, `cellClick`, `scrubTo`, …) — was declared as string literals on both sides of the bundle seam: `web/src/views.ts` emits them into HTML, and the bundled client (`web/src/client/`, ADR-0006/ADR-0007) reads them back. Renaming one side compiled clean and broke at runtime, pinned only by a few HTTP assertions. The contract moves into `web/src/contract.ts`, a pure constants module both sides import — the same fix ADR-0008 applied to list filters, on the harder bundle seam.
+
+Status: accepted
+
+## The decision
+
+- **`web/src/contract.ts` holds every string that crosses the seam**: the twelve data- attributes, the class names (`board`, `move-link`), the value encodings (`FLAG_ON`/`FLAG_OFF`, the `seat|kind` separator, the two action suffixes), and the Alpine vocabulary (`COMPONENTS`, `METHODS`, the `move` model name). Both the server views and the bundled client import it; a rename is now a compile error on whichever side missed it. The module is deliberately pure — no DOM, no node — so the server tsconfig (no DOM lib) and the client tsconfig (no node types) both accept it.
+- **The dataset keys and selectors are derived, not declared twice.** The client reads `el.dataset[key]`, where the key is kebab→camel of the attribute (`data-can-move` → `canMove`); one pure `datasetKey()` helper implements that rule. `attributeSelector()` derives `[data-region]` the same way. Each fact has one constant; the other syntactic forms are computed from it.
+- **The Alpine method names are emitter-side constants plus a guard test.** The adapter's methods stay literal keys (for `this.` binding and interface checking); `views.ts` interpolates `METHODS.cellClick` etc. into `x-on`/`x-show`/`x-html`/`x-text`/`:class` expressions. A test in `web/test/contract.test.ts` pins the two together: every `METHODS` name must be a function on the component the bundle registers, so renaming either side fails. The config shapes (`BoardConfig`, `StreamConfig`) move here too, so the server's emission is typechecked against the shape the client reads.
+- **`contract.ts` is a client-bundle source.** The fingerprint test (ADR-0006's drift guard) now hashes it alongside `src/client/`, so editing the contract without rebuilding the committed bundle fails the same way editing the adapter does.
+- **The contract's tests are DOM-side tests.** `contract.test.ts` drives `boardComponent` and so joins `board-adapter.test.ts`/`stream.test.ts` in the client tsconfig's include (and the server tsconfig's exclude) — the established pattern for tests that touch the adapter.
+- **Region names are not part of the contract.** `stream.ts` matches regions generically (`findRegions` reads whatever `[data-region]` elements exist); the `'status'|'board'|…` union lives in `views.ts` and is consumed by `app.ts` — all server-side, already typechecked. What crosses is the attribute and its selector, nothing more.
+- **`review.ts` and `shortcuts.ts` are untouched.** Verified: they consume no contract strings — the architecture review's diagram drew leak arrows to them schematically; the adapter feeds them pure data.
+
+## Considered options
+
+- **Leave the literals and rely on the HTTP assertions.** Rejected: that is the status quo the candidate names as the problem. The assertions pin *values* (`data-tps="…"`, `x-on:click="scrubTo($el)"`); they stay, and the contract module pins *names* — the rename that sails through HTTP assertions now fails at compile time.
+- **Computed method keys in the adapter (`[METHODS.cellClick](el) {...}`).** Rejected: works at runtime but breaks the `BoardComponent` interface check without casts and makes every `this.` call-site indirect. The guard test achieves the same no-silent-rename guarantee with ordinary, readable methods.
+- **Typed readers in the contract module (`squareOf(el)`, `standingOf(el)`).** Rejected: `standingOf` is adapter behavior (it reads the board element and builds a duck-typed standing), not contract vocabulary; moving DOM handling into a module both tsconfigs must accept undoes the purity that lets it live at root.
+- **Export both the attribute and the dataset key for each fact.** Rejected: two constants per fact is the drift the module exists to kill; `datasetKey` derives the second form from the first.
