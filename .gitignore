@@ -16,3 +16,4 @@ web/dist-client/
 *.db-wal
 .agents
 .claude
+graphify-out
