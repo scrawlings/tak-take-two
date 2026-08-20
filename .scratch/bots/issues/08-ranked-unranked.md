@@ -8,6 +8,7 @@
 
 - [ ] The proposal carries a `ranked` flag; the propose form offers ranked (default) / unranked for human games; bot games are forced unranked by construction (the executor's proposal path sets it).
 - [ ] The flag is immutable for the game's life and recorded with the game record.
+- [ ] Ranked games should not be deleted even if hidden by both players. Include a show all ranked games even if hidden option in the games filters.
 - [ ] A small tag in the lists ("ranked" / "unranked") and on the game page; hidden or shown per the list's existing density (match the "imported" tag pattern).
 - [ ] Tests at the HTTP seam: human proposal defaults ranked; unranked option persists; a bot game is never ranked; the tag renders.
 
