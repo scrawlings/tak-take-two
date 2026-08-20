@@ -200,9 +200,10 @@ export function createApp(deps: AppDeps): App {
   /**
    * A list-mutating form (hide/join/follow/propose/delete) carries where it
    * was drawn from in one `return_to` hidden field — the page's own current
-   * URL — rather than one hidden field per filter (`list-query.ts`). These
-   * two read what `return_to` names, so a refusal or a redirect lands back on
-   * the right list, still narrowed the way the player had it.
+   * URL — rather than one hidden field per filter, or the three-valued `from`
+   * field this replaced (ADR-0008). These two read what `return_to` names,
+   * so a refusal or a redirect lands back on the right list, still narrowed
+   * the way the player had it.
    */
   const isFindReturn = (returnTo: string | null | undefined): boolean => matchesBasePath('/games/find', returnTo);
   const gameViewReturn = (returnTo: string | null | undefined): boolean =>

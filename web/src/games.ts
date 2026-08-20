@@ -1645,9 +1645,10 @@ export function createGames(persistence: Persistence): Games {
       const player = requirePlayer(actor);
       if (player.isErr()) return err(player.error);
 
-      // `list-query.ts` (via `app.ts`) has already validated every field; this
-      // module only ever composes the resolved values, filling in whatever a
-      // caller (a test, most often) left out.
+      // `list-query.ts` (via `app.ts`) has already validated every field —
+      // ADR-0008's narrow exception to this module owning validation — so
+      // this module only ever composes the resolved values, filling in
+      // whatever a caller (a test, most often) left out.
       const resolved = resolveQuery(MY_GAMES_SCHEMA, query);
 
       const states = resolved.status === null ? ALL_LIST_STATES : [resolved.status];

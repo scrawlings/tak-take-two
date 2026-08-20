@@ -1,8 +1,8 @@
 import { err, ok, type Result } from 'neverthrow';
 
 /**
- * The two games lists ("Your games", "Find a game") each narrow and sort
- * through a handful of query-string filters. Before this module, "what's a
+ * ADR-0008: the two games lists ("Your games", "Find a game") each narrow
+ * and sort through a handful of query-string filters. Before this module, "what's a
  * valid `sort`", its label, its default, and whether it counts as narrowing
  * the default view were declared separately in `app.ts`, `games.ts`, and
  * `views.ts` — restatements of the same facts, one of which (`views.ts`'s
