@@ -10,7 +10,7 @@ import type { Logger } from './logging.js';
 import { newRequestId } from './logging.js';
 import { escapeHtml, renderShell, siteCss } from './html.js';
 import { createAuth, type Auth, type AuthError, type SessionUser } from './auth.js';
-import { createGames, type GameError, type Games, type MyGamesQuery, type ProposedSearch } from './games.js';
+import { createGames, type GameError, type Games } from './games.js';
 import { GAMES_TOPIC, announceGameChanges, createUpdates, gameTopic } from './updates.js';
 import {
   createFormAction,
@@ -20,8 +20,15 @@ import {
   paramId,
   statusForAuthError,
   statusForGameError,
-  type FormFields,
 } from './actions.js';
+import {
+  FIND_GAMES_SCHEMA,
+  MY_GAMES_SCHEMA,
+  matchesBasePath,
+  parseQuery,
+  parseReturnTo,
+  queryString,
+} from './list-query.js';
 import {
   renderAccountPage,
   renderAdminUsersPage,
@@ -40,14 +47,11 @@ import {
   findGamesRegions,
   gameRegions,
   myGamesRegions,
-  streamUrlWith,
   type AdminUsersView,
   type FindGamesView,
   type GameViewPageView,
-  type MyGamesFilters,
   type MyGamesView,
   type Regions,
-  type SearchFilters,
 } from './views.js';
 
 export interface AppDeps {
@@ -72,35 +76,6 @@ export type App = Hono<{ Variables: Variables }>;
 
 const SESSION_COOKIE = 'tak_session';
 const SESSION_MAX_AGE_SECONDS = 30 * 24 * 60 * 60;
-
-/**
- * A proposal search built from its four raw values, whatever read them —
- * `proposalSearch` from the query string, `findSearchFromForm` from a
- * follow/unfollow form's hidden fields (ticket 04) — so the two never drift
- * into separately hand-rolled shapes.
- */
-function searchAndFilters(
-  boardSize: string | undefined,
-  joinType: string | undefined,
-  proposer: string | undefined,
-  curated: boolean,
-): { search: ProposedSearch; filters: SearchFilters } {
-  return {
-    search: {
-      // Anything non-numeric lands as NaN, which the module refuses.
-      boardSize: boardSize === undefined ? undefined : Number(boardSize),
-      joinType,
-      proposerDisplayName: proposer,
-      curated,
-    },
-    filters: {
-      boardSize: boardSize ?? null,
-      joinType: joinType ?? null,
-      proposerDisplayName: proposer ?? null,
-      curated,
-    },
-  };
-}
 
 /**
  * Long enough to be quiet, short enough that a connection killed silently in
@@ -222,50 +197,71 @@ export function createApp(deps: AppDeps): App {
       error,
     );
 
-  /** A refused game command is reported on the player's own games list. */
+  /**
+   * A list-mutating form (hide/join/follow/propose/delete) carries where it
+   * was drawn from in one `return_to` hidden field — the page's own current
+   * URL — rather than one hidden field per filter (`list-query.ts`). These
+   * two read what `return_to` names, so a refusal or a redirect lands back on
+   * the right list, still narrowed the way the player had it.
+   */
+  const isFindReturn = (returnTo: string | null | undefined): boolean => matchesBasePath('/games/find', returnTo);
+  const gameViewReturn = (returnTo: string | null | undefined): boolean =>
+    !!returnTo && /^\/games\/\d+$/.test(returnTo);
+
+  /** A refused game command is reported on the player's own games list, still narrowed as `returnTo` had it. */
   const myGamesError = (
     c: Context<{ Variables: Variables }>,
     error: GameError,
-    view?: MyGamesView,
-  ): Response =>
-    pageError(
+    returnTo: string | null | undefined,
+    extra?: Partial<MyGamesView>,
+  ): Response => {
+    const asked = parseReturnTo(MY_GAMES_SCHEMA, '/games', returnTo);
+    return pageError(
       c,
       c.get('user'),
       {
         name: 'list games',
-        reload: () => games.listMyGames(c.get('user')),
+        reload: () => games.listMyGames(c.get('user'), asked),
         render: (data, view: MyGamesView, status) => c.html(renderMyGamesPage(c.get('user'), data, view), status),
-        view: (e): MyGamesView => ({ ...view, error: e.message }),
+        view: (e): MyGamesView => ({ ...extra, error: e.message, filters: asked }),
         statusOf: statusForGameError,
       },
       error,
     );
+  };
 
-  /**
-   * A refused join is reported on whichever list offered the button, so the
-   * player stays where they were and can pick another game. The form says which
-   * list that was; anything but the one known value falls back to their games.
-   */
-  const gameJoinError = (
+  /** A refused follow/unfollow, or a join reported back on the find page — re-run narrowed as `returnTo` had it. */
+  const findGamesError = (
     c: Context<{ Variables: Variables }>,
     error: GameError,
-    from: string | null | undefined,
+    returnTo: string | null | undefined,
   ): Response => {
-    if (error.code === 'forbidden') return forbiddenPage(c, c.get('user'));
-    if (from !== 'find') return myGamesError(c, error);
-
+    const asked = parseReturnTo(FIND_GAMES_SCHEMA, '/games/find', returnTo);
     return pageError(
       c,
       c.get('user'),
       {
         name: 'search games',
-        reload: () => games.searchProposed(c.get('user')),
+        reload: () => games.searchProposed(c.get('user'), asked),
         render: (data, view: FindGamesView, status) => c.html(renderFindGamesPage(c.get('user'), data, view), status),
-        view: (e): FindGamesView => ({ error: e.message }),
+        view: (e): FindGamesView => ({ error: e.message, filters: asked }),
         statusOf: statusForGameError,
       },
       error,
     );
+  };
+
+  /**
+   * A refused join is reported on whichever list offered the button, so the
+   * player stays where they were and can pick another game.
+   */
+  const gameJoinError = (
+    c: Context<{ Variables: Variables }>,
+    error: GameError,
+    returnTo: string | null | undefined,
+  ): Response => {
+    if (error.code === 'forbidden') return forbiddenPage(c, c.get('user'));
+    return isFindReturn(returnTo) ? findGamesError(c, error, returnTo) : myGamesError(c, error, returnTo);
   };
 
   /**
@@ -277,48 +273,8 @@ export function createApp(deps: AppDeps): App {
   const gameHideError = (
     c: Context<{ Variables: Variables }>,
     error: GameError,
-    from: string | null | undefined,
-  ): Response => (from === 'game' ? gameViewError(c, error) : myGamesError(c, error));
-
-  /**
-   * A refused follow/unfollow (ticket 04) is reported back on the find page,
-   * re-run with the same search the form carried in its hidden fields — the
-   * same "reload with what was submitted" shape `myGamesError` follows.
-   */
-  const findGamesError = (
-    c: Context<{ Variables: Variables }>,
-    error: GameError,
-    asked: { search: ProposedSearch; filters: SearchFilters },
-  ): Response =>
-    pageError(
-      c,
-      c.get('user'),
-      {
-        name: 'search games',
-        reload: () => games.searchProposed(c.get('user'), asked.search),
-        render: (data, view: FindGamesView, status) => c.html(renderFindGamesPage(c.get('user'), data, view), status),
-        view: (e): FindGamesView => ({ error: e.message, filters: asked.filters }),
-        statusOf: statusForGameError,
-      },
-      error,
-    );
-
-  /**
-   * The find search a follow/unfollow form's hidden fields carried in — the
-   * same fields `proposalSearch` reads from the query string, read from the
-   * form body instead (ticket 04's follow/unfollow POST back to `/games/find`).
-   */
-  const findSearchFromForm = (f: FormFields): { search: ProposedSearch; filters: SearchFilters } =>
-    searchAndFilters(f.board_size ?? undefined, f.join_type ?? undefined, f.proposer ?? undefined, Boolean(f.curated));
-
-  /** Where a follow/unfollow form returns to — `/games/find` carrying the same search it was submitted from. */
-  const findRedirect = (f: FormFields): string =>
-    streamUrlWith('/games/find', {
-      board_size: f.board_size,
-      join_type: f.join_type,
-      proposer: f.proposer,
-      curated: f.curated,
-    });
+    returnTo: string | null | undefined,
+  ): Response => (gameViewReturn(returnTo) ? gameViewError(c, error) : myGamesError(c, error, returnTo));
 
   /** A refused game command on the game screen is reported there, re-read fresh. */
   const gameViewError = (c: Context<{ Variables: Variables }>, error: GameError): Response => {
@@ -344,36 +300,6 @@ export function createApp(deps: AppDeps): App {
   const query = (c: Context<{ Variables: Variables }>, name: string): string | undefined => {
     const value = c.req.query(name);
     return value === undefined || value.trim() === '' ? undefined : value;
-  };
-
-  /**
-   * The proposal search a request asks for, read once and used twice: the page
-   * and its stream must run the same search and describe it the same way, and
-   * reading the parameters in both places is how they would drift apart.
-   */
-  const proposalSearch = (
-    c: Context<{ Variables: Variables }>,
-  ): { search: ProposedSearch; filters: SearchFilters } =>
-    searchAndFilters(query(c, 'board_size'), query(c, 'join_type'), query(c, 'proposer'), query(c, 'curated') !== undefined);
-
-  /**
-   * The status filter and sort a request asks for (ticket 03), read once and
-   * used twice: the page and its stream must run the same query and describe
-   * it the same way, exactly as `proposalSearch` does for find.
-   */
-  const myGamesQuery = (
-    c: Context<{ Variables: Variables }>,
-  ): { query: MyGamesQuery; filters: MyGamesFilters } => {
-    const status = query(c, 'status');
-    const sort = query(c, 'sort');
-    const direction = query(c, 'direction');
-    // Presence-based, like `curated` on the find form (ticket 04): a checkbox
-    // submits its value only when checked.
-    const showRemoved = query(c, 'show_removed') !== undefined;
-    return {
-      query: { status, sort, direction, showRemoved },
-      filters: { status: status ?? null, sort: sort ?? null, direction: direction ?? null, showRemoved },
-    };
   };
 
   /** What a streamed page needs: a topic to listen on, and how to draw itself. */
@@ -583,75 +509,86 @@ export function createApp(deps: AppDeps): App {
 
   app.get('/games', requireUser, (c) => {
     const actor = c.get('user');
-    const asked = myGamesQuery(c);
+    const parsed = parseQuery(MY_GAMES_SCHEMA, (param) => query(c, param));
+    if (parsed.isErr()) {
+      // A bad status/sort/direction is the user's to fix: keep the form and say what is wrong.
+      return c.html(renderMyGamesPage(actor, [], { error: parsed.error.message }), statusForGameError(parsed.error));
+    }
+    const asked = parsed.value;
     return pageAction(c, actor, {
       name: 'list games',
-      load: () => games.listMyGames(actor, asked.query),
-      render: (data) => c.html(renderMyGamesPage(actor, data, { filters: asked.filters })),
-      // A bad status/sort/direction is the user's to fix: keep the form and say what is wrong.
-      renderError: (e, status) =>
-        c.html(renderMyGamesPage(actor, [], { error: e.message, filters: asked.filters }), status),
-      statusOf: statusForGameError,
+      load: () => games.listMyGames(actor, asked),
+      render: (data) => c.html(renderMyGamesPage(actor, data, { filters: asked })),
     });
   });
 
   // The lists follow one topic: any change anywhere can add a row, remove one,
   // or move whose turn it is (see `GAMES_TOPIC`).
   app.get('/games/stream', requireUser, (c) => {
-    const asked = myGamesQuery(c);
+    const parsed = parseQuery(MY_GAMES_SCHEMA, (param) => query(c, param));
+    if (parsed.isErr()) return c.text(parsed.error.message, statusForGameError(parsed.error));
+    const asked = parsed.value;
     return streamPage(c, {
       name: 'stream games',
       topic: GAMES_TOPIC,
       // The same query the page ran, so the stream's answer is the page's.
-      load: (actor) => games.listMyGames(actor, asked.query),
-      regions: (data) => myGamesRegions(c.get('user'), data, asked.filters),
+      load: (actor) => games.listMyGames(actor, asked),
+      regions: (data) => myGamesRegions(c.get('user'), data, asked),
     });
   });
 
   app.get('/games/find/stream', requireUser, (c) => {
-    const asked = proposalSearch(c);
+    const parsed = parseQuery(FIND_GAMES_SCHEMA, (param) => query(c, param));
+    if (parsed.isErr()) return c.text(parsed.error.message, statusForGameError(parsed.error));
+    const asked = parsed.value;
     return streamPage(c, {
       name: 'stream search',
       topic: GAMES_TOPIC,
       // The same search the page ran, so the stream's answer is the page's.
-      load: (actor) => games.searchProposed(actor, asked.search),
-      regions: (data) => findGamesRegions(c.get('user'), data, asked.filters),
+      load: (actor) => games.searchProposed(actor, asked),
+      regions: (data) => findGamesRegions(c.get('user'), data, asked),
     });
   });
 
   app.get('/games/find', requireUser, (c) => {
     const actor = c.get('user');
-    const asked = proposalSearch(c);
-
+    const parsed = parseQuery(FIND_GAMES_SCHEMA, (param) => query(c, param));
+    if (parsed.isErr()) {
+      // A bad filter is the user's to fix: keep the form and say what is wrong.
+      return c.html(renderFindGamesPage(actor, [], { error: parsed.error.message }), statusForGameError(parsed.error));
+    }
+    const asked = parsed.value;
     return pageAction(c, actor, {
       name: 'search games',
-      load: () => games.searchProposed(actor, asked.search),
-      render: (data) => c.html(renderFindGamesPage(actor, data, { filters: asked.filters })),
-      // A bad filter is the user's to fix: keep the form and say what is wrong.
-      renderError: (e, status) =>
-        c.html(renderFindGamesPage(actor, [], { error: e.message, filters: asked.filters }), status),
-      statusOf: statusForGameError,
+      load: () => games.searchProposed(actor, asked),
+      render: (data) => c.html(renderFindGamesPage(actor, data, { filters: asked })),
     });
   });
 
   app.post('/games/find/follow', requireUser, formAction({
-    fields: ['user_id', 'board_size', 'join_type', 'proposer', 'curated'],
+    fields: ['user_id', 'return_to'],
     run: (c, f) =>
-      games.applyGame(c.get('user'), { type: 'follow', userId: Number(f.user_id) }).map(() => findRedirect(f)),
-    onOk: (c, redirectTo) => c.redirect(redirectTo, 303),
-    renderError: (c, e, f) => findGamesError(c, e, findSearchFromForm(f)),
+      games.applyGame(c.get('user'), { type: 'follow', userId: Number(f.user_id) }).map(() => f.return_to),
+    onOk: (c, returnTo) => {
+      const asked = parseReturnTo(FIND_GAMES_SCHEMA, '/games/find', returnTo);
+      return c.redirect(`/games/find${queryString(FIND_GAMES_SCHEMA, asked)}`, 303);
+    },
+    renderError: (c, e, f) => findGamesError(c, e, f.return_to),
   }));
 
   app.post('/games/find/unfollow', requireUser, formAction({
-    fields: ['user_id', 'board_size', 'join_type', 'proposer', 'curated'],
+    fields: ['user_id', 'return_to'],
     run: (c, f) =>
-      games.applyGame(c.get('user'), { type: 'unfollow', userId: Number(f.user_id) }).map(() => findRedirect(f)),
-    onOk: (c, redirectTo) => c.redirect(redirectTo, 303),
-    renderError: (c, e, f) => findGamesError(c, e, findSearchFromForm(f)),
+      games.applyGame(c.get('user'), { type: 'unfollow', userId: Number(f.user_id) }).map(() => f.return_to),
+    onOk: (c, returnTo) => {
+      const asked = parseReturnTo(FIND_GAMES_SCHEMA, '/games/find', returnTo);
+      return c.redirect(`/games/find${queryString(FIND_GAMES_SCHEMA, asked)}`, 303);
+    },
+    renderError: (c, e, f) => findGamesError(c, e, f.return_to),
   }));
 
   app.post('/games', requireUser, formAction({
-    fields: ['board_size', 'join_type', 'invited_display_name', 'starter', 'ptn'],
+    fields: ['board_size', 'join_type', 'invited_display_name', 'starter', 'ptn', 'return_to'],
     run: (c, f) =>
       games.applyGame(c.get('user'), {
         type: 'propose',
@@ -661,9 +598,12 @@ export function createApp(deps: AppDeps): App {
         starter: f.starter ?? undefined,
         ptn: f.ptn ?? undefined,
       }),
+    // Proposing lands on the unfiltered list regardless of `return_to`: a
+    // filtered view (e.g. status=finished) could hide the very game just
+    // proposed, which would read as the proposal having silently failed.
     onOk: (c) => c.redirect('/games', 303),
     renderError: (c, e, f) =>
-      myGamesError(c, e, {
+      myGamesError(c, e, f.return_to, {
         submitted: {
           boardSize: f.board_size,
           joinType: f.join_type,
@@ -675,7 +615,7 @@ export function createApp(deps: AppDeps): App {
   }));
 
   app.post('/games/:id/join', requireUser, formAction({
-    fields: ['from'],
+    fields: ['return_to'],
     run: (c) =>
       paramId(c, 'id', 'That game no longer exists.').andThen((id) =>
         games.applyGame(c.get('user'), { type: 'join', gameId: id }),
@@ -683,17 +623,20 @@ export function createApp(deps: AppDeps): App {
     // A join means play now: land on the game screen, not back on a list.
     // Only a refused join is reported on the list that offered the button.
     onOk: (c) => c.redirect(`/games/${c.req.param('id')}`, 303),
-    renderError: (c, e, f) => gameJoinError(c, e, f.from),
+    renderError: (c, e, f) => gameJoinError(c, e, f.return_to),
   }));
 
   app.post('/games/:id/delete', requireUser, formAction({
-    fields: [],
-    run: (c) =>
+    fields: ['return_to'],
+    run: (c, f) =>
       paramId(c, 'id', 'That game no longer exists.').andThen((id) =>
-        games.applyGame(c.get('user'), { type: 'deleteProposal', gameId: id }),
+        games.applyGame(c.get('user'), { type: 'deleteProposal', gameId: id }).map(() => f.return_to),
       ),
-    onOk: (c) => c.redirect('/games', 303),
-    renderError: (c, e) => myGamesError(c, e),
+    onOk: (c, returnTo) => {
+      const asked = parseReturnTo(MY_GAMES_SCHEMA, '/games', returnTo);
+      return c.redirect(`/games${queryString(MY_GAMES_SCHEMA, asked)}`, 303);
+    },
+    renderError: (c, e, f) => myGamesError(c, e, f.return_to),
   }));
 
   app.get('/games/:id', requireUser, (c) => {
@@ -856,15 +799,21 @@ export function createApp(deps: AppDeps): App {
   }));
 
   app.post('/games/:id/hide', requireUser, formAction({
-    fields: ['from'],
-    run: (c) =>
+    fields: ['return_to'],
+    run: (c, f) =>
       paramId(c, 'id', 'That game no longer exists.').andThen((id) =>
-        games.applyGame(c.get('user'), { type: 'hide', gameId: id }),
+        games.applyGame(c.get('user'), { type: 'hide', gameId: id }).map(() => f.return_to),
       ),
     // Hiding always leaves the game behind, so success always lands on the
-    // list (ticket 05) — `from` only decides where a refusal is shown.
-    onOk: (c) => c.redirect('/games', 303),
-    renderError: (c, e, f) => gameHideError(c, e, f.from),
+    // list (ticket 05) — narrowed as `return_to` had it when it came from the
+    // list; the game screen's own hide sends `return_to` too (`/games/:id`),
+    // which doesn't match the list's base path, so `parseReturnTo` falls back
+    // to the unfiltered list, same as before.
+    onOk: (c, returnTo) => {
+      const asked = parseReturnTo(MY_GAMES_SCHEMA, '/games', returnTo);
+      return c.redirect(`/games${queryString(MY_GAMES_SCHEMA, asked)}`, 303);
+    },
+    renderError: (c, e, f) => gameHideError(c, e, f.return_to),
   }));
 
   app.post('/games/:id/admin-delete', requireUser, formAction({

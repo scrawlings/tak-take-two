@@ -509,16 +509,11 @@ describe('games: listMyGames status filter and sorting (ticket 03)', () => {
     expect(onlyFinished.map((g) => g.id)).toEqual([finished.gameId]);
   });
 
-  it('refuses a status that is not one of the three lifecycle states', () => {
-    const h = harness();
-    expect(h.games.listMyGames(h.aoife, { status: 'archived' })._unsafeUnwrapErr().code).toBe('invalid-status');
-  });
-
-  it('refuses an unknown sort key or direction', () => {
-    const h = harness();
-    expect(h.games.listMyGames(h.aoife, { sort: 'popularity' })._unsafeUnwrapErr().code).toBe('invalid-sort');
-    expect(h.games.listMyGames(h.aoife, { direction: 'sideways' })._unsafeUnwrapErr().code).toBe('invalid-sort');
-  });
+  // Filter-value validation ('archived' isn't a lifecycle state, 'popularity'
+  // isn't a sort key, ...) moved to `list-query.test.ts` alongside `games.ts`
+  // and `list-query.ts` (candidate 1): `listMyGames` now takes an
+  // already-validated query, so an invalid one is a compile error here, not a
+  // runtime `Result`.
 
   it('sorts by last activity, newest first, by default', () => {
     const h = harness();
@@ -1046,13 +1041,8 @@ describe('games: searchProposed', () => {
     expect(found.map((g) => g.id)).toEqual([aoifes]);
   });
 
-  it('treats a blank name filter as no filter', () => {
-    const h = harness();
-    propose(h, h.aoife);
-    propose(h, h.takashi);
-
-    expect(h.games.searchProposed(h.takashi, { proposerDisplayName: '  ' })._unsafeUnwrap()).toHaveLength(2);
-  });
+  // Blank-means-no-filter is `list-query.ts`'s `text` filter kind now
+  // (candidate 1) — covered in `list-query.test.ts`, not at this seam.
 
   it('matches a name containing LIKE wildcards literally', () => {
     const h = harness();
@@ -1072,12 +1062,10 @@ describe('games: searchProposed', () => {
       .toEqual([oddGame]);
   });
 
-  it('rejects a nonsense filter rather than ignoring it', () => {
-    const h = harness();
-
-    expect(h.games.searchProposed(h.aoife, { boardSize: 7 })._unsafeUnwrapErr().code).toBe('invalid-board-size');
-    expect(h.games.searchProposed(h.aoife, { joinType: 'secret' })._unsafeUnwrapErr().code).toBe('invalid-join-type');
-  });
+  // Filter-value validation ('boardSize: 7' isn't 5 or 6, 'secret' isn't a
+  // join type) moved to `list-query.test.ts` alongside `list-query.ts`
+  // (candidate 1) — `searchProposed` now takes an already-validated search,
+  // so an invalid one is a compile error here, not a runtime `Result`.
 
   it('refuses an admin account', () => {
     const h = harness();

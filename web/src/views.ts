@@ -1,6 +1,16 @@
 import { breadcrumb, escapeHtml, renderShell } from './html.js';
 import type { SessionUser } from './auth.js';
 import type { ExportFormat, GameExport, GameSummary, GameView } from './games.js';
+import {
+  FIND_GAMES_DEFAULT,
+  FIND_GAMES_SCHEMA,
+  MY_GAMES_DEFAULT,
+  MY_GAMES_SCHEMA,
+  isNarrowed,
+  queryString,
+  type FindGamesSearch,
+  type MyGamesQuery,
+} from './list-query.js';
 import type { StoneKind } from '@tak/core';
 
 /**
@@ -331,23 +341,10 @@ ${notice}
   return renderShell('Games', body, { user: actor, path: '/admin/games' });
 }
 
-/**
- * The status filter and sort as submitted, kept as text so the form and the
- * stream URL come back the way they were left (ticket 03) — the same
- * as-submitted-text idiom `SearchFilters` follows for the find form.
- */
-export interface MyGamesFilters {
-  status?: string | null;
-  sort?: string | null;
-  direction?: string | null;
-  /** Ticket 06: "Show removed games" — admin-removed tombstones hidden by default. */
-  showRemoved?: boolean;
-}
-
 export interface MyGamesView {
   error?: string;
-  /** The filter/sort controls as submitted, so the form and the list stream match. */
-  filters?: MyGamesFilters;
+  /** The filter/sort controls as resolved (`list-query.ts`), so the form and the list stream match. */
+  filters?: MyGamesQuery;
   /** Values to put back in the propose form when it comes back with an error. */
   submitted?: {
     boardSize?: string | null;
@@ -391,24 +388,25 @@ function starterHint(game: GameSummary, user: SessionUser): string {
   return ` · ${youStart ? 'you start' : 'you go second'}`;
 }
 
-/** Which list a game action was taken from, so a refusal returns there. */
-export type GameListPage = 'games' | 'find';
+/** Which list a game action was taken from — a rendering-only choice (button visibility), never sent to the server: `returnTo` already tells the server where to land. */
+type GameListPage = 'games' | 'find';
 
 /** The actions a viewer may take on a game, as the module decided them. `extra` appends
  *  pre-rendered buttons that aren't game actions per se (the find page's follow button). */
-function gameActions(game: GameSummary, from: GameListPage, extra = ''): string {
+function gameActions(game: GameSummary, list: GameListPage, returnTo: string, extra = ''): string {
+  const hiddenReturnTo = `<input type="hidden" name="return_to" value="${escapeHtml(returnTo)}">`;
   // Claiming your own proposal starts a self-play game, so the button says
   // what that means rather than a bare “join” (CONTEXT.md: Self-play).
   const join =
     game.canJoin
-      ? `<form method="post" action="/games/${game.id}/join"><input type="hidden" name="from" value="${from}"><button type="submit" class="btn btn-sm"${
+      ? `<form method="post" action="/games/${game.id}/join">${hiddenReturnTo}<button type="submit" class="btn btn-sm"${
           game.canSolo ? ' title="Claim your own game and play both seats yourself."' : ''
         }>${game.canSolo ? 'Solo' : 'Join'}</button></form>`
       : '';
   const buttons = [
     join,
     game.canDelete
-      ? `<form method="post" action="/games/${game.id}/delete"><button type="submit" class="btn btn-danger btn-sm">Delete</button></form>`
+      ? `<form method="post" action="/games/${game.id}/delete">${hiddenReturnTo}<button type="submit" class="btn btn-danger btn-sm">Delete</button></form>`
       : '',
     // A finished game still opens: the board and history stay reviewable
     // (ticket 01's review mode covers finished games), and this was the row's
@@ -422,35 +420,25 @@ function gameActions(game: GameSummary, from: GameListPage, extra = ''): string 
     // find: the viewer's own open proposal can appear there too (joinable by
     // themselves for self-play), and `canHide` is already true for it then —
     // hide belongs to "your games", not to a page for finding one to join.
-    from === 'games' && game.canHide
-      ? `<form method="post" action="/games/${game.id}/hide"><input type="hidden" name="from" value="${from}"><button type="submit" class="btn btn-quiet btn-sm">Hide</button></form>`
+    list === 'games' && game.canHide
+      ? `<form method="post" action="/games/${game.id}/hide">${hiddenReturnTo}<button type="submit" class="btn btn-quiet btn-sm">Hide</button></form>`
       : '',
     extra,
   ].filter(Boolean);
   return `<div class="row-actions">${buttons.join('')}</div>`;
 }
 
-/**
- * Whether the list was narrowed away from its default view — by status
- * (ticket 03) or by turning removed games on (ticket 06: they're off by
- * default, so switching them on is the deviation, the same way turning
- * `curated` on is for `isFiltered`, its find-page analogue). Sort/direction
- * reorder; they never change what "default" means.
- */
-export function isMyGamesFiltered(filters: MyGamesFilters): boolean {
-  return Boolean(filters.status) || Boolean(filters.showRemoved);
-}
-
 /** The player's own games as the list draws them — the one streamed region. */
 export function myGamesRegions(
   user: SessionUser,
   games: readonly GameSummary[],
-  filters: MyGamesFilters = {},
+  filters: MyGamesQuery = MY_GAMES_DEFAULT,
 ): Regions<'games'> {
   return { games: myGamesTable(user, games, filters) };
 }
 
-function myGamesTable(user: SessionUser, games: readonly GameSummary[], filters: MyGamesFilters = {}): string {
+function myGamesTable(user: SessionUser, games: readonly GameSummary[], filters: MyGamesQuery = MY_GAMES_DEFAULT): string {
+  const returnTo = `/games${queryString(MY_GAMES_SCHEMA, filters)}`;
   const rows = games
     .map(
       (game) => `<tr>
@@ -459,7 +447,7 @@ function myGamesTable(user: SessionUser, games: readonly GameSummary[], filters:
   <td>${opponentCell(game)}</td>
   <td>${game.toMove === null ? '<span class="dim">—</span>' : escapeHtml(game.toMove.displayName)}</td>
   <td>${game.imported ? '<span class="tag">imported</span>' : '<span class="dim">empty board</span>'}</td>
-  <td>${gameActions(game, 'games')}</td>
+  <td>${gameActions(game, 'games', returnTo)}</td>
 </tr>`,
     )
     .join('');
@@ -467,7 +455,7 @@ function myGamesTable(user: SessionUser, games: readonly GameSummary[], filters:
   const table =
     games.length === 0
       ? `<p class="lede">${
-          // Keyed on `status` specifically, not the broader `isMyGamesFiltered`
+          // Keyed on `status` specifically, not the broader narrowed-ness
           // (ticket 06 adds `showRemoved` to that): showing removed games only
           // ever adds rows, so it can't explain an empty list on its own — the
           // find page's `curated` follows the same one-message-per-toggle idiom.
@@ -484,16 +472,6 @@ function myGamesTable(user: SessionUser, games: readonly GameSummary[], filters:
   return table;
 }
 
-/** The stream that watches this list: the same filter/sort, so the same answer (ticket 03). */
-function myGamesStreamUrl(filters: MyGamesFilters): string {
-  return streamUrlWith('/games/stream', {
-    status: filters.status,
-    sort: filters.sort,
-    direction: filters.direction,
-    show_removed: filters.showRemoved ? '1' : undefined,
-  });
-}
-
 export function renderMyGamesPage(
   user: SessionUser,
   games: readonly GameSummary[],
@@ -501,16 +479,28 @@ export function renderMyGamesPage(
 ): string {
   const error = view.error ? `<p class="error">${escapeHtml(view.error)}</p>` : '';
   const submitted = view.submitted ?? {};
-  const filters = view.filters ?? {};
+  const filters = view.filters ?? MY_GAMES_DEFAULT;
   const sizeSelected = (size: string): string => (submitted.boardSize === size ? ' selected' : '');
   const joinSelected = (kind: string): string => (submitted.joinType === kind ? ' selected' : '');
   const starterSelected = (value: string): string => (submitted.starter === value ? ' selected' : '');
-  const sortFilter = filters.sort ?? 'activity';
-  const directionFilter = filters.direction ?? 'desc';
+  const returnTo = `/games${queryString(MY_GAMES_SCHEMA, filters)}`;
 
   // Only the table streams: the propose form below holds what the player has
   // typed, and a stream that replaced it would throw their draft away.
-  const list = streamed(myGamesStreamUrl(filters), region('games', myGamesTable(user, games, filters)));
+  const list = streamed(
+    `/games/stream${queryString(MY_GAMES_SCHEMA, filters)}`,
+    region('games', myGamesTable(user, games, filters)),
+  );
+
+  const statusOptions = MY_GAMES_SCHEMA.status.options
+    .map((o) => `<option value="${o.value}"${selected(filters.status, o.value)}>${o.label}</option>`)
+    .join('');
+  const sortOptions = MY_GAMES_SCHEMA.sort.options
+    .map((o) => `<option value="${o.value}"${selected(filters.sort, o.value)}>${o.label}</option>`)
+    .join('');
+  const directionOptions = MY_GAMES_SCHEMA.direction.options
+    .map((o) => `<option value="${o.value}"${selected(filters.direction, o.value)}>${o.label}</option>`)
+    .join('');
 
   const body = `
 <h1>Your games</h1>
@@ -522,25 +512,20 @@ ${error}
       <div class="field">
         <label for="status">Status</label>
         <select id="status" name="status">
-          <option value=""${selected(filters.status, '')}>any</option>
-          <option value="proposed"${selected(filters.status, 'proposed')}>proposed</option>
-          <option value="in_play"${selected(filters.status, 'in_play')}>in play</option>
-          <option value="finished"${selected(filters.status, 'finished')}>finished</option>
+          <option value=""${selected(filters.status, null)}>any</option>
+          ${statusOptions}
         </select>
       </div>
       <div class="field">
         <label for="sort">Sort by</label>
         <select id="sort" name="sort">
-          <option value="activity"${selected(sortFilter, 'activity')}>last activity</option>
-          <option value="created"${selected(sortFilter, 'created')}>creation date</option>
-          <option value="size"${selected(sortFilter, 'size')}>board size</option>
+          ${sortOptions}
         </select>
       </div>
       <div class="field">
         <label for="direction">Order</label>
         <select id="direction" name="direction">
-          <option value="desc"${selected(directionFilter, 'desc')}>descending (newest/largest first)</option>
-          <option value="asc"${selected(directionFilter, 'asc')}>ascending (oldest/smallest first)</option>
+          ${directionOptions}
         </select>
       </div>
     </div>
@@ -549,7 +534,7 @@ ${error}
     </div>
     <p class="actions">
       <button type="submit" class="btn">Apply</button>
-      ${isMyGamesFiltered(filters) ? '<a class="btn btn-quiet" href="/games">Clear</a>' : ''}
+      ${isNarrowed(MY_GAMES_SCHEMA, filters) ? '<a class="btn btn-quiet" href="/games">Clear</a>' : ''}
     </p>
   </form>
   ${list}
@@ -557,6 +542,7 @@ ${error}
 <div class="block">
   <h2>Propose a game</h2>
   <form class="panel" method="post" action="/games" x-data="{ join: '${submitted.joinType === 'invited' ? 'invited' : 'open'}', ptn: ${escapeHtml(JSON.stringify(submitted.ptn ?? ''))} }">
+    <input type="hidden" name="return_to" value="${escapeHtml(returnTo)}">
     <div class="field-grid">
       <!-- A pasted record carries its own [Size], and the module takes the size
            from the record. Disabling the select says so rather than letting a
@@ -614,29 +600,10 @@ function proposalKind(game: GameSummary): string {
     : '<span class="tag">invited to you</span>';
 }
 
-/**
- * A proposal search as it was submitted, kept as text so the form comes back
- * the way it was left. The Game module parses it (`ProposedSearch`); this is
- * only what the page and its stream carry between them.
- */
-export interface SearchFilters {
-  boardSize?: string | null;
-  joinType?: string | null;
-  proposerDisplayName?: string | null;
-  /** Ticket 04: "Only show games from players I follow". */
-  curated?: boolean;
-}
-
-/** Whether the search was narrowed at all — one statement of it, so the empty
- *  message on the page and on a streamed frame cannot disagree. */
-export function isFiltered(filters: SearchFilters): boolean {
-  return Boolean(filters.boardSize || filters.joinType || filters.proposerDisplayName || filters.curated);
-}
-
 export interface FindGamesView {
   error?: string;
-  /** The filters as submitted, so the form comes back the way it was left. */
-  filters?: SearchFilters;
+  /** The search as resolved (`list-query.ts`), so the form comes back the way it was left. */
+  filters?: FindGamesSearch;
 }
 
 /**
@@ -647,7 +614,7 @@ export interface FindGamesView {
 export function findGamesRegions(
   user: SessionUser,
   games: readonly GameSummary[],
-  filters: SearchFilters = {},
+  filters: FindGamesSearch = FIND_GAMES_DEFAULT,
 ): Regions<'games'> {
   return { games: findGamesResults(user, games, filters) };
 }
@@ -655,21 +622,17 @@ export function findGamesRegions(
 /**
  * The follow/unfollow button on a find-page row (ticket 04; CONTEXT.md:
  * Follow). Absent for the viewer's own proposal (`canFollow` is false). The
- * hidden fields carry the current search back to the redirect, so following
- * someone never drops the filters or the curated toggle the player had set.
+ * hidden `return_to` carries the current search back to the redirect, so
+ * following someone never drops the filters or the curated toggle the player
+ * had set.
  */
-function followButton(game: GameSummary, filters: SearchFilters): string {
+function followButton(game: GameSummary, returnTo: string): string {
   if (!game.canFollow) return '';
   const action = game.followed ? '/games/find/unfollow' : '/games/find/follow';
   const label = game.followed ? 'Unfollow' : 'Follow';
-  const hidden = (name: string, value: string | null | undefined): string =>
-    value ? `<input type="hidden" name="${name}" value="${escapeHtml(value)}">` : '';
   return `<form method="post" action="${action}">
   <input type="hidden" name="user_id" value="${game.proposer.id}">
-  ${hidden('board_size', filters.boardSize)}
-  ${hidden('join_type', filters.joinType)}
-  ${hidden('proposer', filters.proposerDisplayName)}
-  ${filters.curated ? '<input type="hidden" name="curated" value="1">' : ''}
+  <input type="hidden" name="return_to" value="${escapeHtml(returnTo)}">
   <button type="submit" class="btn btn-quiet btn-sm">${label}</button>
 </form>`;
 }
@@ -677,9 +640,10 @@ function followButton(game: GameSummary, filters: SearchFilters): string {
 function findGamesResults(
   user: SessionUser,
   games: readonly GameSummary[],
-  filters: SearchFilters,
+  filters: FindGamesSearch,
 ): string {
-  const filtered = isFiltered(filters);
+  const filtered = isNarrowed(FIND_GAMES_SCHEMA, filters);
+  const returnTo = `/games/find${queryString(FIND_GAMES_SCHEMA, filters)}`;
   const rows = games
     .map(
       (game) => `<tr>
@@ -687,7 +651,7 @@ function findGamesResults(
   <td>${proposalKind(game)}${starterHint(game, user)}</td>
   <td>${escapeHtml(game.proposer.displayName)}${game.followed ? ' <span class="tag">followed</span>' : ''}</td>
   <td>${game.imported ? '<span class="tag">imported</span>' : '<span class="dim">empty board</span>'}</td>
-  <td>${gameActions(game, 'find', followButton(game, filters))}</td>
+  <td>${gameActions(game, 'find', returnTo, followButton(game, returnTo))}</td>
 </tr>`,
     )
     .join('');
@@ -710,33 +674,9 @@ function findGamesResults(
   return results;
 }
 
-/** Whether `option` is the one a `<select>`'s current value names — shared by every filter/sort form. */
-function selected(value: string | null | undefined, option: string): string {
+/** Whether `option` is the one a `<select>`'s current value names — shared by every filter/sort form. `null` marks the "any" option. */
+function selected<V extends string | number>(value: V | null, option: V | null): string {
   return value === option ? ' selected' : '';
-}
-
-/**
- * A streamed list's URL, carrying whatever of `params` is set — the same
- * query the page was drawn with, so the stream's answer is the page's.
- * Shared by `findStreamUrl` and `myGamesStreamUrl`.
- */
-export function streamUrlWith(base: string, params: Readonly<Record<string, string | null | undefined>>): string {
-  const query = new URLSearchParams();
-  for (const [key, value] of Object.entries(params)) {
-    if (value) query.set(key, value);
-  }
-  const search = query.toString();
-  return search === '' ? base : `${base}?${search}`;
-}
-
-/** The stream that watches this search: the same filters, so the same answer. */
-function findStreamUrl(filters: SearchFilters): string {
-  return streamUrlWith('/games/find/stream', {
-    board_size: filters.boardSize,
-    join_type: filters.joinType,
-    proposer: filters.proposerDisplayName,
-    curated: filters.curated ? '1' : undefined,
-  });
 }
 
 export function renderFindGamesPage(
@@ -745,11 +685,21 @@ export function renderFindGamesPage(
   view: FindGamesView = {},
 ): string {
   const error = view.error ? `<p class="error">${escapeHtml(view.error)}</p>` : '';
-  const filters = view.filters ?? {};
-  const filtered = isFiltered(filters);
+  const filters = view.filters ?? FIND_GAMES_DEFAULT;
+  const filtered = isNarrowed(FIND_GAMES_SCHEMA, filters);
 
   // Only the results stream: the filter form above holds what the player typed.
-  const results = streamed(findStreamUrl(filters), region('games', findGamesResults(user, games, filters)));
+  const results = streamed(
+    `/games/find/stream${queryString(FIND_GAMES_SCHEMA, filters)}`,
+    region('games', findGamesResults(user, games, filters)),
+  );
+
+  const boardSizeOptions = FIND_GAMES_SCHEMA.boardSize.options
+    .map((o) => `<option value="${o.value}"${selected(filters.boardSize, o.value)}>${o.label}</option>`)
+    .join('');
+  const joinTypeOptions = FIND_GAMES_SCHEMA.joinType.options
+    .map((o) => `<option value="${o.value}"${selected(filters.joinType, o.value)}>${o.label}</option>`)
+    .join('');
 
   const body = `
 <h1>Find a game</h1>
@@ -760,17 +710,15 @@ ${error}
     <div class="field">
       <label for="board_size">Board</label>
       <select id="board_size" name="board_size">
-        <option value=""${selected(filters.boardSize, '')}>any</option>
-        <option value="5"${selected(filters.boardSize, '5')}>5×5</option>
-        <option value="6"${selected(filters.boardSize, '6')}>6×6</option>
+        <option value=""${selected(filters.boardSize, null)}>any</option>
+        ${boardSizeOptions}
       </select>
     </div>
     <div class="field">
       <label for="join_type">Kind</label>
       <select id="join_type" name="join_type">
-        <option value=""${selected(filters.joinType, '')}>any</option>
-        <option value="open"${selected(filters.joinType, 'open')}>open to anyone</option>
-        <option value="invited"${selected(filters.joinType, 'invited')}>invitations to me</option>
+        <option value=""${selected(filters.joinType, null)}>any</option>
+        ${joinTypeOptions}
       </select>
     </div>
   </div>
@@ -1167,10 +1115,10 @@ function renderGameManagement(game: GameView): string {
   }
   if (game.canHide) {
     parts.push(
-      // `from=game` (ticket 05) routes a refusal back to this page rather than
-      // the games list — the same "where did the click come from" idiom the
-      // list row's hide button and the join button share.
-      `<form method="post" action="/games/${game.id}/hide"><input type="hidden" name="from" value="game"><button type="submit" class="btn btn-quiet btn-sm">Hide from my games</button></form>`,
+      // `return_to` naming the game's own page (ticket 05) routes a refusal
+      // back here rather than the games list — the same "where did the click
+      // come from" idiom the list row's hide button and the join button share.
+      `<form method="post" action="/games/${game.id}/hide"><input type="hidden" name="return_to" value="/games/${game.id}"><button type="submit" class="btn btn-quiet btn-sm">Hide from my games</button></form>`,
     );
   }
   if (game.canAdminDelete) {

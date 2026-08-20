@@ -34,6 +34,13 @@ import type {
   UserRecord,
 } from './persistence.js';
 import type { SessionUser } from './auth.js';
+import {
+  FIND_GAMES_SCHEMA,
+  MY_GAMES_SCHEMA,
+  resolveQuery,
+  type FindGamesSearch,
+  type MyGamesQuery as ResolvedMyGamesQuery,
+} from './list-query.js';
 
 /**
  * The web Game module — the game lifecycle behind one command union (ADR-0004).
@@ -51,9 +58,8 @@ import type { SessionUser } from './auth.js';
 /** Every lifecycle state a player's own list can show — the default, unfiltered view (ticket 03). */
 const ALL_LIST_STATES: readonly GameLifecycleState[] = ['proposed', 'in_play', 'finished'];
 
-/** What "Your games" may be sorted by (ticket 03). */
-export type GameListSort = 'activity' | 'created' | 'size';
-const GAME_LIST_SORTS: readonly GameListSort[] = ['activity', 'created', 'size'];
+/** What "Your games" may be sorted by (ticket 03) — `list-query.ts`'s `MY_GAMES_SCHEMA` is the one declaration of the values themselves. */
+type GameListSort = ResolvedMyGamesQuery['sort'];
 
 export type GameErrorCode =
   | 'forbidden'
@@ -229,33 +235,18 @@ export interface GameView {
   readonly adminRemoved: boolean;
 }
 
-/** What a player may narrow a proposal search by. All optional; blanks mean "any". */
-export interface ProposedSearch {
-  readonly boardSize?: number;
-  readonly joinType?: string;
-  readonly proposerDisplayName?: string;
-  /** Ticket 04: only proposals from players the actor follows. Composes with the filters above. */
-  readonly curated?: boolean;
-}
-
 /**
- * How a player may narrow and order their own games list (ticket 03). All
- * optional, and every field a raw string — a route's query params, unparsed,
- * following the same as-submitted-text idiom `ProposedSearch` does for the
- * find form (though unlike `ProposedSearch.boardSize`, nothing here is parsed
- * to a number at the route: `parseMyGamesQuery` alone turns this into the
- * validated filter the module sorts and filters by).
+ * What a player may narrow a proposal search by, and how a player may narrow
+ * and order their own games list (ticket 03). Each is `list-query.ts`'s
+ * validated, resolved shape (`MyGamesQuery`/`FindGamesSearch`, re-exported
+ * here as `ProposedSearch` under this module's own established name) — every
+ * field already checked against its schema, so this module only ever sees a
+ * value it can trust. `Partial` because a caller (a test, most often) may
+ * still supply only the fields it cares about; the rest fall back to
+ * `MY_GAMES_DEFAULT`/`FIND_GAMES_DEFAULT` below.
  */
-export interface MyGamesQuery {
-  /** `proposed` / `in_play` / `finished`; absent means every state. */
-  readonly status?: string;
-  /** Defaults to `activity`. */
-  readonly sort?: string;
-  /** `asc` or `desc`; defaults to `desc`. */
-  readonly direction?: string;
-  /** Ticket 06: include admin-removed tombstones; defaults to false (hidden). */
-  readonly showRemoved?: boolean;
-}
+export type ProposedSearch = Partial<FindGamesSearch>;
+export type MyGamesQuery = Partial<ResolvedMyGamesQuery>;
 
 /** One command per game mutation. The actor is passed to `applyGame`, not embedded here. */
 export type GameCommand =
@@ -1604,42 +1595,6 @@ export function createGames(persistence: Persistence): Games {
     });
   }
 
-  /** `MyGamesQuery`'s raw strings, validated: what `listMyGames` filters and sorts by. */
-  interface ParsedMyGamesQuery {
-    readonly status: GameLifecycleState | null;
-    readonly sort: GameListSort;
-    readonly direction: 'asc' | 'desc';
-    readonly showRemoved: boolean;
-  }
-
-  function parseMyGamesQuery(query: MyGamesQuery): Result<ParsedMyGamesQuery, GameError> {
-    let status: GameLifecycleState | null = null;
-    if (query.status !== undefined) {
-      if (!ALL_LIST_STATES.includes(query.status as GameLifecycleState)) {
-        return err({ code: 'invalid-status', message: 'Choose proposed, in play, or finished.' });
-      }
-      status = query.status as GameLifecycleState;
-    }
-
-    let sort: GameListSort = 'activity';
-    if (query.sort !== undefined) {
-      if (!GAME_LIST_SORTS.includes(query.sort as GameListSort)) {
-        return err({ code: 'invalid-sort', message: 'Choose activity, created, or size to sort by.' });
-      }
-      sort = query.sort as GameListSort;
-    }
-
-    let direction: 'asc' | 'desc' = 'desc';
-    if (query.direction !== undefined) {
-      if (query.direction !== 'asc' && query.direction !== 'desc') {
-        return err({ code: 'invalid-sort', message: 'Sort direction must be ascending or descending.' });
-      }
-      direction = query.direction;
-    }
-
-    return ok({ status, sort, direction, showRemoved: query.showRemoved ?? false });
-  }
-
   return {
     applyGame(actor, command): Result<GameCommandResult, GameError> {
       switch (command.type) {
@@ -1690,26 +1645,32 @@ export function createGames(persistence: Persistence): Games {
       const player = requirePlayer(actor);
       if (player.isErr()) return err(player.error);
 
-      const filters = parseMyGamesQuery(query);
-      if (filters.isErr()) return err(filters.error);
+      // `list-query.ts` (via `app.ts`) has already validated every field; this
+      // module only ever composes the resolved values, filling in whatever a
+      // caller (a test, most often) left out.
+      const resolved = resolveQuery(MY_GAMES_SCHEMA, query);
 
-      const states = filters.value.status === null ? ALL_LIST_STATES : [filters.value.status];
-      const rows = persistence.listGamesForUser(actor.id, states, filters.value.showRemoved);
+      const states = resolved.status === null ? ALL_LIST_STATES : [resolved.status];
+      const rows = persistence.listGamesForUser(actor.id, states, resolved.showRemoved);
       if (rows.isErr()) return err(persistenceError(rows.error));
 
       const summaries = summariseAll(rows.value, actor);
       if (summaries.isErr()) return err(summaries.error);
-      return ok(sortSummaries(summaries.value, filters.value.sort, filters.value.direction));
+      return ok(sortSummaries(summaries.value, resolved.sort, resolved.direction));
     },
 
     searchProposed(actor: SessionUser, search: ProposedSearch = {}): Result<GameSummary[], GameError> {
       const player = requirePlayer(actor);
       if (player.isErr()) return err(player.error);
 
-      const filters = parseSearch(search);
-      if (filters.isErr()) return err(filters.error);
+      const resolved = resolveQuery(FIND_GAMES_SCHEMA, search);
+      const filters: ProposedGameFilters = {
+        ...(resolved.boardSize !== null && { boardSize: resolved.boardSize }),
+        ...(resolved.joinType !== null && { joinType: resolved.joinType as JoinType }),
+        ...(resolved.proposerDisplayName !== null && { proposerDisplayName: resolved.proposerDisplayName }),
+      };
 
-      const rows = persistence.listProposedGames(filters.value);
+      const rows = persistence.listProposedGames(filters);
       if (rows.isErr()) return err(persistenceError(rows.error));
 
       // This page is for taking up a game, so it lists what the actor could
@@ -1725,7 +1686,7 @@ export function createGames(persistence: Persistence): Games {
 
       // Curated mode (ticket 04) composes with the filters above: it narrows
       // what's already matched, rather than running a separate query.
-      if (!search.curated) return ok(summaries.value);
+      if (!resolved.curated) return ok(summaries.value);
       return ok(summaries.value.filter((g) => g.followed));
     },
 
@@ -1741,30 +1702,6 @@ export function createGames(persistence: Persistence): Games {
       return summariseAll(rows.value, actor);
     },
   };
-}
-
-/** Coerce a submitted search to column filters. A blank field means "any". */
-function parseSearch(search: ProposedSearch): Result<ProposedGameFilters, GameError> {
-  const filters: {
-    boardSize?: GameBoardSize;
-    joinType?: JoinType;
-    proposerDisplayName?: string;
-  } = {};
-
-  if (search.boardSize !== undefined) {
-    const parsed = parseBoardSize(search.boardSize);
-    if (parsed.isErr()) return err(parsed.error);
-    filters.boardSize = parsed.value;
-  }
-  if (search.joinType !== undefined) {
-    const parsed = parseJoinType(search.joinType);
-    if (parsed.isErr()) return err(parsed.error);
-    filters.joinType = parsed.value;
-  }
-  const name = search.proposerDisplayName?.trim();
-  if (name) filters.proposerDisplayName = name;
-
-  return ok(filters);
 }
 
 const FILES = ['a', 'b', 'c', 'd', 'e', 'f'] as const;

@@ -510,7 +510,10 @@ describe('find a game: curated allowlist (ticket 04)', () => {
 
     const res = await app.request(
       '/games/find/follow',
-      withCookie(form({ user_id: '2', board_size: '5', proposer: 'Takashi', curated: '1' }), aoife),
+      withCookie(
+        form({ user_id: '2', return_to: '/games/find?board_size=5&proposer=Takashi&curated=1' }),
+        aoife,
+      ),
     );
 
     expect(res.headers.get('location')).toBe('/games/find?board_size=5&proposer=Takashi&curated=1');
@@ -598,7 +601,7 @@ describe('POST /games/:id/join', () => {
     await app.request('/games', withCookie(form({ board_size: '5', join_type: 'open' }), aoife));
     await app.request('/games/1/join', withCookie({ method: 'POST' }, takashi));
 
-    const res = await app.request('/games/1/join', withCookie(form({ from: 'find' }), aoife));
+    const res = await app.request('/games/1/join', withCookie(form({ return_to: '/games/find' }), aoife));
 
     expect(res.status).toBe(409);
     const html = await res.text();
@@ -1126,9 +1129,9 @@ describe('sharing, hiding, and admin removal at the game screen', () => {
 
     const list = await (await app.request('/games', withCookie({}, aoife))).text();
     expect(list).toContain('/games/1/hide');
-    expect(list).toContain('name="from" value="games"');
+    expect(list).toContain('name="return_to" value="/games"');
 
-    const res = await app.request('/games/1/hide', withCookie(form({ from: 'games' }), aoife));
+    const res = await app.request('/games/1/hide', withCookie(form({ return_to: '/games' }), aoife));
 
     expect(res.status).toBe(303);
     expect(res.headers.get('location')).toBe('/games');
@@ -1247,6 +1250,68 @@ describe('removed games: hidden by default, toggle to show (ticket 06)', () => {
 
     const withToggle = await (await app.request('/games?show_removed=1', withCookie({}, session))).text();
     expect(withToggle).toContain('>Clear<');
+  });
+});
+
+describe('list filters survive a form round trip via return_to (candidate 1)', () => {
+  it('keeps "Your games" narrowed on a refused hide, rather than dropping back to the unfiltered list', async () => {
+    const { app, session } = await playerApp();
+
+    const res = await app.request(
+      '/games/404/hide',
+      withCookie(form({ return_to: '/games?status=finished' }), session),
+    );
+
+    expect(res.status).toBe(404);
+    const html = await res.text();
+    expect(html).toContain('<option value="finished" selected>finished</option>');
+  });
+
+  it('keeps "Find a game" narrowed on a refused join, rather than dropping back to the unfiltered search', async () => {
+    const { app, db } = makeApp();
+    await insertUser(db, { id: 1, username: 'aoife', password: 'pw', displayName: 'Aoife Nolan' });
+    await insertUser(db, { id: 2, username: 'takashi', password: 'pw', displayName: 'Takashi Mori' });
+    const aoife = await signIn(app, 'aoife', 'pw');
+    const takashi = await signIn(app, 'takashi', 'pw');
+    await app.request('/games', withCookie(form({ board_size: '5', join_type: 'open' }), aoife));
+    await app.request('/games/1/join', withCookie({ method: 'POST' }, takashi));
+
+    const res = await app.request(
+      '/games/1/join',
+      withCookie(form({ return_to: '/games/find?board_size=5' }), aoife),
+    );
+
+    expect(res.status).toBe(409);
+    const html = await res.text();
+    expect(html).toContain('Find a game');
+    expect(html).toContain('<option value="5" selected>5×5</option>');
+  });
+
+  it('redirects a successful hide back to the filtered list it was hidden from', async () => {
+    const { app, db } = makeApp();
+    await insertUser(db, { id: 1, username: 'aoife', password: 'pw', displayName: 'Aoife Nolan' });
+    await insertUser(db, { id: 2, username: 'takashi', password: 'pw', displayName: 'Takashi Mori' });
+    const aoife = await signIn(app, 'aoife', 'pw');
+    const takashi = await signIn(app, 'takashi', 'pw');
+    await app.request('/games', withCookie(form({ board_size: '5', join_type: 'open' }), aoife));
+    await app.request('/games/1/join', withCookie({ method: 'POST' }, takashi));
+
+    const res = await app.request(
+      '/games/1/hide',
+      withCookie(form({ return_to: '/games?status=in_play' }), aoife),
+    );
+
+    expect(res.status).toBe(303);
+    expect(res.headers.get('location')).toBe('/games?status=in_play');
+  });
+
+  it('falls back to the unfiltered list when return_to is missing or foreign, rather than erroring', async () => {
+    const { app, session } = await playerApp();
+
+    const res = await app.request('/games/404/hide', withCookie(form({}), session));
+
+    expect(res.status).toBe(404);
+    expect(await res.text()).toContain('<option value="" selected>any</option>');
   });
 });
 
