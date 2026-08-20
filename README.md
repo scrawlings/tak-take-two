@@ -10,7 +10,7 @@ While this is largely coded by Claude and Deepseek, I've guided it with a heavy 
 
 Implemented and playable: The initial tranche of work represented by the tickets in `.scratch/tak-host` are implemented. This allows a server to be set up locally with self terminated TLS and an admin user managed user access control system, state persisted in a local sqlite database, requiring Typescript/Node.js to build and run.
 
-Planned further work, specced under `.scratch/`: computer opponents and a move-suggesting coach (`bots`), a headless training harness (`bot-training`), UI usability work — a history scrubber, keyboard shortcuts, and list curation (`ui-usability`), and ongoing security model improvement including session timeouts, etc.
+Planned further work, specced under `.scratch/`: computer opponents and a move-suggesting coach (`bots`), a headless training harness (`bot-training`), UI usability work — a history scrubber, keyboard shortcuts, and ongoing security model improvement including session timeouts, etc.
 
 If you're interested in this project from a coding point of view, some of the interesting details include:
 - The Tak rules engine (stack moves, the carry limit, capstone flattening, the decided-position vs finished-game distinction)
