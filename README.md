@@ -6,6 +6,28 @@ Originally conceived to support play-by-mail in the tradition of keeping games o
 
 While this is largely coded by Claude and Deepseek, I've guided it with a heavy hand and a consistent process that documents what is done and why, attending to testability and robustness though close attention to modularisation - it's code written to be understood and interacted with by humans, (written so as not to upset my friends in security, and ops, and other programmers).
 
+## A Deliberate Portfolio Piece
+
+If you're viewing this because your considering me for a role, I've very deliberately steered into a domain that doesn't give me the freedom to pivot away from and ignore hard problems. Even with AI generated code and documents this should show the types of concerns that I choose to prioritise. The scale here at well over 20k LOC (50% test code) before we start work on bot players puts it into med-large micro-service category, arguable I'm steering toward the disciplined monolith pattern.
+
+There are a variety of elements that make this an genuinely complex system, and from a portfolio perspective the goal is to keep the system understandable and maintainable even with the necessary complexity.
+
+Game History and Representation
+- There are two representations threaded through the whole system: PTN which describes a game by playing forward move by move; and TPS which describes the pieces on the board at a point in time.
+- Given functionality actual and planned both have value: 
+    - position evaluation for bot training, 
+    - scrubbing back and forth in game history for study,
+    - take the representation of any point in a game and use that to establish a new game to explore different play options, 
+    - game play analysis to identify cheating (and potentially more general security user behaviour analysis),
+    - recovering games when players log out,
+    - PTN representation is used by the wider game playing community
+- However this creates two representations that both describe state at time, (a series of move versus a series of board/game states), and ensuring they are syncronised and using the appropriate tool at different times is a real optimisation versus clarity compromise
+
+Not just CRUD
+- Domain is complex, move validity is not trivial, needing to represent move correctness on both server and client risks duplication,
+- Game playing model is complex with live updates between players and spectators, representing what is allowed at any time
+- Given it's a competitive system, with the end goal of users being rated against each other, login and identy are critical
+
 ## Status
 
 Implemented and playable: The initial tranche of work represented by the tickets in `.scratch/tak-host` are implemented. This allows a server to be set up locally with self terminated TLS and an admin user managed user access control system, state persisted in a local sqlite database, requiring Typescript/Node.js to build and run.
