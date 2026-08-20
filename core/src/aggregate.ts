@@ -235,11 +235,12 @@ function storedEnd(result: string | null): Result<GameEnd | null, GameError> {
 }
 
 /**
- * Restore a stored position: parse the TPS, then recover the engine's verdict,
- * which TPS does not carry. `last` is the move that reached the position — its
- * mover is whoever is not to move, and only a placement can exhaust a reserve.
+ * Parse a stored position and check it against the record's board size — the
+ * trust rule every read of a snapshot shares (ADR-0005): a stored position
+ * either parses and fits its record, or the record is corrupt. `restoreState`
+ * and `turnOf` both use it; the difference is only what they recover on top.
  */
-function restoreState(position: string, size: BoardSize, last: Move): Result<GameState, GameError> {
+function storedState(position: string, size: BoardSize): Result<GameState, GameError> {
   const parsed = parseTps(position);
   if (parsed.isErr()) {
     return err(corrupt(`stored position "${position}" no longer parses: ${parsed.error.message}`));
@@ -248,8 +249,32 @@ function restoreState(position: string, size: BoardSize, last: Move): Result<Gam
   if (state.size !== size) {
     return err(corrupt(`stored position "${position}" is a ${state.size}x${state.size} board, not ${size}x${size}`));
   }
-  const outcome = computeOutcome(state, opponent(state.playerToMove), last.type === 'place');
-  return ok({ ...state, outcome });
+  return ok(state);
+}
+
+/**
+ * Restore a stored position: parse the TPS, then recover the engine's verdict,
+ * which TPS does not carry. `last` is the move that reached the position — its
+ * mover is whoever is not to move, and only a placement can exhaust a reserve.
+ */
+function restoreState(position: string, size: BoardSize, last: Move): Result<GameState, GameError> {
+  const state = storedState(position, size);
+  if (state.isErr()) return err(state.error);
+  const outcome = computeOutcome(state.value, opponent(state.value.playerToMove), last.type === 'place');
+  return ok({ ...state.value, outcome });
+}
+
+/**
+ * The player to move in a stored position — the one fact a games list needs
+ * from a snapshot (ADR-0005's trust rule, without the outcome a playable
+ * state recovers). `positionsOf` and `liveState` are per-record; this is the
+ * per-position read the list path uses after a grouped query fetched the
+ * last snapshot per game in one call.
+ */
+export function turnOf(position: string, size: BoardSize): Result<Player, GameError> {
+  const state = storedState(position, size);
+  if (state.isErr()) return err(state.error);
+  return ok(state.value.playerToMove);
 }
 
 /**

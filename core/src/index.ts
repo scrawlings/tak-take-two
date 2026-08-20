@@ -15,6 +15,7 @@ export {
   resign,
   resultCode,
   toPtn,
+  turnOf,
   undo,
 } from './aggregate';
 export type {

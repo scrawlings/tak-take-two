@@ -11,6 +11,7 @@ import {
   playMove,
   positionsOf,
   resultCode,
+  turnOf,
 } from '../src/index';
 import type { BoardSize, GameState, Move, ResultCode, StoredGame, StoredMove, TakGame } from '../src/index';
 import { move, place, play } from './helpers';
@@ -258,6 +259,25 @@ describe('positionsOf', () => {
     const moves = record.moves.map((m, i) => (i === 3 ? { ...m, position: null } : m));
     const positions = mustTak(positionsOf({ ...record, moves }));
     expect(positions[4]).toBe(tpsOf(all.slice(0, 4)));
+  });
+});
+
+describe('turnOf', () => {
+  it('is the player to move in a stored position', () => {
+    const live = [place('e1', 'flat'), place('e5', 'flat')];
+    const record = writeRecord(5, OPENING, live);
+    const snapshot = record.moves.at(-1)!.position!;
+    expect(mustTak(turnOf(snapshot, 5))).toEqual(loadGame(record)._unsafeUnwrap().state.playerToMove);
+  });
+
+  it('rejects a stored position that no longer parses', () => {
+    expect(mustErr(turnOf('nonsense', 5)).code).toBe('corrupt-record');
+  });
+
+  it('rejects a stored position whose size is not the record\'s', () => {
+    const record = writeRecord(6, [], OPENING);
+    const snapshot = record.moves.at(-1)!.position!;
+    expect(mustErr(turnOf(snapshot, 5)).code).toBe('corrupt-record');
   });
 });
 

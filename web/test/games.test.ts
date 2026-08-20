@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { runMigrations } from '../src/db.js';
 import { createPersistence, type Persistence } from '../src/persistence.js';
@@ -838,6 +838,37 @@ describe('games: join', () => {
       propose(h, h.aoife);
 
       expect(h.games.listMyGames(h.aoife)._unsafeUnwrap()[0]?.toMove).toBeNull();
+    });
+
+    // The N+1 guard: the list's to-move column reads the last stored position
+    // in one grouped query, not one record load per row — so a list of many
+    // in-play games costs the same persistence work as a list of one.
+    it('reads every game\'s to-move from one positions query, never one load per row', () => {
+      const h = harness();
+      const gameIds = [propose(h, h.aoife), propose(h, h.aoife), propose(h, h.aoife)];
+      for (const gameId of gameIds) {
+        h.games.applyGame(h.takashi, { type: 'join', gameId });
+        // One move each, so every game has a snapshot for the batched read.
+        h.games.applyGame(h.aoife, { type: 'playMove', gameId, move: 'a1' });
+      }
+      // The per-row load path (`loadTakGame` → `storedGame`) is the only
+      // caller of `listMoves`; spying on it proves the list never loads a
+      // whole record just to render the "to move" column.
+      const listMovesSpy = vi.spyOn(h.persistence, 'listMoves');
+      const listLastPositionsSpy = vi.spyOn(h.persistence, 'listLastPositions');
+
+      const mine = h.games.listMyGames(h.aoife)._unsafeUnwrap();
+
+      expect(mine).toHaveLength(3);
+      expect(listMovesSpy).not.toHaveBeenCalled();
+      expect(listLastPositionsSpy).toHaveBeenCalledTimes(1);
+      // Aoife opened each game (seat 1, first to move), so it is Takashi's
+      // turn in all three — read off the stored snapshot.
+      expect(mine.map((g) => g.toMove)).toEqual([
+        { id: 2, displayName: 'Takashi Mori' },
+        { id: 2, displayName: 'Takashi Mori' },
+        { id: 2, displayName: 'Takashi Mori' },
+      ]);
     });
   });
 });

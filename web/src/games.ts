@@ -13,6 +13,7 @@ import {
   positionsOf,
   resign as coreResign,
   resultCode,
+  turnOf,
 } from '@tak/core';
 import type {
   GameError as CoreGameError,
@@ -1503,6 +1504,7 @@ export function createGames(persistence: Persistence): Games {
     nameOf: (id: number) => Result<PlayerRef, GameError>,
     lastMoveAt: ReadonlyMap<number, string>,
     follows: ReadonlySet<number>,
+    lastPositions: ReadonlyMap<number, string>,
   ): Result<GameSummary, GameError> {
     const proposer = nameOf(game.proposerId);
     if (proposer.isErr()) return err(proposer.error);
@@ -1517,9 +1519,19 @@ export function createGames(persistence: Persistence): Games {
 
     let toMove: PlayerRef | null = null;
     if (game.state === 'in_play') {
-      const position = loadTakGame(game);
-      if (position.isErr()) return err(position.error);
-      const seat = seatOf(game, position.value.state.playerToMove);
+      // The one fact the list needs from a played game is the next mover, and
+      // it lives in the last move's stored position (ADR-0005's read path) —
+      // read here from the batch `lastPositions` map instead of loading the
+      // whole record per row. A game absent from the map has no snapshot yet
+      // (an imported record with zero live moves), so it falls back to the
+      // per-record load, exactly as before.
+      const snapshot = lastPositions.get(game.id);
+      const player =
+        snapshot === undefined
+          ? loadTakGame(game).map((tak) => tak.state.playerToMove)
+          : turnOf(snapshot, game.boardSize).mapErr((error) => recordError(game.id, error));
+      if (player.isErr()) return err(player.error);
+      const seat = seatOf(game, player.value);
       if (seat !== null) {
         const resolved = nameOf(seat);
         if (resolved.isErr()) return err(resolved.error);
@@ -1559,17 +1571,19 @@ export function createGames(persistence: Persistence): Games {
     });
   }
 
-  /** Summarise a batch, sharing one name cache, one last-move-timestamp query, and the actor's follow list across the whole list. */
+  /** Summarise a batch, sharing one name cache, one last-move-timestamp query, one positions query, and the actor's follow list across the whole list. */
   function summariseAll(games: readonly GameRecord[], actor: SessionUser): Result<GameSummary[], GameError> {
     const nameOf = nameResolver();
     const lastMoveAt = persistence.listLastMoveTimestamps(games.map((g) => g.id));
     if (lastMoveAt.isErr()) return err(persistenceError(lastMoveAt.error));
+    const lastPositions = persistence.listLastPositions(games.map((g) => g.id));
+    if (lastPositions.isErr()) return err(persistenceError(lastPositions.error));
     const prefs = persistence.getUserPrefs(actor.id);
     if (prefs.isErr()) return err(persistenceError(prefs.error));
     const follows = new Set(prefs.value.follows);
     const summaries: GameSummary[] = [];
     for (const game of games) {
-      const summary = summarise(game, actor, nameOf, lastMoveAt.value, follows);
+      const summary = summarise(game, actor, nameOf, lastMoveAt.value, follows, lastPositions.value);
       if (summary.isErr()) return err(summary.error);
       summaries.push(summary.value);
     }

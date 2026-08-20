@@ -261,6 +261,15 @@ export interface Persistence {
    * (ticket 03), which the Game module derives without a stored column.
    */
   listLastMoveTimestamps(gameIds: readonly number[]): Result<ReadonlyMap<number, string>, string>;
+  /**
+   * The last move's stored position (TPS) for each of `gameIds` that has one —
+   * one grouped query rather than one per game, for the list's "to move"
+   * column, which the Game module reads off the snapshot instead of
+   * materializing each record (ADR-0005's read path). A game with no moves,
+   * or whose last snapshot is null, is absent from the map — the Game module
+   * falls back to the per-record load for those.
+   */
+  listLastPositions(gameIds: readonly number[]): Result<ReadonlyMap<number, string>, string>;
   /** Mark a game finished with its PTN result code and a timestamp. */
   finishGame(gameId: number, result: string): Result<void, string>;
   /** Write the derived game-stats row at finish. */
@@ -705,6 +714,29 @@ export function createPersistence(db: Db): Persistence {
           )
           .all(...gameIds) as { game_id: number; last_played_at: string }[];
         return ok(new Map(rows.map((row) => [row.game_id, row.last_played_at])));
+      } catch (e) {
+        return err(e instanceof Error ? e.message : String(e));
+      }
+    },
+
+    listLastPositions(gameIds: readonly number[]): Result<ReadonlyMap<number, string>, string> {
+      if (gameIds.length === 0) return ok(new Map());
+      try {
+        const placeholders = gameIds.map(() => '?').join(', ');
+        // The last row per game, by move number — then its position, when the
+        // row carries one (a null snapshot is absent from the map, so the Game
+        // module's per-record fallback replays it exactly as it always did).
+        const rows = db
+          .prepare(
+            `SELECT gr.game_id AS game_id, gr.position AS position
+             FROM game_records gr
+             JOIN (SELECT game_id, MAX(move_number) AS last_move FROM game_records
+                   WHERE game_id IN (${placeholders}) GROUP BY game_id) last
+               ON last.game_id = gr.game_id AND last.last_move = gr.move_number
+             WHERE gr.position IS NOT NULL`,
+          )
+          .all(...gameIds) as { game_id: number; position: string }[];
+        return ok(new Map(rows.map((row) => [row.game_id, row.position])));
       } catch (e) {
         return err(e instanceof Error ? e.message : String(e));
       }

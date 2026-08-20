@@ -287,6 +287,77 @@ describe('persistence', () => {
     });
   });
 
+  describe('listLastPositions', () => {
+    /** An open proposal: ADR-0003 has open games start shared. */
+    const openGame = (proposerId: number, boardSize: 5 | 6 = 5) => ({
+      boardSize,
+      joinType: 'open' as const,
+      proposerId,
+      proposerShared: true,
+      opponentShared: true,
+      proposerSeat: 1 as const,
+    });
+
+    /** A game with two recorded moves, the last carrying `position`. */
+    function gameWithMoves(p: Persistence, gameId: number, positions: readonly (string | null)[]): void {
+      positions.forEach((position, i) => {
+        const appended = p.appendMove({
+          gameId,
+          moveNumber: i + 1,
+          playerId: 1,
+          notation: `m${i + 1}`,
+          position,
+        });
+        if (appended.isErr()) throw new Error(appended.error);
+      });
+    }
+
+    it('returns the last move\'s stored position for each game, one row per game', () => {
+      const db = makeDb();
+      insertUser(db, 1, 'aoife');
+      const p = createPersistence(db);
+      const g1 = p.createGame(openGame(1))._unsafeUnwrap();
+      const g2 = p.createGame(openGame(1))._unsafeUnwrap();
+      gameWithMoves(p, g1.id, ['tps-a', 'tps-b']);
+      gameWithMoves(p, g2.id, ['tps-c']);
+
+      const positions = p.listLastPositions([g1.id, g2.id])._unsafeUnwrap();
+
+      expect(positions.get(g1.id)).toBe('tps-b');
+      expect(positions.get(g2.id)).toBe('tps-c');
+      expect(positions.size).toBe(2);
+    });
+
+    it('omits a game whose last move has no snapshot, and a game with no moves', () => {
+      const db = makeDb();
+      insertUser(db, 1, 'aoife');
+      const p = createPersistence(db);
+      const withSnapshot = p.createGame(openGame(1))._unsafeUnwrap();
+      const nullLast = p.createGame(openGame(1))._unsafeUnwrap();
+      const noMoves = p.createGame(openGame(1))._unsafeUnwrap();
+      gameWithMoves(p, withSnapshot.id, ['tps-a']);
+      gameWithMoves(p, nullLast.id, ['tps-a', null]);
+
+      const positions = p.listLastPositions([withSnapshot.id, nullLast.id, noMoves.id])._unsafeUnwrap();
+
+      expect(positions.get(withSnapshot.id)).toBe('tps-a');
+      expect(positions.has(nullLast.id)).toBe(false);
+      expect(positions.has(noMoves.id)).toBe(false);
+    });
+
+    it('returns an empty map for no game ids', () => {
+      const p = createPersistence(makeDb());
+      expect(p.listLastPositions([])._unsafeUnwrap()).toEqual(new Map());
+    });
+
+    it('fails when the database is closed', () => {
+      const db = makeDb();
+      const p = createPersistence(db);
+      db.close();
+      expect(p.listLastPositions([1]).isErr()).toBe(true);
+    });
+  });
+
   describe('user prefs (ticket 04)', () => {
     it('defaults to an empty allowlist when a user has never written any prefs', () => {
       const db = makeDb();
