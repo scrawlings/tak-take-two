@@ -6,7 +6,7 @@ import { routePath } from 'hono/route';
 import { streamSSE } from 'hono/streaming';
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
 import { createMiddleware } from 'hono/factory';
-import { err, type Result } from 'neverthrow';
+import { err, ok, type Result } from 'neverthrow';
 import type { Persistence, PersistenceSnapshot } from './persistence.js';
 import { Metrics } from './metrics.js';
 import type { Logger } from './logging.js';
@@ -16,8 +16,8 @@ import { SITE_CSS_URL, CLIENT_SCRIPT_URL } from './static-urls.js';
 
 /** The committed static assets (ADR-0013): `web/static/`, one level up from this module's directory. */
 const STATIC_DIR = join(fileURLToPath(new URL('..', import.meta.url)), 'static');
-import { createAuth, type Auth, type AuthError, type SessionUser } from './auth.js';
-import { createGames, type GameError, type Games } from './games.js';
+import { createAuth, type Auth, type AuthCommand, type AuthError, type SessionUser } from './auth.js';
+import { createGames, type GameCommand, type GameError, type Games } from './games.js';
 import { GAMES_TOPIC, announceGameChanges, createUpdates, gameTopic } from './updates.js';
 import {
   createFormAction,
@@ -27,6 +27,7 @@ import {
   paramId,
   statusForAuthError,
   statusForGameError,
+  type FormFields,
 } from './actions.js';
 import {
   FIND_GAMES_SCHEMA,
@@ -310,6 +311,81 @@ export function createApp(deps: AppDeps): App {
     return value === undefined || value.trim() === '' ? undefined : value;
   };
 
+  /**
+   * The command routes are one registration each — `paramId` guards the `:id`,
+   * `applyGame` owns the rule, the error adapter says where a refusal is
+   * reported. The three families below differ only in what they build, where
+   * success lands, and which adapter reports a refusal; a row is the whole
+   * route. `propose`, `join`, and the admin user create/reset stay explicit:
+   * they carry a success render or an echo of the submitted form that a row
+   * would have to smuggle into the table.
+   */
+
+  /** A game-screen command: back to the game, refusals reported there (ADR-0004's thin-route). */
+  const gameScreenCommand = (
+    path: string,
+    fields: readonly string[],
+    build: (fields: FormFields, id: number) => GameCommand,
+  ): void => {
+    app.post(path, requireUser, formAction({
+      fields,
+      run: (c, f) =>
+        paramId(c, 'id', 'That game no longer exists.').andThen((id) =>
+          games.applyGame(c.get('user'), build(f, id)),
+        ),
+      onOk: (c) => c.redirect(`/games/${c.req.param('id')}`, 303),
+      renderError: (c, e) => gameViewError(c, e),
+    }));
+  };
+
+  /** A command landing back on the list it was drawn from, still narrowed as `return_to` had it. */
+  const listCommand = (
+    path: string,
+    fields: readonly string[],
+    schema: typeof MY_GAMES_SCHEMA | typeof FIND_GAMES_SCHEMA,
+    base: string,
+    build: (fields: FormFields, id: number | undefined) => GameCommand,
+    error: (
+      c: Context<{ Variables: Variables }>,
+      e: GameError,
+      returnTo: string | null | undefined,
+    ) => Response,
+  ): void => {
+    app.post(path, requireUser, formAction({
+      fields,
+      run: (c, f) => {
+        // `follow`/`unfollow` carry no `:id` — the player is a field, not a
+        // path segment — so the id only exists for the game-addressing rows
+        // (delete, hide), which assert it with `id!` in their builders.
+        const id: Result<number | undefined, { code: 'not-found'; message: string }> = path.includes(':id')
+          ? paramId(c, 'id', 'That game no longer exists.')
+          : ok(undefined);
+        return id.andThen((value) =>
+          games.applyGame(c.get('user'), build(f, value)).map(() => f.return_to),
+        );
+      },
+      onOk: (c, returnTo) => {
+        const asked = parseReturnTo(schema, base, returnTo);
+        return c.redirect(`${base}${queryString(schema, asked)}`, 303);
+      },
+      renderError: (c, e, f) => error(c, e, f.return_to),
+    }));
+  };
+
+  /** An admin's user mutation: back to the users list, refusals reported there. */
+  const adminUserCommand = (path: string, build: (id: number) => AuthCommand): void => {
+    app.post(path, requireUser, formAction({
+      fields: [],
+      run: (c) => {
+        const id = paramId(c, 'id', 'Unknown user.');
+        if (id.isErr()) return Promise.resolve(err(id.error));
+        return auth.applyAuth(c.get('user'), build(id.value));
+      },
+      onOk: (c) => c.redirect('/admin/users', 303),
+      renderError: usersError,
+    }));
+  };
+
   /** What a streamed page needs: a topic to listen on, and how to draw itself. */
   interface StreamSpec<D> {
     /** Named for log lines, as the page adapters are. */
@@ -586,27 +662,23 @@ export function createApp(deps: AppDeps): App {
     });
   });
 
-  app.post('/games/find/follow', requireUser, formAction({
-    fields: ['user_id', 'return_to'],
-    run: (c, f) =>
-      games.applyGame(c.get('user'), { type: 'follow', userId: Number(f.user_id) }).map(() => f.return_to),
-    onOk: (c, returnTo) => {
-      const asked = parseReturnTo(FIND_GAMES_SCHEMA, '/games/find', returnTo);
-      return c.redirect(`/games/find${queryString(FIND_GAMES_SCHEMA, asked)}`, 303);
-    },
-    renderError: (c, e, f) => findGamesError(c, e, f.return_to),
-  }));
+  listCommand(
+    '/games/find/follow',
+    ['user_id', 'return_to'],
+    FIND_GAMES_SCHEMA,
+    '/games/find',
+    (f) => ({ type: 'follow', userId: Number(f.user_id) }),
+    findGamesError,
+  );
 
-  app.post('/games/find/unfollow', requireUser, formAction({
-    fields: ['user_id', 'return_to'],
-    run: (c, f) =>
-      games.applyGame(c.get('user'), { type: 'unfollow', userId: Number(f.user_id) }).map(() => f.return_to),
-    onOk: (c, returnTo) => {
-      const asked = parseReturnTo(FIND_GAMES_SCHEMA, '/games/find', returnTo);
-      return c.redirect(`/games/find${queryString(FIND_GAMES_SCHEMA, asked)}`, 303);
-    },
-    renderError: (c, e, f) => findGamesError(c, e, f.return_to),
-  }));
+  listCommand(
+    '/games/find/unfollow',
+    ['user_id', 'return_to'],
+    FIND_GAMES_SCHEMA,
+    '/games/find',
+    (f) => ({ type: 'unfollow', userId: Number(f.user_id) }),
+    findGamesError,
+  );
 
   app.post('/games', requireUser, formAction({
     fields: ['board_size', 'join_type', 'invited_display_name', 'starter', 'ptn', 'return_to'],
@@ -647,18 +719,14 @@ export function createApp(deps: AppDeps): App {
     renderError: (c, e, f) => gameJoinError(c, e, f.return_to),
   }));
 
-  app.post('/games/:id/delete', requireUser, formAction({
-    fields: ['return_to'],
-    run: (c, f) =>
-      paramId(c, 'id', 'That game no longer exists.').andThen((id) =>
-        games.applyGame(c.get('user'), { type: 'deleteProposal', gameId: id }).map(() => f.return_to),
-      ),
-    onOk: (c, returnTo) => {
-      const asked = parseReturnTo(MY_GAMES_SCHEMA, '/games', returnTo);
-      return c.redirect(`/games${queryString(MY_GAMES_SCHEMA, asked)}`, 303);
-    },
-    renderError: (c, e, f) => myGamesError(c, e, f.return_to),
-  }));
+  listCommand(
+    '/games/:id/delete',
+    ['return_to'],
+    MY_GAMES_SCHEMA,
+    '/games',
+    (_f, id) => ({ type: 'deleteProposal', gameId: id! }),
+    myGamesError,
+  );
 
   app.get('/games/:id', requireUser, (c) => {
     const actor = c.get('user');
@@ -690,85 +758,21 @@ export function createApp(deps: AppDeps): App {
     });
   });
 
-  app.post('/games/:id/move', requireUser, formAction({
-    fields: ['move'],
-    run: (c, f) =>
-      paramId(c, 'id', 'That game no longer exists.').andThen((id) =>
-        games.applyGame(c.get('user'), { type: 'playMove', gameId: id, move: f.move ?? '' }),
-      ),
-    onOk: (c) => c.redirect(`/games/${c.req.param('id')}`, 303),
-    renderError: (c, e) => gameViewError(c, e),
-  }));
+  gameScreenCommand('/games/:id/move', ['move'], (f, id) => ({ type: 'playMove', gameId: id, move: f.move ?? '' }));
 
-  app.post('/games/:id/resign', requireUser, formAction({
-    fields: [],
-    run: (c) =>
-      paramId(c, 'id', 'That game no longer exists.').andThen((id) =>
-        games.applyGame(c.get('user'), { type: 'resign', gameId: id }),
-      ),
-    onOk: (c) => c.redirect(`/games/${c.req.param('id')}`, 303),
-    renderError: (c, e) => gameViewError(c, e),
-  }));
+  gameScreenCommand('/games/:id/resign', [], (_f, id) => ({ type: 'resign', gameId: id }));
 
-  app.post('/games/:id/draw', requireUser, formAction({
-    fields: [],
-    run: (c) =>
-      paramId(c, 'id', 'That game no longer exists.').andThen((id) =>
-        games.applyGame(c.get('user'), { type: 'offerDraw', gameId: id }),
-      ),
-    onOk: (c) => c.redirect(`/games/${c.req.param('id')}`, 303),
-    renderError: (c, e) => gameViewError(c, e),
-  }));
+  gameScreenCommand('/games/:id/draw', [], (_f, id) => ({ type: 'offerDraw', gameId: id }));
 
-  app.post('/games/:id/draw/accept', requireUser, formAction({
-    fields: [],
-    run: (c) =>
-      paramId(c, 'id', 'That game no longer exists.').andThen((id) =>
-        games.applyGame(c.get('user'), { type: 'acceptDraw', gameId: id }),
-      ),
-    onOk: (c) => c.redirect(`/games/${c.req.param('id')}`, 303),
-    renderError: (c, e) => gameViewError(c, e),
-  }));
+  gameScreenCommand('/games/:id/draw/accept', [], (_f, id) => ({ type: 'acceptDraw', gameId: id }));
 
-  app.post('/games/:id/draw/reject', requireUser, formAction({
-    fields: [],
-    run: (c) =>
-      paramId(c, 'id', 'That game no longer exists.').andThen((id) =>
-        games.applyGame(c.get('user'), { type: 'rejectDraw', gameId: id }),
-      ),
-    onOk: (c) => c.redirect(`/games/${c.req.param('id')}`, 303),
-    renderError: (c, e) => gameViewError(c, e),
-  }));
+  gameScreenCommand('/games/:id/draw/reject', [], (_f, id) => ({ type: 'rejectDraw', gameId: id }));
 
-  app.post('/games/:id/take-back', requireUser, formAction({
-    fields: [],
-    run: (c) =>
-      paramId(c, 'id', 'That game no longer exists.').andThen((id) =>
-        games.applyGame(c.get('user'), { type: 'requestTakeBack', gameId: id }),
-      ),
-    onOk: (c) => c.redirect(`/games/${c.req.param('id')}`, 303),
-    renderError: (c, e) => gameViewError(c, e),
-  }));
+  gameScreenCommand('/games/:id/take-back', [], (_f, id) => ({ type: 'requestTakeBack', gameId: id }));
 
-  app.post('/games/:id/take-back/accept', requireUser, formAction({
-    fields: [],
-    run: (c) =>
-      paramId(c, 'id', 'That game no longer exists.').andThen((id) =>
-        games.applyGame(c.get('user'), { type: 'acceptTakeBack', gameId: id }),
-      ),
-    onOk: (c) => c.redirect(`/games/${c.req.param('id')}`, 303),
-    renderError: (c, e) => gameViewError(c, e),
-  }));
+  gameScreenCommand('/games/:id/take-back/accept', [], (_f, id) => ({ type: 'acceptTakeBack', gameId: id }));
 
-  app.post('/games/:id/take-back/reject', requireUser, formAction({
-    fields: [],
-    run: (c) =>
-      paramId(c, 'id', 'That game no longer exists.').andThen((id) =>
-        games.applyGame(c.get('user'), { type: 'rejectTakeBack', gameId: id }),
-      ),
-    onOk: (c) => c.redirect(`/games/${c.req.param('id')}`, 303),
-    renderError: (c, e) => gameViewError(c, e),
-  }));
+  gameScreenCommand('/games/:id/take-back/reject', [], (_f, id) => ({ type: 'rejectTakeBack', gameId: id }));
 
   /**
    * Copying a record out is a read, so it is a GET and stays linkable — but the
@@ -809,43 +813,23 @@ export function createApp(deps: AppDeps): App {
     });
   });
 
-  app.post('/games/:id/share', requireUser, formAction({
-    fields: ['on'],
-    run: (c, f) =>
-      paramId(c, 'id', 'That game no longer exists.').andThen((id) =>
-        games.applyGame(c.get('user'), { type: 'share', gameId: id, on: f.on === '1' }),
-      ),
-    onOk: (c) => c.redirect(`/games/${c.req.param('id')}`, 303),
-    renderError: (c, e) => gameViewError(c, e),
-  }));
+  gameScreenCommand('/games/:id/share', ['on'], (f, id) => ({ type: 'share', gameId: id, on: f.on === '1' }));
 
-  app.post('/games/:id/hide', requireUser, formAction({
-    fields: ['return_to'],
-    run: (c, f) =>
-      paramId(c, 'id', 'That game no longer exists.').andThen((id) =>
-        games.applyGame(c.get('user'), { type: 'hide', gameId: id }).map(() => f.return_to),
-      ),
-    // Hiding always leaves the game behind, so success always lands on the
-    // list (ticket 05) — narrowed as `return_to` had it when it came from the
-    // list; the game screen's own hide sends `return_to` too (`/games/:id`),
-    // which doesn't match the list's base path, so `parseReturnTo` falls back
-    // to the unfiltered list, same as before.
-    onOk: (c, returnTo) => {
-      const asked = parseReturnTo(MY_GAMES_SCHEMA, '/games', returnTo);
-      return c.redirect(`/games${queryString(MY_GAMES_SCHEMA, asked)}`, 303);
-    },
-    renderError: (c, e, f) => gameHideError(c, e, f.return_to),
-  }));
+  // Hiding always leaves the game behind, so success always lands on the
+  // list (ticket 05) — narrowed as `return_to` had it when it came from the
+  // list; the game screen's own hide sends `return_to` too (`/games/:id`),
+  // which doesn't match the list's base path, so `parseReturnTo` falls back
+  // to the unfiltered list, same as before.
+  listCommand(
+    '/games/:id/hide',
+    ['return_to'],
+    MY_GAMES_SCHEMA,
+    '/games',
+    (_f, id) => ({ type: 'hide', gameId: id! }),
+    gameHideError,
+  );
 
-  app.post('/games/:id/admin-delete', requireUser, formAction({
-    fields: [],
-    run: (c) =>
-      paramId(c, 'id', 'That game no longer exists.').andThen((id) =>
-        games.applyGame(c.get('user'), { type: 'adminDelete', gameId: id }),
-      ),
-    onOk: (c) => c.redirect(`/games/${c.req.param('id')}`, 303),
-    renderError: (c, e) => gameViewError(c, e),
-  }));
+  gameScreenCommand('/games/:id/admin-delete', [], (_f, id) => ({ type: 'adminDelete', gameId: id }));
 
   app.get('/admin', requireUser, (c) => c.redirect('/admin/users', 303));
 
@@ -884,38 +868,11 @@ export function createApp(deps: AppDeps): App {
     renderError: usersError,
   }));
 
-  app.post('/admin/users/:id/block', requireUser, formAction({
-    fields: [],
-    run: (c) => {
-      const id = paramId(c, 'id', 'Unknown user.');
-      if (id.isErr()) return Promise.resolve(err(id.error));
-      return auth.applyAuth(c.get('user'), { type: 'blockUser', userId: id.value });
-    },
-    onOk: (c) => c.redirect('/admin/users', 303),
-    renderError: usersError,
-  }));
+  adminUserCommand('/admin/users/:id/block', (id) => ({ type: 'blockUser', userId: id }));
 
-  app.post('/admin/users/:id/unblock', requireUser, formAction({
-    fields: [],
-    run: (c) => {
-      const id = paramId(c, 'id', 'Unknown user.');
-      if (id.isErr()) return Promise.resolve(err(id.error));
-      return auth.applyAuth(c.get('user'), { type: 'unblockUser', userId: id.value });
-    },
-    onOk: (c) => c.redirect('/admin/users', 303),
-    renderError: usersError,
-  }));
+  adminUserCommand('/admin/users/:id/unblock', (id) => ({ type: 'unblockUser', userId: id }));
 
-  app.post('/admin/users/:id/force-password-change', requireUser, formAction({
-    fields: [],
-    run: (c) => {
-      const id = paramId(c, 'id', 'Unknown user.');
-      if (id.isErr()) return Promise.resolve(err(id.error));
-      return auth.applyAuth(c.get('user'), { type: 'forcePasswordChange', userId: id.value });
-    },
-    onOk: (c) => c.redirect('/admin/users', 303),
-    renderError: usersError,
-  }));
+  adminUserCommand('/admin/users/:id/force-password-change', (id) => ({ type: 'forcePasswordChange', userId: id }));
 
   app.post('/admin/users/:id/reset-password', requireUser, formAction({
     fields: [],
