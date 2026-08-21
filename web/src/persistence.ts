@@ -285,14 +285,14 @@ export interface Persistence {
 export function createPersistence(db: Db): Persistence {
   return {
     ping(): Result<void, string> {
-      try {
+      return attempt('ping', () => {
         db.prepare('SELECT 1').get();
-        return ok(undefined);
-      } catch (e) {
-        return err(e instanceof Error ? e.message : String(e));
-      }
+      });
     },
 
+    // Not `attempt`: the error this reports is usually the closure's own,
+    // already-named failure travelling back out through the rollback, so
+    // prefixing it with this method would bury the caller's message.
     transaction<T>(fn: () => Result<T, string>): Result<T, string> {
       try {
         // better-sqlite3 rolls the transaction back when the wrapped function
@@ -317,19 +317,16 @@ export function createPersistence(db: Db): Persistence {
     },
 
     appendActivityTrail(entry: TrailEntry): Result<void, string> {
-      try {
+      return attempt('appendActivityTrail', () => {
         const payload = entry.payload === undefined ? null : JSON.stringify(entry.payload);
         db.prepare(
           `INSERT INTO activity_trail (user_id, game_id, event, payload) VALUES (?, ?, ?, ?)`,
         ).run(entry.userId ?? null, entry.gameId ?? null, entry.event, payload);
-        return ok(undefined);
-      } catch (e) {
-        return err(e instanceof Error ? e.message : String(e));
-      }
+      });
     },
 
     createUser(input: CreateUserInput): Result<UserRecord, string> {
-      try {
+      return attempt('createUser', () => {
         const info = db
           .prepare(
             `INSERT INTO users (username, display_name, password_hash, role, force_password_change)
@@ -345,135 +342,106 @@ export function createPersistence(db: Db): Persistence {
         const row = db.prepare('SELECT * FROM users WHERE id = ?').get(info.lastInsertRowid) as
           | UserRow
           | undefined;
-        if (!row) return err('inserted user row not found');
-        return ok(mapUser(row));
-      } catch (e) {
-        return err(e instanceof Error ? e.message : String(e));
-      }
+        if (!row) throw new Error('inserted user row not found');
+        return mapUser(row);
+      });
     },
 
     findUserByUsername(username: string): Result<UserRecord | null, string> {
-      try {
+      return attempt('findUserByUsername', () => {
         const row = db.prepare('SELECT * FROM users WHERE username = ?').get(username) as
           | UserRow
           | undefined;
-        return ok(row ? mapUser(row) : null);
-      } catch (e) {
-        return err(e instanceof Error ? e.message : String(e));
-      }
+        return row ? mapUser(row) : null;
+      });
     },
 
     findUserById(id: number): Result<UserRecord | null, string> {
-      try {
+      return attempt('findUserById', () => {
         const row = db.prepare('SELECT * FROM users WHERE id = ?').get(id) as UserRow | undefined;
-        return ok(row ? mapUser(row) : null);
-      } catch (e) {
-        return err(e instanceof Error ? e.message : String(e));
-      }
+        return row ? mapUser(row) : null;
+      });
     },
 
     findUserByDisplayName(displayName: string): Result<UserRecord | null, string> {
-      try {
+      return attempt('findUserByDisplayName', () => {
         const row = db.prepare('SELECT * FROM users WHERE display_name = ?').get(displayName) as
           | UserRow
           | undefined;
-        return ok(row ? mapUser(row) : null);
-      } catch (e) {
-        return err(e instanceof Error ? e.message : String(e));
-      }
+        return row ? mapUser(row) : null;
+      });
     },
 
     listUsers(): Result<UserRecord[], string> {
-      try {
+      return attempt('listUsers', () => {
         const rows = db.prepare('SELECT * FROM users ORDER BY username').all() as UserRow[];
-        return ok(rows.map(mapUser));
-      } catch (e) {
-        return err(e instanceof Error ? e.message : String(e));
-      }
+        return rows.map(mapUser);
+      });
     },
 
     countAdmins(): Result<number, string> {
-      try {
+      return attempt('countAdmins', () => {
         const row = db.prepare("SELECT COUNT(*) AS n FROM users WHERE role = 'admin'").get() as {
           n: number;
         };
-        return ok(row.n);
-      } catch (e) {
-        return err(e instanceof Error ? e.message : String(e));
-      }
+        return row.n;
+      });
     },
 
     updateUserPassword(id: number, passwordHash: string, forcePasswordChange: boolean): Result<void, string> {
-      try {
+      return attempt('updateUserPassword', () => {
         db.prepare('UPDATE users SET password_hash = ?, force_password_change = ? WHERE id = ?').run(
           passwordHash,
           forcePasswordChange ? 1 : 0,
           id,
         );
-        return ok(undefined);
-      } catch (e) {
-        return err(e instanceof Error ? e.message : String(e));
-      }
+      });
     },
 
     updateUserDisplayName(id: number, displayName: string): Result<void, string> {
-      try {
+      return attempt('updateUserDisplayName', () => {
         db.prepare('UPDATE users SET display_name = ? WHERE id = ?').run(displayName, id);
-        return ok(undefined);
-      } catch (e) {
-        return err(e instanceof Error ? e.message : String(e));
-      }
+      });
     },
 
     setUserBlocked(id: number, blocked: boolean): Result<void, string> {
-      try {
+      return attempt('setUserBlocked', () => {
         db.prepare('UPDATE users SET blocked = ? WHERE id = ?').run(blocked ? 1 : 0, id);
-        return ok(undefined);
-      } catch (e) {
-        return err(e instanceof Error ? e.message : String(e));
-      }
+      });
     },
 
     setUserForcePasswordChange(id: number, force: boolean): Result<void, string> {
-      try {
+      return attempt('setUserForcePasswordChange', () => {
         db.prepare('UPDATE users SET force_password_change = ? WHERE id = ?').run(force ? 1 : 0, id);
-        return ok(undefined);
-      } catch (e) {
-        return err(e instanceof Error ? e.message : String(e));
-      }
+      });
     },
 
     getUserPrefs(userId: number): Result<UserPrefs, string> {
-      try {
+      return attempt('getUserPrefs', () => {
         const row = db.prepare('SELECT prefs FROM user_prefs WHERE user_id = ?').get(userId) as
           | { prefs: string }
           | undefined;
-        if (!row) return ok({ follows: [] });
+        if (!row) return { follows: [] };
         // Decoded defensively rather than trusted: this blob is meant to grow
         // other prefs later, and a row written before `follows` existed (or a
         // future field this version doesn't know) must not throw.
         const parsed = JSON.parse(row.prefs) as { follows?: unknown };
         const follows = Array.isArray(parsed.follows) ? parsed.follows.filter((id) => typeof id === 'number') : [];
-        return ok({ follows });
-      } catch (e) {
-        return err(e instanceof Error ? e.message : String(e));
-      }
+        return { follows };
+      });
     },
 
     setUserPrefs(userId: number, prefs: UserPrefs): Result<void, string> {
-      try {
+      return attempt('setUserPrefs', () => {
         db.prepare(
           `INSERT INTO user_prefs (user_id, prefs) VALUES (?, ?)
            ON CONFLICT(user_id) DO UPDATE SET prefs = excluded.prefs`,
         ).run(userId, JSON.stringify(prefs));
-        return ok(undefined);
-      } catch (e) {
-        return err(e instanceof Error ? e.message : String(e));
-      }
+      });
     },
 
     createGame(input: CreateGameInput): Result<GameRecord, string> {
-      try {
+      return attempt('createGame', () => {
         const info = db
           .prepare(
             `INSERT INTO games (board_size, state, join_type, proposer_id, invited_player_id, imported_ptn,
@@ -493,29 +461,22 @@ export function createPersistence(db: Db): Persistence {
         const row = db.prepare('SELECT * FROM games WHERE id = ?').get(info.lastInsertRowid) as
           | GameRow
           | undefined;
-        if (!row) return err('inserted game row not found');
-        return ok(mapGame(row));
-      } catch (e) {
-        return err(e instanceof Error ? e.message : String(e));
-      }
+        if (!row) throw new Error('inserted game row not found');
+        return mapGame(row);
+      });
     },
 
     findGameById(id: number): Result<GameRecord | null, string> {
-      try {
+      return attempt('findGameById', () => {
         const row = db.prepare('SELECT * FROM games WHERE id = ?').get(id) as GameRow | undefined;
-        return ok(row ? mapGame(row) : null);
-      } catch (e) {
-        return err(e instanceof Error ? e.message : String(e));
-      }
+        return row ? mapGame(row) : null;
+      });
     },
 
     deleteGame(id: number): Result<void, string> {
-      try {
+      return attempt('deleteGame', () => {
         db.prepare('DELETE FROM games WHERE id = ?').run(id);
-        return ok(undefined);
-      } catch (e) {
-        return err(e instanceof Error ? e.message : String(e));
-      }
+      });
     },
 
     listGamesForUser(
@@ -524,7 +485,7 @@ export function createPersistence(db: Db): Persistence {
       showRemoved = false,
     ): Result<GameRecord[], string> {
       if (states.length === 0) return ok([]);
-      try {
+      return attempt('listGamesForUser', () => {
         const placeholders = states.map(() => '?').join(', ');
         const rows = db
           .prepare(
@@ -536,14 +497,12 @@ export function createPersistence(db: Db): Persistence {
              ORDER BY created_at DESC, id DESC`,
           )
           .all(userId, userId, ...states, showRemoved ? 1 : 0, userId, userId) as GameRow[];
-        return ok(rows.map(mapGame));
-      } catch (e) {
-        return err(e instanceof Error ? e.message : String(e));
-      }
+        return rows.map(mapGame);
+      });
     },
 
     listProposedGames(filters: ProposedGameFilters): Result<GameRecord[], string> {
-      try {
+      return attempt('listProposedGames', () => {
         const where = ["g.state = 'proposed'", 'g.opponent_id IS NULL'];
         const params: Array<string | number> = [];
         if (filters.boardSize !== undefined) {
@@ -568,27 +527,23 @@ export function createPersistence(db: Db): Persistence {
              ORDER BY g.created_at DESC, g.id DESC`,
           )
           .all(...params) as GameRow[];
-        return ok(rows.map(mapGame));
-      } catch (e) {
-        return err(e instanceof Error ? e.message : String(e));
-      }
+        return rows.map(mapGame);
+      });
     },
 
     listAllGames(): Result<GameRecord[], string> {
-      try {
+      return attempt('listAllGames', () => {
         // No share/hide filtering: an admin may view any game (ticket 13), and
         // the list is how an admin finds one to view or remove.
         const rows = db
           .prepare('SELECT * FROM games ORDER BY created_at DESC, id DESC')
           .all() as GameRow[];
-        return ok(rows.map(mapGame));
-      } catch (e) {
-        return err(e instanceof Error ? e.message : String(e));
-      }
+        return rows.map(mapGame);
+      });
     },
 
     joinGame(gameId: number, opponentId: number, proposerSeat: 1 | 2): Result<boolean, string> {
-      try {
+      return attempt('joinGame', () => {
         // A join starts a fresh, active game: either side may have hidden the
         // bare proposal beforehand (ticket 13), and that must not carry over
         // and hide the game they are now actively part of. COALESCE keeps a
@@ -600,82 +555,62 @@ export function createPersistence(db: Db): Persistence {
              WHERE id = ? AND state = 'proposed' AND opponent_id IS NULL`,
           )
           .run(opponentId, proposerSeat, gameId);
-        return ok(info.changes === 1);
-      } catch (e) {
-        return err(e instanceof Error ? e.message : String(e));
-      }
+        return info.changes === 1;
+      });
     },
 
     setGameShare(gameId: number, side: GameSide, shared: boolean): Result<void, string> {
-      try {
+      return attempt('setGameShare', () => {
         // Sharing again also un-hides that side (CONTEXT.md: Hide is reversible).
         if (shared) {
           db.prepare(`UPDATE games SET ${side}_shared = 1, ${side}_hidden = 0 WHERE id = ?`).run(gameId);
         } else {
           db.prepare(`UPDATE games SET ${side}_shared = 0 WHERE id = ?`).run(gameId);
         }
-        return ok(undefined);
-      } catch (e) {
-        return err(e instanceof Error ? e.message : String(e));
-      }
+      });
     },
 
     hideGame(gameId: number, sides: readonly GameSide[]): Result<void, string> {
-      try {
+      return attempt('hideGame', () => {
         for (const side of sides) {
           db.prepare(`UPDATE games SET ${side}_hidden = 1, ${side}_shared = 0 WHERE id = ?`).run(gameId);
         }
-        return ok(undefined);
-      } catch (e) {
-        return err(e instanceof Error ? e.message : String(e));
-      }
+      });
     },
 
     adminRemoveGame(gameId: number): Result<void, string> {
-      try {
+      return attempt('adminRemoveGame', () => {
         db.prepare(
           `UPDATE games SET admin_removed = 1, state = 'finished',
              finished_at = COALESCE(finished_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
            WHERE id = ?`,
         ).run(gameId);
-        return ok(undefined);
-      } catch (e) {
-        return err(e instanceof Error ? e.message : String(e));
-      }
+      });
     },
 
     setPendingRequest(gameId: number, kind: 'take-back' | 'draw', by: number): Result<void, string> {
-      try {
+      return attempt('setPendingRequest', () => {
         db.prepare('UPDATE games SET pending_kind = ?, pending_by = ? WHERE id = ?').run(kind, by, gameId);
-        return ok(undefined);
-      } catch (e) {
-        return err(e instanceof Error ? e.message : String(e));
-      }
+      });
     },
 
     clearPendingRequest(gameId: number): Result<void, string> {
-      try {
+      return attempt('clearPendingRequest', () => {
         db.prepare('UPDATE games SET pending_kind = NULL, pending_by = NULL WHERE id = ?').run(gameId);
-        return ok(undefined);
-      } catch (e) {
-        return err(e instanceof Error ? e.message : String(e));
-      }
+      });
     },
 
     deleteLastMove(gameId: number): Result<void, string> {
-      try {
+      return attempt('deleteLastMove', () => {
         db.prepare(
           `DELETE FROM game_records WHERE game_id = ? AND move_number =
              (SELECT MAX(move_number) FROM game_records WHERE game_id = ?)`,
         ).run(gameId, gameId);
-        return ok(undefined);
-      } catch (e) {
-        return err(e instanceof Error ? e.message : String(e));
-      }
+      });
     },
 
     appendMove(input: AppendMoveInput): Result<MoveRecord, string> {
-      try {
+      return attempt('appendMove', () => {
         const info = db
           .prepare(
             `INSERT INTO game_records (game_id, move_number, player_id, notation, position)
@@ -685,27 +620,23 @@ export function createPersistence(db: Db): Persistence {
         const row = db
           .prepare('SELECT * FROM game_records WHERE id = ?')
           .get(info.lastInsertRowid) as MoveRow | undefined;
-        if (!row) return err('inserted move row not found');
-        return ok(mapMove(row));
-      } catch (e) {
-        return err(e instanceof Error ? e.message : String(e));
-      }
+        if (!row) throw new Error('inserted move row not found');
+        return mapMove(row);
+      });
     },
 
     listMoves(gameId: number): Result<MoveRecord[], string> {
-      try {
+      return attempt('listMoves', () => {
         const rows = db
           .prepare('SELECT * FROM game_records WHERE game_id = ? ORDER BY move_number')
           .all(gameId) as MoveRow[];
-        return ok(rows.map(mapMove));
-      } catch (e) {
-        return err(e instanceof Error ? e.message : String(e));
-      }
+        return rows.map(mapMove);
+      });
     },
 
     listLastMoveTimestamps(gameIds: readonly number[]): Result<ReadonlyMap<number, string>, string> {
       if (gameIds.length === 0) return ok(new Map());
-      try {
+      return attempt('listLastMoveTimestamps', () => {
         const placeholders = gameIds.map(() => '?').join(', ');
         const rows = db
           .prepare(
@@ -713,15 +644,13 @@ export function createPersistence(db: Db): Persistence {
              WHERE game_id IN (${placeholders}) GROUP BY game_id`,
           )
           .all(...gameIds) as { game_id: number; last_played_at: string }[];
-        return ok(new Map(rows.map((row) => [row.game_id, row.last_played_at])));
-      } catch (e) {
-        return err(e instanceof Error ? e.message : String(e));
-      }
+        return new Map(rows.map((row) => [row.game_id, row.last_played_at]));
+      });
     },
 
     listLastPositions(gameIds: readonly number[]): Result<ReadonlyMap<number, string>, string> {
       if (gameIds.length === 0) return ok(new Map());
-      try {
+      return attempt('listLastPositions', () => {
         const placeholders = gameIds.map(() => '?').join(', ');
         // The last row per game, by move number — then its position, when the
         // row carries one (a null snapshot is absent from the map, so the Game
@@ -736,26 +665,21 @@ export function createPersistence(db: Db): Persistence {
              WHERE gr.position IS NOT NULL`,
           )
           .all(...gameIds) as { game_id: number; position: string }[];
-        return ok(new Map(rows.map((row) => [row.game_id, row.position])));
-      } catch (e) {
-        return err(e instanceof Error ? e.message : String(e));
-      }
+        return new Map(rows.map((row) => [row.game_id, row.position]));
+      });
     },
 
     finishGame(gameId: number, result: string): Result<void, string> {
-      try {
+      return attempt('finishGame', () => {
         db.prepare(
           `UPDATE games SET state = 'finished', result = ?, finished_at = (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
            WHERE id = ?`,
         ).run(result, gameId);
-        return ok(undefined);
-      } catch (e) {
-        return err(e instanceof Error ? e.message : String(e));
-      }
+      });
     },
 
     writeGameStats(input: GameStatsInput): Result<void, string> {
-      try {
+      return attempt('writeGameStats', () => {
         db.prepare(
           `INSERT INTO game_stats (game_id, board_size, move_count, duration_seconds, result)
            VALUES (?, ?, ?, ?, ?)`,
@@ -766,50 +690,54 @@ export function createPersistence(db: Db): Persistence {
           input.durationSeconds,
           input.result,
         );
-        return ok(undefined);
-      } catch (e) {
-        return err(e instanceof Error ? e.message : String(e));
-      }
+      });
     },
 
     createSession(userId: number, id: string): Result<SessionRecord, string> {
-      try {
+      return attempt('createSession', () => {
         db.prepare('INSERT INTO sessions (id, user_id) VALUES (?, ?)').run(id, userId);
         const row = db.prepare('SELECT * FROM sessions WHERE id = ?').get(id) as SessionRow | undefined;
-        if (!row) return err('inserted session row not found');
-        return ok(mapSession(row));
-      } catch (e) {
-        return err(e instanceof Error ? e.message : String(e));
-      }
+        if (!row) throw new Error('inserted session row not found');
+        return mapSession(row);
+      });
     },
 
     findSessionById(id: string): Result<SessionRecord | null, string> {
-      try {
+      return attempt('findSessionById', () => {
         const row = db.prepare('SELECT * FROM sessions WHERE id = ?').get(id) as SessionRow | undefined;
-        return ok(row ? mapSession(row) : null);
-      } catch (e) {
-        return err(e instanceof Error ? e.message : String(e));
-      }
+        return row ? mapSession(row) : null;
+      });
     },
 
     deleteSession(id: string): Result<void, string> {
-      try {
+      return attempt('deleteSession', () => {
         db.prepare('DELETE FROM sessions WHERE id = ?').run(id);
-        return ok(undefined);
-      } catch (e) {
-        return err(e instanceof Error ? e.message : String(e));
-      }
+      });
     },
 
     deleteSessionsForUser(userId: number): Result<void, string> {
-      try {
+      return attempt('deleteSessionsForUser', () => {
         db.prepare('DELETE FROM sessions WHERE user_id = ?').run(userId);
-        return ok(undefined);
-      } catch (e) {
-        return err(e instanceof Error ? e.message : String(e));
-      }
+      });
     },
   };
+}
+
+/**
+ * The one place a driver exception becomes a `Result` error. Every method of
+ * `Persistence` is a statement (or a small run of them) that either produces a
+ * value or throws; `attempt` names the statement so a failure arrives as
+ * `createGame: UNIQUE constraint failed: …` rather than a bare driver message
+ * with no clue which call raised it. A method that must fail on its own terms
+ * — an insert whose row does not read back — throws inside `fn` and is
+ * reported the same way.
+ */
+function attempt<T>(statement: string, fn: () => T): Result<T, string> {
+  try {
+    return ok(fn());
+  } catch (e) {
+    return err(`${statement}: ${e instanceof Error ? e.message : String(e)}`);
+  }
 }
 
 /** Neutralise LIKE wildcards so a searched name is matched literally. */

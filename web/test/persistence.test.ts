@@ -32,6 +32,34 @@ describe('persistence', () => {
     });
   });
 
+  describe('failure reporting', () => {
+    it('names the failing statement, so a driver message says which call raised it', () => {
+      const db = makeDb();
+      const p = createPersistence(db);
+      db.close();
+
+      expect(p.findUserById(1)._unsafeUnwrapErr()).toMatch(/^findUserById: /);
+      expect(p.listUsers()._unsafeUnwrapErr()).toMatch(/^listUsers: /);
+    });
+
+    it("names a method's own refusal the same way, not just the driver's", () => {
+      const db = makeDb();
+      const p = createPersistence(db);
+      // A duplicate username is the driver refusing; the name still leads.
+      const aoife = { username: 'aoife', displayName: 'Aoife', passwordHash: 'hash', role: 'player' as const, forcePasswordChange: false };
+      expect(p.createUser(aoife).isOk()).toBe(true);
+      expect(p.createUser(aoife)._unsafeUnwrapErr()).toMatch(/^createUser: /);
+    });
+
+    it("reports a transaction closure's own error verbatim, unprefixed", () => {
+      const p = createPersistence(makeDb());
+
+      const result = p.transaction(() => err('the closure said no'));
+
+      expect(result._unsafeUnwrapErr()).toBe('the closure said no');
+    });
+  });
+
   describe('metricsSnapshot', () => {
     it('reports an empty snapshot for a fresh database', () => {
       const p = createPersistence(makeDb());
