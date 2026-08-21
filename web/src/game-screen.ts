@@ -1,6 +1,7 @@
 import { breadcrumb, escapeHtml, region, renderShell, streamed, type Regions } from './html.js';
 import type { SessionUser } from './auth.js';
 import type { ExportFormat, GameExport, GameView } from './games.js';
+import { gamePath } from './paths.js';
 import {
   BOARD_CLASS,
   CAN_MOVE_ATTR,
@@ -190,13 +191,13 @@ function renderGameControls(game: GameView): string {
         game.pending.kind === 'draw'
           ? `${requester} offers a draw.`
           : `${requester} requests a take-back of their last move.`;
-      const base = `/games/${game.id}/${game.pending.kind === 'draw' ? 'draw' : 'take-back'}`;
+      const kind = game.pending.kind === 'draw' ? 'draw' : 'take-back';
       parts.push(`
 <div class="notice">
   <p>${text}</p>
   <p class="actions">
-    <form method="post" action="${base}/accept"><button type="submit" class="btn btn-sm">Accept</button></form>
-    <form method="post" action="${base}/reject"><button type="submit" class="btn btn-quiet btn-sm">Reject</button></form>
+    <form method="post" action="${gamePath(game.id, `${kind}/accept`)}"><button type="submit" class="btn btn-sm">Accept</button></form>
+    <form method="post" action="${gamePath(game.id, `${kind}/reject`)}"><button type="submit" class="btn btn-quiet btn-sm">Reject</button></form>
   </p>
 </div>`);
     } else {
@@ -216,7 +217,7 @@ function renderGameControls(game: GameView): string {
       )
       .join('');
     parts.push(`
-<form class="panel" method="post" action="/games/${game.id}/move" x-show="!reviewing" x-cloak>
+<form class="panel" method="post" action="${gamePath(game.id, 'move')}" x-show="!reviewing" x-cloak>
   <div class="field">
     <label for="move">Your move</label>
     <input id="move" name="move" x-model="${MOVE_MODEL}" placeholder="a1, Sa1, or 5b4&gt;212" autocomplete="off" spellcheck="false">
@@ -260,9 +261,9 @@ function renderGameControls(game: GameView): string {
   if (game.canOfferTakeBack || game.canOfferDraw || game.canResign) {
     parts.push(`
 <div class="actions">
-  ${game.canOfferTakeBack ? `<form method="post" action="/games/${game.id}/take-back"><button type="submit" class="btn btn-quiet">Request take-back</button></form>` : ''}
-  ${game.canOfferDraw ? `<form method="post" action="/games/${game.id}/draw"><button type="submit" class="btn btn-quiet">Offer draw</button></form>` : ''}
-  ${game.canResign ? `<form method="post" action="/games/${game.id}/resign"><button type="submit" class="btn btn-quiet">Resign</button></form>` : ''}
+  ${game.canOfferTakeBack ? `<form method="post" action="${gamePath(game.id, 'take-back')}"><button type="submit" class="btn btn-quiet">Request take-back</button></form>` : ''}
+  ${game.canOfferDraw ? `<form method="post" action="${gamePath(game.id, 'draw')}"><button type="submit" class="btn btn-quiet">Offer draw</button></form>` : ''}
+  ${game.canResign ? `<form method="post" action="${gamePath(game.id, 'resign')}"><button type="submit" class="btn btn-quiet">Resign</button></form>` : ''}
 </div>`);
   }
   return parts.join('');
@@ -277,7 +278,7 @@ function exportLinks(gameId: number, through: number | null): string {
   // `&amp;` because this is an HTML attribute, not a bare URL; the browser
   // hands the server back a plain `&`.
   const query = (format: string): string =>
-    `/games/${gameId}/export?format=${format}${through === null ? '' : `&amp;through=${through}`}`;
+    `${gamePath(gameId, 'export')}?format=${format}${through === null ? '' : `&amp;through=${through}`}`;
   const at = through === null ? 'the whole game' : `move ${through}`;
   // Every export is recorded in the activity trail, so keep crawlers from
   // walking two links per move and filling it with exports nobody asked for.
@@ -379,8 +380,8 @@ function renderGameManagement(game: GameView): string {
   if (game.viewerShared !== null) {
     parts.push(
       game.viewerShared
-        ? `<form method="post" action="/games/${game.id}/share"><input type="hidden" name="on" value="0"><button type="submit" class="btn btn-quiet btn-sm">Stop sharing</button></form>`
-        : `<form method="post" action="/games/${game.id}/share"><input type="hidden" name="on" value="1"><button type="submit" class="btn btn-quiet btn-sm">Share with spectators</button></form>`,
+        ? `<form method="post" action="${gamePath(game.id, 'share')}"><input type="hidden" name="on" value="0"><button type="submit" class="btn btn-quiet btn-sm">Stop sharing</button></form>`
+        : `<form method="post" action="${gamePath(game.id, 'share')}"><input type="hidden" name="on" value="1"><button type="submit" class="btn btn-quiet btn-sm">Share with spectators</button></form>`,
     );
   }
   if (game.canHide) {
@@ -388,12 +389,12 @@ function renderGameManagement(game: GameView): string {
       // `return_to` naming the game's own page (ticket 05) routes a refusal
       // back here rather than the games list — the same "where did the click
       // come from" idiom the list row's hide button and the join button share.
-      `<form method="post" action="/games/${game.id}/hide"><input type="hidden" name="return_to" value="/games/${game.id}"><button type="submit" class="btn btn-quiet btn-sm">Hide from my games</button></form>`,
+      `<form method="post" action="${gamePath(game.id, 'hide')}"><input type="hidden" name="return_to" value="${gamePath(game.id)}"><button type="submit" class="btn btn-quiet btn-sm">Hide from my games</button></form>`,
     );
   }
   if (game.canAdminDelete) {
     parts.push(
-      `<form method="post" action="/games/${game.id}/admin-delete"><button type="submit" class="btn btn-danger btn-sm">Remove this game</button></form>`,
+      `<form method="post" action="${gamePath(game.id, 'admin-delete')}"><button type="submit" class="btn btn-danger btn-sm">Remove this game</button></form>`,
     );
   }
   if (parts.length === 0) return '';
@@ -461,7 +462,7 @@ ${renderLegend()}
   const body = `
 ${breadcrumb({ href: '/games', label: 'Games' }, `Game ${game.id}`)}
 <h1>Game ${game.id}</h1>
-${streamed(`/games/${game.id}/stream`, live)}
+${streamed(gamePath(game.id, 'stream'), live)}
 ${renderMoveSyntax()}`;
   return renderShell(`Game ${game.id}`, body, { user, path: '/games', scripts: 'client' });
 }
@@ -509,7 +510,7 @@ export function renderExportPage(user: SessionUser, gameId: number, view: GameEx
         : `The position after move ${view.throughMove} of ${view.totalMoves}, as the Tak Positional System describes it.`;
 
   const body = `
-${breadcrumb({ href: `/games/${gameId}`, label: `Game ${gameId}` }, view.format.toUpperCase())}
+${breadcrumb({ href: gamePath(gameId), label: `Game ${gameId}` }, view.format.toUpperCase())}
 <h1>${view.format.toUpperCase()}</h1>
 <p class="lede">${what}</p>
 ${TAK_COPY_SCRIPT}
@@ -517,8 +518,8 @@ ${TAK_COPY_SCRIPT}
   <pre class="export-text" x-ref="record">${escapeHtml(view.text)}</pre>
   <p class="actions">
     <button type="button" class="btn" x-on:click="copy()" x-show="supported" x-cloak x-text="copied ? 'Copied' : 'Copy'">Copy</button>
-    <a class="btn btn-quiet" href="/games/${gameId}/export?format=${other}${through}">Show ${other.toUpperCase()} instead</a>
-    <a class="btn btn-quiet" href="/games/${gameId}">Back to the game</a>
+    <a class="btn btn-quiet" href="${gamePath(gameId, 'export')}?format=${other}${through}">Show ${other.toUpperCase()} instead</a>
+    <a class="btn btn-quiet" href="${gamePath(gameId)}">Back to the game</a>
   </p>
 </div>
 <p class="hint">Select the record above to copy it by hand.</p>`;

@@ -187,8 +187,12 @@ export function region(name: string, html: string): string {
 
 /**
  * The wrapper that holds a page's live connection. It must enclose every
- * region but nothing whose state the browser owns — a half-typed form, or the
- * click-builder's composition — because the stream replaces what is inside it.
+ * region — the stream component finds them once, scoped to this element,
+ * and never looks outside it. Anything else is safe to nest inside too: the
+ * client only ever overwrites a matched region's own `innerHTML`, so a
+ * sibling or an ancestor (a half-typed form, the click-builder's scope) is
+ * untouched by a swap. The one thing to avoid is state living *inside* a
+ * region — that content is replaced wholesale on every frame it changes.
  */
 export function streamed(url: string, html: string): string {
   return `<div x-data="${COMPONENTS.stream}(${escapeHtml(JSON.stringify({ url } satisfies StreamConfig))})">

@@ -1,6 +1,7 @@
 import { escapeHtml, region, renderShell, streamed, type Regions } from './html.js';
 import type { SessionUser } from './auth.js';
 import type { GameSummary } from './games.js';
+import { gamePath } from './paths.js';
 import {
   FIND_GAMES_DEFAULT,
   FIND_GAMES_SCHEMA,
@@ -78,21 +79,21 @@ function gameActions(game: GameSummary, list: GameListPage, returnTo: string, ex
   // what that means rather than a bare “join” (CONTEXT.md: Self-play).
   const join =
     game.canJoin
-      ? `<form method="post" action="/games/${game.id}/join">${hiddenReturnTo}<button type="submit" class="btn btn-sm"${
+      ? `<form method="post" action="${gamePath(game.id, 'join')}">${hiddenReturnTo}<button type="submit" class="btn btn-sm"${
           game.canSolo ? ' title="Claim your own game and play both seats yourself."' : ''
         }>${game.canSolo ? 'Solo' : 'Join'}</button></form>`
       : '';
   const buttons = [
     join,
     game.canDelete
-      ? `<form method="post" action="/games/${game.id}/delete">${hiddenReturnTo}<button type="submit" class="btn btn-danger btn-sm">Delete</button></form>`
+      ? `<form method="post" action="${gamePath(game.id, 'delete')}">${hiddenReturnTo}<button type="submit" class="btn btn-danger btn-sm">Delete</button></form>`
       : '',
     // A finished game still opens: the board and history stay reviewable
     // (ticket 01's review mode covers finished games), and this was the row's
     // only way in — the previous `in_play`-only condition left a filtered-in
     // finished game with no actions at all.
     game.state === 'in_play' || game.state === 'finished'
-      ? `<a class="btn btn-sm" href="/games/${game.id}">Open</a>`
+      ? `<a class="btn btn-sm" href="${gamePath(game.id)}">Open</a>`
       : '',
     // Ticket 05: hide from the row, without opening the game. Restricted to
     // `games` deliberately, not just by `canHide` happening to be false on
@@ -100,7 +101,7 @@ function gameActions(game: GameSummary, list: GameListPage, returnTo: string, ex
     // themselves for self-play), and `canHide` is already true for it then —
     // hide belongs to "your games", not to a page for finding one to join.
     list === 'games' && game.canHide
-      ? `<form method="post" action="/games/${game.id}/hide">${hiddenReturnTo}<button type="submit" class="btn btn-quiet btn-sm">Hide</button></form>`
+      ? `<form method="post" action="${gamePath(game.id, 'hide')}">${hiddenReturnTo}<button type="submit" class="btn btn-quiet btn-sm">Hide</button></form>`
       : '',
     extra,
   ].filter(Boolean);

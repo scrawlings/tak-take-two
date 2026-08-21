@@ -1,6 +1,7 @@
 import { breadcrumb, escapeHtml, renderShell } from './html.js';
 import type { SessionUser } from './auth.js';
 import type { GameSummary } from './games.js';
+import { adminUserPath, gamePath } from './paths.js';
 
 /**
  * The pages outside the game itself: the front page, the sign-in and account
@@ -176,12 +177,12 @@ export function renderAdminUsersPage(actor: SessionUser, users: readonly Session
         .join(' ');
       const self = u.id === actor.id;
       const actions = self
-        ? `<form method="post" action="/admin/users/${u.id}/force-password-change"><button type="submit" class="btn btn-quiet btn-sm">Force change</button></form>
-           <form method="post" action="/admin/users/${u.id}/reset-password"><button type="submit" class="btn btn-quiet btn-sm">Reset password</button></form>`
-        : `<form method="post" action="/admin/users/${u.id}/block"><button type="submit" class="btn btn-danger btn-sm">Block</button></form>
-           <form method="post" action="/admin/users/${u.id}/unblock"><button type="submit" class="btn btn-quiet btn-sm">Unblock</button></form>
-           <form method="post" action="/admin/users/${u.id}/force-password-change"><button type="submit" class="btn btn-quiet btn-sm">Force change</button></form>
-           <form method="post" action="/admin/users/${u.id}/reset-password"><button type="submit" class="btn btn-quiet btn-sm">Reset password</button></form>`;
+        ? `<form method="post" action="${adminUserPath(u.id, 'force-password-change')}"><button type="submit" class="btn btn-quiet btn-sm">Force change</button></form>
+           <form method="post" action="${adminUserPath(u.id, 'reset-password')}"><button type="submit" class="btn btn-quiet btn-sm">Reset password</button></form>`
+        : `<form method="post" action="${adminUserPath(u.id, 'block')}"><button type="submit" class="btn btn-danger btn-sm">Block</button></form>
+           <form method="post" action="${adminUserPath(u.id, 'unblock')}"><button type="submit" class="btn btn-quiet btn-sm">Unblock</button></form>
+           <form method="post" action="${adminUserPath(u.id, 'force-password-change')}"><button type="submit" class="btn btn-quiet btn-sm">Force change</button></form>
+           <form method="post" action="${adminUserPath(u.id, 'reset-password')}"><button type="submit" class="btn btn-quiet btn-sm">Reset password</button></form>`;
       return `<tr>
   <td class="key">${escapeHtml(u.username)}</td>
   <td>${escapeHtml(u.displayName)}</td>
@@ -269,15 +270,15 @@ export function renderAdminGamesPage(actor: SessionUser, games: readonly GameSum
       const remove =
         game.adminRemoved
           ? ''
-          : `<form method="post" action="/games/${game.id}/admin-delete"><button type="submit" class="btn btn-danger btn-sm">Remove</button></form>`;
+          : `<form method="post" action="${gamePath(game.id, 'admin-delete')}"><button type="submit" class="btn btn-danger btn-sm">Remove</button></form>`;
       return `<tr>
-  <td class="num"><a href="/games/${game.id}">${game.id}</a></td>
+  <td class="num"><a href="${gamePath(game.id)}">${game.id}</a></td>
   <td class="num">${game.boardSize}×${game.boardSize}</td>
   <td>${players}</td>
   <td>${state}</td>
   <td>${toMove}</td>
   <td>${result}</td>
-  <td><div class="row-actions"><a class="btn btn-sm" href="/games/${game.id}">Open</a>${remove}</div></td>
+  <td><div class="row-actions"><a class="btn btn-sm" href="${gamePath(game.id)}">Open</a>${remove}</div></td>
 </tr>`;
     })
     .join('');

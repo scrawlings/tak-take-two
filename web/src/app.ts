@@ -14,6 +14,7 @@ import type { Logger } from './logging.js';
 import { newRequestId } from './logging.js';
 import { escapeHtml, renderShell, type Regions } from './html.js';
 import { SITE_CSS_URL, CLIENT_SCRIPT_URL } from './static-urls.js';
+import { adminUserRoutePattern, gamePath, gameRoutePattern } from './paths.js';
 
 /** The committed static assets (ADR-0013): `web/static/`, one level up from this module's directory. */
 const STATIC_DIR = join(fileURLToPath(new URL('..', import.meta.url)), 'static');
@@ -470,8 +471,8 @@ export function createApp(deps: AppDeps): App {
 
   const gameViewError = mountScreen<number, GameView, GameViewPageView>({
     name: 'game view',
-    path: '/games/:id',
-    streamPath: '/games/:id/stream',
+    path: gameRoutePattern(),
+    streamPath: gameRoutePattern('stream'),
     parseAddress: (c) => paramId(c, 'id', 'That game no longer exists.'),
     onBadAddress: (c) => gameViewNotFound(c),
     onBadAddressStream: (c) => gameViewNotFound(c),
@@ -531,7 +532,7 @@ export function createApp(deps: AppDeps): App {
         paramId(c, 'id', 'That game no longer exists.').andThen((id) =>
           games.applyGame(c.get('user'), build(f, id)),
         ),
-      onOk: (c) => c.redirect(`/games/${c.req.param('id')}`, 303),
+      onOk: (c) => c.redirect(gamePath(Number(c.req.param('id'))), 303),
       renderError: (c, e) => gameViewError(c, e),
     }));
   };
@@ -755,7 +756,7 @@ export function createApp(deps: AppDeps): App {
       }),
   }));
 
-  app.post('/games/:id/join', requireUser, formAction({
+  app.post(gameRoutePattern('join'), requireUser, formAction({
     fields: ['return_to'],
     run: (c) =>
       paramId(c, 'id', 'That game no longer exists.').andThen((id) =>
@@ -763,12 +764,12 @@ export function createApp(deps: AppDeps): App {
       ),
     // A join means play now: land on the game screen, not back on a list.
     // Only a refused join is reported on the list that offered the button.
-    onOk: (c) => c.redirect(`/games/${c.req.param('id')}`, 303),
+    onOk: (c) => c.redirect(gamePath(Number(c.req.param('id'))), 303),
     renderError: (c, e, f) => gameJoinError(c, e, f.return_to),
   }));
 
   listCommand(
-    '/games/:id/delete',
+    gameRoutePattern('delete'),
     ['return_to'],
     MY_GAMES_SCHEMA,
     '/games',
@@ -779,28 +780,28 @@ export function createApp(deps: AppDeps): App {
   // The game view (page + stream) is registered by `mountScreen` above,
   // alongside its error-adapter.
 
-  gameScreenCommand('/games/:id/move', ['move'], (f, id) => ({ type: 'playMove', gameId: id, move: f.move ?? '' }));
+  gameScreenCommand(gameRoutePattern('move'), ['move'], (f, id) => ({ type: 'playMove', gameId: id, move: f.move ?? '' }));
 
-  gameScreenCommand('/games/:id/resign', [], (_f, id) => ({ type: 'resign', gameId: id }));
+  gameScreenCommand(gameRoutePattern('resign'), [], (_f, id) => ({ type: 'resign', gameId: id }));
 
-  gameScreenCommand('/games/:id/draw', [], (_f, id) => ({ type: 'offerDraw', gameId: id }));
+  gameScreenCommand(gameRoutePattern('draw'), [], (_f, id) => ({ type: 'offerDraw', gameId: id }));
 
-  gameScreenCommand('/games/:id/draw/accept', [], (_f, id) => ({ type: 'acceptDraw', gameId: id }));
+  gameScreenCommand(gameRoutePattern('draw/accept'), [], (_f, id) => ({ type: 'acceptDraw', gameId: id }));
 
-  gameScreenCommand('/games/:id/draw/reject', [], (_f, id) => ({ type: 'rejectDraw', gameId: id }));
+  gameScreenCommand(gameRoutePattern('draw/reject'), [], (_f, id) => ({ type: 'rejectDraw', gameId: id }));
 
-  gameScreenCommand('/games/:id/take-back', [], (_f, id) => ({ type: 'requestTakeBack', gameId: id }));
+  gameScreenCommand(gameRoutePattern('take-back'), [], (_f, id) => ({ type: 'requestTakeBack', gameId: id }));
 
-  gameScreenCommand('/games/:id/take-back/accept', [], (_f, id) => ({ type: 'acceptTakeBack', gameId: id }));
+  gameScreenCommand(gameRoutePattern('take-back/accept'), [], (_f, id) => ({ type: 'acceptTakeBack', gameId: id }));
 
-  gameScreenCommand('/games/:id/take-back/reject', [], (_f, id) => ({ type: 'rejectTakeBack', gameId: id }));
+  gameScreenCommand(gameRoutePattern('take-back/reject'), [], (_f, id) => ({ type: 'rejectTakeBack', gameId: id }));
 
   /**
    * Copying a record out is a read, so it is a GET and stays linkable — but the
    * module audits it (CONTEXT.md lists exports in the activity trail), so it
    * goes through `applyGame` like any other command.
    */
-  app.get('/games/:id/export', requireUser, (c) => {
+  app.get(gameRoutePattern('export'), requireUser, (c) => {
     const actor = c.get('user');
     const id = paramId(c, 'id', 'That game no longer exists.');
     if (id.isErr()) {
@@ -834,7 +835,7 @@ export function createApp(deps: AppDeps): App {
     });
   });
 
-  gameScreenCommand('/games/:id/share', ['on'], (f, id) => ({ type: 'share', gameId: id, on: f.on === '1' }));
+  gameScreenCommand(gameRoutePattern('share'), ['on'], (f, id) => ({ type: 'share', gameId: id, on: f.on === '1' }));
 
   // Hiding always leaves the game behind, so success always lands on the
   // list (ticket 05) — narrowed as `return_to` had it when it came from the
@@ -842,7 +843,7 @@ export function createApp(deps: AppDeps): App {
   // which doesn't match the list's base path, so `parseReturnTo` falls back
   // to the unfiltered list, same as before.
   listCommand(
-    '/games/:id/hide',
+    gameRoutePattern('hide'),
     ['return_to'],
     MY_GAMES_SCHEMA,
     '/games',
@@ -850,7 +851,7 @@ export function createApp(deps: AppDeps): App {
     gameHideError,
   );
 
-  gameScreenCommand('/games/:id/admin-delete', [], (_f, id) => ({ type: 'adminDelete', gameId: id }));
+  gameScreenCommand(gameRoutePattern('admin-delete'), [], (_f, id) => ({ type: 'adminDelete', gameId: id }));
 
   app.get('/admin', requireUser, (c) => c.redirect('/admin/users', 303));
 
@@ -889,13 +890,16 @@ export function createApp(deps: AppDeps): App {
     renderError: usersError,
   }));
 
-  adminUserCommand('/admin/users/:id/block', (id) => ({ type: 'blockUser', userId: id }));
+  adminUserCommand(adminUserRoutePattern('block'), (id) => ({ type: 'blockUser', userId: id }));
 
-  adminUserCommand('/admin/users/:id/unblock', (id) => ({ type: 'unblockUser', userId: id }));
+  adminUserCommand(adminUserRoutePattern('unblock'), (id) => ({ type: 'unblockUser', userId: id }));
 
-  adminUserCommand('/admin/users/:id/force-password-change', (id) => ({ type: 'forcePasswordChange', userId: id }));
+  adminUserCommand(adminUserRoutePattern('force-password-change'), (id) => ({
+    type: 'forcePasswordChange',
+    userId: id,
+  }));
 
-  app.post('/admin/users/:id/reset-password', requireUser, formAction({
+  app.post(adminUserRoutePattern('reset-password'), requireUser, formAction({
     fields: [],
     run: (c) => {
       const id = paramId(c, 'id', 'Unknown user.');
