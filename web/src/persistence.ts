@@ -20,9 +20,14 @@ export interface PersistenceSnapshot {
   readonly databaseSizeBytes: number;
 }
 
-/** A single activity trail event, written for audit and game-integrity analysis. */
+/**
+ * A single activity trail event, written for audit and game-integrity analysis.
+ * `userId` is required, matching both the column (NOT NULL since migration 8)
+ * and `trail.ts`'s `TrailEvent`: every event this system records has an actor.
+ * `gameId` is genuinely optional — the account events are about nobody's game.
+ */
 export interface TrailEntry {
-  readonly userId?: number;
+  readonly userId: number;
   readonly gameId?: number;
   readonly event: string;
   /** Structured detail; serialized by the implementation, never by the caller. */

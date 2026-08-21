@@ -1,0 +1,30 @@
+# A reference to an account refuses a delete; only sessions and preferences cascade
+
+`web/src/db.ts` described, in detail, what happens when a user is deleted — and what it described would destroy the evidence ranked play depends on. `games.proposer_id` and `game_records.player_id` were `ON DELETE CASCADE`, so deleting an account would have deleted its games and its recorded moves outright; `games.opponent_id`, `games.invited_player_id` and `activity_trail.user_id` were `ON DELETE SET NULL`, leaving games and audit entries no longer attributable to anyone. Meanwhile no delete-user path exists anywhere in `web/src` — no `deleteUser`, no `DELETE FROM users` — and **Account permanence** (CONTEXT.md) says none ever should: blocking is how an account is retired, because a rated game whose opponent had vanished could not be interpreted. The schema was describing a policy the domain had rejected.
+
+Status: accepted
+
+## The decision
+
+- **Every reference to `users` that is evidence becomes `ON DELETE RESTRICT`.** `games.proposer_id`, `games.opponent_id`, `games.invited_player_id`, `game_records.player_id` and `activity_trail.user_id`. A `DELETE FROM users` — from a future script, an admin console, a well-meaning migration — now fails loudly at the first row it would have damaged, instead of silently taking the games with it.
+- **`sessions.user_id` and `user_prefs.user_id` keep `ON DELETE CASCADE`.** Neither is evidence: a session is ephemeral by definition, and a follow list is a convenience the find page rebuilds from nothing. The line is not "everything about a user is permanent" but "the record of what a user *played* is permanent".
+- **References to `games` are untouched.** Games really are deleted — a proposal withdrawn, or both players hiding one (ADR-0003) — so `game_records.game_id` and `game_stats.game_id` still cascade, and `activity_trail.game_id` still nulls. `trail.ts` already covers that null by requiring `payload.gameId` on the two hard-delete events; nothing there changes.
+- **`activity_trail.user_id` becomes `NOT NULL`, and so does `TrailEntry.userId`.** The column was nullable to receive a `SET NULL` from a deletion path that does not exist. Every write site passes an actor and `trail.ts`'s `TrailEvent` has always required one; only the column and the persistence interface still admitted the possibility. Now none of the three does.
+- **`runMigrations` runs migrations with foreign keys off and `foreign_key_check` inside each transaction.** SQLite cannot alter a foreign key in place, so the only route is create-copy-drop-rename — and with keys enforced, `DROP TABLE games` would cascade into `game_records` and `game_stats` before the new table existed. Checking the whole database at the end of each migration is the stronger guarantee in exchange: a migration that leaves a dangling reference rolls back, unapplied, rather than being caught statement by statement. The pragma is restored to whatever the caller had.
+- **Erasure, if it is ever required, is anonymisation and not deletion.** Blank the display name, keep the id and every row that references it. The schema already supports it — `display_name` is `UNIQUE` and freely changeable (CONTEXT.md: Display name), so a placeholder per account is a legal value — and it is the only shape of erasure compatible with a permanent record of who played whom. This is what settles `RESTRICT` over `CASCADE`: there is no future requirement that wants the cascade.
+
+## Considered options
+
+- **Leave the rules as they are, documented as unreachable.** Rejected: a comment saying "this cannot happen" is the weakest form of the claim, and the rules are not inert — they are instructions waiting for someone to run the delete. The whole point of the ticket was that the schema said something the domain had already decided against.
+- **Drop the delete rules entirely.** Rejected, though it is nearly the same behaviour: with immediate constraints, the default `NO ACTION` refuses the delete much as `RESTRICT` does. `RESTRICT` is chosen because it *names* the intent in the schema text, where the next reader of `db.ts` will be.
+- **`SET NULL` everywhere instead, so a delete anonymises in place.** Rejected: it is anonymisation done by the wrong mechanism. Nulling `games.proposer_id` (which is `NOT NULL`) is not even possible, and nulling the others loses the identity that links a player's games to each other — anonymisation has to keep the id and change the name, which is an application concern, not a foreign-key action.
+- **One migration per table.** Rejected: the three rebuilds are one decision, and a database halfway through them is a state nobody should be able to reach.
+- **Have the migration delete any trail row with a NULL actor, so `NOT NULL` cannot fail.** Rejected: there should be none, and if there is one, an audit entry with no actor is a bug worth surfacing. Failing the migration is the loud version; silently dropping rows from an append-only record is the worst available option.
+- **Give `runMigrations` a per-migration "needs a rebuild" flag rather than disabling keys for all of them.** Rejected: it adds a shape to the migration list to describe something `foreign_key_check` already verifies uniformly, and the check is run for every migration either way.
+
+## Consequences
+
+- The invariant is executable. `web/test/db.test.ts` runs the `DELETE FROM users` a future script might and requires it to throw, for a proposer, an opponent, an invited player and a trail actor.
+- A migration may now rebuild a table, which was not previously possible. The two frozen schema fixtures (`databaseAtMigration1`, `databaseAtMigration7`) are what prove a real deployed database survives one with its rows intact.
+- `TrailEntry.userId` is required, so a trail write without an actor is a type error rather than a NULL column.
+- If GDPR-style erasure is ever required, the design is decided and the schema already permits it; what it needs is an application-level rename, not a schema change.

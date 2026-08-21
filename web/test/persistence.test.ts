@@ -178,23 +178,33 @@ describe('persistence', () => {
       });
     });
 
-    it('writes an event with no optional fields', () => {
+    it('writes an account event, which is about no game and carries no payload', () => {
       const db = makeDb();
+      insertUser(db, 1, 'alice');
       const p = createPersistence(db);
-      const r = p.appendActivityTrail({ event: 'export' });
+      const r = p.appendActivityTrail({ userId: 1, event: 'sign-out' });
       expect(r.isOk()).toBe(true);
 
       const row = db
         .prepare('SELECT user_id, game_id, event, payload FROM activity_trail')
         .get() as Record<string, unknown>;
-      expect(row).toEqual({ user_id: null, game_id: null, event: 'export', payload: null });
+      expect(row).toEqual({ user_id: 1, game_id: null, event: 'sign-out', payload: null });
+    });
+
+    it('refuses an entry whose actor is not an account', () => {
+      const db = makeDb();
+      const p = createPersistence(db);
+
+      // Accounts are permanent, so the trail's actor is a real foreign key
+      // (migration 8) rather than a number nobody checks.
+      expect(p.appendActivityTrail({ userId: 99, event: 'sign-in' }).isErr()).toBe(true);
     });
 
     it('fails when the database is closed', () => {
       const db = makeDb();
       const p = createPersistence(db);
       db.close();
-      expect(p.appendActivityTrail({ event: 'sign-in' }).isErr()).toBe(true);
+      expect(p.appendActivityTrail({ userId: 1, event: 'sign-in' }).isErr()).toBe(true);
     });
   });
 

@@ -99,6 +99,85 @@ const MIGRATIONS: readonly string[] = [
     user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
     prefs TEXT NOT NULL DEFAULT '{}'
   );`,
+  // ADR-0017: accounts are permanent (CONTEXT.md: Account permanence), so
+  // every reference to `users` that is evidence refuses a delete instead of
+  // cascading it away — `games` and `game_records` would have deleted the very
+  // record a rating depends on, and the trail would have lost its actor.
+  // `sessions` and `user_prefs` keep CASCADE: neither is evidence. References
+  // to `games` are untouched — games really are deleted (ADR-0003).
+  //
+  // `activity_trail.user_id` also becomes NOT NULL: every write site passes an
+  // actor and `trail.ts`'s `TrailEvent` requires one, so the column was
+  // nullable only for the deletion path that turned out not to exist. A
+  // pre-existing NULL fails this migration rather than being papered over —
+  // an entry with no actor is a bug worth surfacing, not a row to drop.
+  //
+  // SQLite cannot alter a foreign key in place, so each table is rebuilt.
+  // `runMigrations` disables foreign keys around a migration and runs
+  // `foreign_key_check` inside its transaction, which is what makes the
+  // drop-and-rename safe: with them on, `DROP TABLE games` would cascade into
+  // `game_records` and `game_stats` before the new table existed.
+  `CREATE TABLE games_rebuilt (
+    id INTEGER PRIMARY KEY,
+    board_size INTEGER NOT NULL CHECK (board_size IN (5, 6)),
+    state TEXT NOT NULL DEFAULT 'proposed' CHECK (state IN ('proposed', 'in_play', 'finished')),
+    join_type TEXT NOT NULL CHECK (join_type IN ('open', 'invited')),
+    proposer_id INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+    opponent_id INTEGER REFERENCES users(id) ON DELETE RESTRICT,
+    invited_player_id INTEGER REFERENCES users(id) ON DELETE RESTRICT,
+    result TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    finished_at TEXT,
+    imported_ptn TEXT,
+    proposer_shared INTEGER NOT NULL DEFAULT 0,
+    opponent_shared INTEGER NOT NULL DEFAULT 0,
+    pending_kind TEXT,
+    pending_by INTEGER,
+    proposer_hidden INTEGER NOT NULL DEFAULT 0,
+    opponent_hidden INTEGER NOT NULL DEFAULT 0,
+    admin_removed INTEGER NOT NULL DEFAULT 0,
+    proposer_seat INTEGER CHECK (proposer_seat IN (1, 2))
+  );
+  INSERT INTO games_rebuilt (id, board_size, state, join_type, proposer_id, opponent_id,
+      invited_player_id, result, created_at, finished_at, imported_ptn, proposer_shared,
+      opponent_shared, pending_kind, pending_by, proposer_hidden, opponent_hidden,
+      admin_removed, proposer_seat)
+    SELECT id, board_size, state, join_type, proposer_id, opponent_id,
+      invited_player_id, result, created_at, finished_at, imported_ptn, proposer_shared,
+      opponent_shared, pending_kind, pending_by, proposer_hidden, opponent_hidden,
+      admin_removed, proposer_seat
+    FROM games;
+  DROP TABLE games;
+  ALTER TABLE games_rebuilt RENAME TO games;
+
+  CREATE TABLE game_records_rebuilt (
+    id INTEGER PRIMARY KEY,
+    game_id INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE,
+    move_number INTEGER NOT NULL,
+    player_id INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+    notation TEXT NOT NULL,
+    position TEXT,
+    played_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    UNIQUE (game_id, move_number)
+  );
+  INSERT INTO game_records_rebuilt (id, game_id, move_number, player_id, notation, position, played_at)
+    SELECT id, game_id, move_number, player_id, notation, position, played_at FROM game_records;
+  DROP TABLE game_records;
+  ALTER TABLE game_records_rebuilt RENAME TO game_records;
+
+  CREATE TABLE activity_trail_rebuilt (
+    id INTEGER PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+    game_id INTEGER REFERENCES games(id) ON DELETE SET NULL,
+    event TEXT NOT NULL,
+    payload TEXT,
+    occurred_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+  );
+  INSERT INTO activity_trail_rebuilt (id, user_id, game_id, event, payload, occurred_at)
+    SELECT id, user_id, game_id, event, payload, occurred_at FROM activity_trail;
+  DROP TABLE activity_trail;
+  ALTER TABLE activity_trail_rebuilt RENAME TO activity_trail;
+  CREATE INDEX idx_activity_trail_occurred_at ON activity_trail (occurred_at);`,
 ];
 
 export function openDatabase(path: string): Result<Db, string> {
@@ -115,7 +194,22 @@ export function openDatabase(path: string): Result<Db, string> {
   }
 }
 
+/**
+ * Apply every migration the database has not seen yet, in order.
+ *
+ * Foreign keys are off for the duration and `foreign_key_check` runs inside
+ * each migration's transaction instead. That trade is what lets a migration
+ * rebuild a table — SQLite cannot alter a foreign key in place, so the only
+ * route is create-copy-drop-rename, and with keys enforced the `DROP` would
+ * cascade into the children before the new table existed. Checking the whole
+ * database at the end of each migration is the stronger guarantee anyway: a
+ * migration that leaves a dangling reference rolls back, unapplied.
+ *
+ * The pragma is restored to whatever the caller had it set to, and cannot be
+ * changed inside a transaction, which is why it sits outside the loop.
+ */
 export function runMigrations(db: Db): Result<void, string> {
+  const foreignKeysWereOn = db.pragma('foreign_keys', { simple: true }) === 1;
   try {
     db.exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
       version INTEGER PRIMARY KEY,
@@ -126,16 +220,23 @@ export function runMigrations(db: Db): Result<void, string> {
     }>;
     const applied = new Set(appliedRows.map((row) => row.version));
     const record = db.prepare('INSERT INTO schema_migrations (version) VALUES (?)');
+    db.pragma('foreign_keys = OFF');
     for (let i = 0; i < MIGRATIONS.length; i++) {
       const version = i + 1;
       if (applied.has(version)) continue;
       db.transaction(() => {
         db.exec(MIGRATIONS[i]!);
+        const violations = db.pragma('foreign_key_check') as unknown[];
+        if (violations.length > 0) {
+          throw new Error(`migration ${version} left ${violations.length} dangling reference(s)`);
+        }
         record.run(version);
       })();
     }
     return ok(undefined);
   } catch (e) {
     return err(e instanceof Error ? e.message : String(e));
+  } finally {
+    db.pragma(`foreign_keys = ${foreignKeysWereOn ? 'ON' : 'OFF'}`);
   }
 }
