@@ -1,3 +1,4 @@
+import { COMPONENTS, REGION_ATTR, type StreamConfig } from './contract.js';
 import { CLIENT_SCRIPT_URL, SITE_CSS_URL } from './static-urls.js';
 
 const ALPINE_URL = 'https://cdn.jsdelivr.net/npm/alpinejs@3/dist/cdn.min.js';
@@ -165,4 +166,33 @@ export function breadcrumb(parent: { href: string; label: string }, here: string
   <span aria-hidden="true">/</span>
   <span class="crumbs-here">${escapeHtml(here)}</span>
 </nav>`;
+}
+
+/**
+ * The parts of a page the SSE stream re-renders (ticket 14), keyed by the
+ * `data-region` name the client swaps them into. A region is whole rendered
+ * HTML from the very same view function the page used, so what a stream pushes
+ * and what a reload would serve cannot drift apart.
+ *
+ * Each page names its own regions as a literal union, so a page and its stream
+ * route cannot disagree about which parts exist; `Regions` unparameterised is
+ * what the stream route carries, having stopped caring which page it serves.
+ */
+export type Regions<K extends string = string> = Readonly<Record<K, string>>;
+
+/** Mark a region so the stream component can find and replace it. */
+export function region(name: string, html: string): string {
+  return `<div ${REGION_ATTR}="${name}">${html}</div>`;
+}
+
+/**
+ * The wrapper that holds a page's live connection. It must enclose every
+ * region but nothing whose state the browser owns — a half-typed form, or the
+ * click-builder's composition — because the stream replaces what is inside it.
+ */
+export function streamed(url: string, html: string): string {
+  return `<div x-data="${COMPONENTS.stream}(${escapeHtml(JSON.stringify({ url } satisfies StreamConfig))})">
+  <p class="hint stream-lapsed" x-show="!live" x-cloak>Live updates have stopped — reload the page to catch up.</p>
+  ${html}
+</div>`;
 }
