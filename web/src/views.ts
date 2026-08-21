@@ -791,6 +791,11 @@ function playerColor(seat: 1 | 2): string {
   return seat === 1 ? '●' : '○';
 }
 
+/** The word for a seat's stones — seat 1 plays filled, seat 2 open. */
+function seatColourWord(seat: 1 | 2): string {
+  return seat === 1 ? 'filled' : 'open';
+}
+
 export interface GameViewPageView {
   error?: string;
 }
@@ -874,23 +879,20 @@ function renderGameStatus(game: GameView): string {
       return `<p class="lede">Self-play — ${escapeHtml(game.proposer.displayName)}. ${youPlay}</p>`;
     }
     const colour = seat === 1 ? 'Filled' : 'Open';
-    const other = seat === 1 ? 'open' : 'filled';
-    const turn = game.opened[seat]
-      ? `${colour} to move.`
-      : `${colour}'s opening places an ${other} stone.`;
+    const turn =
+      game.isOpeningTurn && game.stoneSeat !== null
+        ? `${colour}'s opening places an ${seatColourWord(game.stoneSeat)} stone.`
+        : `${colour} to move.`;
     return `<p class="lede">Self-play — ${escapeHtml(game.proposer.displayName)}. ${youPlay}${turn}</p>`;
   }
 
   const youPlay =
     game.viewerSeat === null
       ? ''
-      : `You play ${playerColor(game.viewerSeat)} (${game.viewerSeat === 1 ? 'filled' : 'open'}). `;
+      : `You play ${playerColor(game.viewerSeat)} (${seatColourWord(game.viewerSeat)}). `;
   let turn: string;
-  if (game.canMove && game.viewerSeat !== null && !game.opened[game.viewerSeat]) {
-    // The opening move places an opponent stone, so the player's first turn is
-    // played in the other colour.
-    const placing = game.viewerSeat === 1 ? 'open' : 'filled';
-    turn = `Your turn — your opening move places your opponent's stone (${placing}).`;
+  if (game.canMove && game.isOpeningTurn && game.stoneSeat !== null) {
+    turn = `Your turn — your opening move places your opponent's stone (${seatColourWord(game.stoneSeat)}).`;
   } else if (game.canMove) {
     turn = 'Your turn.';
   } else {
@@ -948,16 +950,10 @@ function renderGameControls(game: GameView): string {
           : 'Take-back requested — waiting for a response.';
       parts.push(`<p class="notice">${waiting}</p>`);
     }
-  } else if (game.canMove) {
-    // The picker shows the glyph of the stone the viewer is about to place: in
-    // self-play the colour to move; otherwise the viewer's own colour, except
-    // on the opening move, which places an opponent's stone (CONTEXT.md: Place).
-    const viewer = game.viewerSeat ?? 1;
-    const placing: 1 | 2 = game.selfPlay
-      ? game.toMoveSeat ?? viewer
-      : game.opened[viewer]
-        ? viewer
-        : viewer === 1 ? 2 : 1;
+  } else if (game.canMove && game.stoneSeat !== null) {
+    // The picker shows the glyph of the stone about to be placed, which on an
+    // opening turn is the opponent's — `game-views.ts` decides that, this reads it.
+    const placing = game.stoneSeat;
     const stoneButtons = (['flat', 'standing', 'capstone'] as const)
       .map(
         (kind) => `<button type="button" class="stone-btn" x-on:click="${METHODS.pick}('${kind}')" :class="{ 'is-selected': stone === '${kind}' }" :aria-pressed="stone === '${kind}'" aria-label="Place a ${kind} stone"><span class="stone-glyph">${stoneGlyph(placing, kind)}</span><span class="stone-btn-name">${kind}</span></button>`,
