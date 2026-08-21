@@ -13,7 +13,8 @@ A glossary of Tak and this system's domain terms. Vocabulary for the game itself
   - **Capstone** — counts toward a road; may flatten a standing stone (own or opponent's) by landing on it alone; nothing may be placed on top of it.
 - **Stack** — multiple stones on one square; controlled by the player who owns the top stone.
 - **Carry limit** — the most stones a player may lift in one stack move; equal to the board edge length (5 or 6).
-- **Place** — put a stone from your reserve onto any empty square. On each player's *first turn only*, they must place one of their **opponent's** flat stones; thereafter they place their own stones.
+- **Place** — put a stone from your reserve onto any empty square. On each player's *first turn only*, they must place one of their **opponent's** flat stones; thereafter they place their own stones. See **Opening turn**.
+- **Opening turn** — a player's first turn, on which they place one of their opponent's flat stones rather than their own (see **Place**). The seat to move and the seat whose stone is placed therefore differ on an opening turn, and coincide on every turn after it. A game imported from a record resumes past both players' opening turns.
 - **Move (stack move)** — lift up to the carry limit of stones from a stack you control, move orthogonally in a straight line, and drop at least one stone on every square crossed. You may not cross standing stones or capstones; you may leave zero stones on the starting square. A capstone may be dropped alone onto a standing stone at the end of a move to flatten it.
 - **Pass** — not allowed; every turn is a place or a move.
 - **Road** — an orthogonal chain of a player's flat stones and capstones connecting two opposite edges of the board.
@@ -85,3 +86,5 @@ A glossary of Tak and this system's domain terms. Vocabulary for the game itself
 - **Admin** — a privileged account that administers users and games. An Admin is never a Player; a person who is both holds two separate accounts.
 - **Username** — the login identifier for an account; unique and immutable.
 - **Display name** — the public name shown for a user; unique and freely changeable; defaults to the username when the account is created.
+- **Account permanence** — an account is never deleted; **Block** is the only way to retire one. Ranked play makes the record of who played whom permanent evidence: a rated game whose opponent had vanished could not be interpreted, so removing an account would destroy the meaning of every game it touched. This is the same reasoning that records the ranked/unranked categorisation before any rating exists — the data has to be clean before it is needed.
+  _Avoid_: delete account (blocking is the mechanism; deletion is not offered)

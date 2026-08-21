@@ -1,4 +1,4 @@
-import { CLIENT_SCRIPT_URL } from './static-urls.js';
+import { CLIENT_SCRIPT_URL, SITE_CSS_URL } from './static-urls.js';
 
 const ALPINE_URL = 'https://cdn.jsdelivr.net/npm/alpinejs@3/dist/cdn.min.js';
 
@@ -147,7 +147,7 @@ export function renderShell(title: string, bodyHtml: string, ctx: PageContext = 
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>${escapeHtml(title)}</title>
-  <link rel="stylesheet" href="/site.css">
+  <link rel="stylesheet" href="${SITE_CSS_URL}">
 </head>
 <body>
 ${masthead(ctx)}

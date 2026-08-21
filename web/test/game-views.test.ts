@@ -365,3 +365,74 @@ describe('game views: sortSummaries', () => {
     expect(views().sortSummaries([a, b], 'size', 'asc').map((g) => g.id)).toEqual([2, 1]);
   });
 });
+
+/**
+ * CONTEXT.md's Opening turn: the player to move places one of their opponent's
+ * stones on their first turn, their own on every turn after. `stoneSeat` names
+ * the seat whose stone lands, which is *not* the seat to move on an opening
+ * turn — before this the two templates that word it each re-derived the rule
+ * from raw `opened`, and disagreed about self-play (ADR-0011).
+ */
+describe('game views: the opening turn', () => {
+  const feed = (g: GameRecord, record: StoredGame, tak: TakGame, actor: SessionUser = aoife) =>
+    views().gameView({ actor, game: g, record, tak, nameOf: names([aoife, takashi, root]) })._unsafeUnwrap();
+
+  it.each([
+    // moves so far      to move  opening?  whose stone lands
+    [[], 1, true, 2],
+    [['a1'], 2, true, 1],
+    [['a1', 'e5'], 1, false, 1],
+    [['a1', 'e5', 'c3'], 2, false, 2],
+  ])('after %j seat %i is to move (opening: %s) placing seat %i’s stone', (moves, toMoveSeat, opening, stoneSeat) => {
+    const { g, record, tak } = inPlayWithMoves(moves as string[]);
+    const view = feed(g, record, tak);
+
+    expect(view.toMoveSeat).toBe(toMoveSeat);
+    expect(view.isOpeningTurn).toBe(opening);
+    expect(view.stoneSeat).toBe(stoneSeat);
+  });
+
+  it('has no stone to place while the game is not in play', () => {
+    const { record, tak } = played([]);
+    for (const state of ['proposed', 'finished'] as const) {
+      const view = feed(game({ state, opponentId: takashi.id, proposerSeat: 1 }), record, tak);
+      expect(view.stoneSeat).toBeNull();
+      expect(view.isOpeningTurn).toBe(false);
+    }
+  });
+
+  it('is positional — a spectator reads the same facts as the player to move', () => {
+    const { g, record, tak } = inPlayWithMoves([]);
+
+    const mover = feed(g, record, tak, aoife);
+    const spectator = feed(g, record, tak, root);
+
+    // The spectator cannot move, but the opening turn is a fact about the
+    // position, so both see it. A viewer-centric field would null this out.
+    expect(mover.canMove).toBe(true);
+    expect(spectator.canMove).toBe(false);
+    expect(spectator.isOpeningTurn).toBe(mover.isOpeningTurn);
+    expect(spectator.stoneSeat).toBe(mover.stoneSeat);
+  });
+
+  it('tracks the seat to move in self-play, where one account holds both', () => {
+    const { record, tak } = played(['a1']);
+    const g = game({ state: 'in_play', opponentId: aoife.id, proposerSeat: 1 });
+    const view = feed(g, record, tak);
+
+    expect(view.selfPlay).toBe(true);
+    expect(view.toMoveSeat).toBe(2);
+    expect(view.isOpeningTurn).toBe(true);
+    expect(view.stoneSeat).toBe(1);
+  });
+
+  it('counts an imported prefix as opened, so play resumes past the opening', () => {
+    const { record, tak } = imported(OPENING_PTN);
+    const g = game({ state: 'in_play', opponentId: takashi.id, proposerSeat: 1 });
+    const view = feed(g, record, tak);
+
+    expect(view.toMoveSeat).toBe(1);
+    expect(view.isOpeningTurn).toBe(false);
+    expect(view.stoneSeat).toBe(1);
+  });
+});

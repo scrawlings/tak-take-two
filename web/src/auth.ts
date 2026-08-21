@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { err, ok, type Result } from 'neverthrow';
 import type { Persistence, SessionRecord, UserRecord } from './persistence.js';
+import { createTrail } from './trail.js';
 import {
   generatePassword,
   hashPassword,
@@ -135,6 +136,10 @@ function requireAdmin(actor: SessionUser | null): Result<SessionUser, AuthError>
 }
 
 export function createAuth(persistence: Persistence): Auth {
+  // The activity trail owns the transaction-plus-entry ritual and its error
+  // shape; `TrailError` is already an `AuthError` structurally.
+  const trail = createTrail(persistence);
+
   async function bootstrapAdmin(): Promise<Result<AuthCommandResult, AuthError>> {
     const admins = persistence.countAdmins();
     if (admins.isErr()) return err(persistenceError(admins.error));
@@ -153,7 +158,7 @@ export function createAuth(persistence: Persistence): Auth {
 
     const password = generatePassword();
     const passwordHash = await hashPassword(password);
-    const created = persistence.transaction((): Result<UserRecord, string> => {
+    const created = trail.write((append): Result<UserRecord, string> => {
       const inserted = persistence.createUser({
         username: BOOTSTRAP_USERNAME,
         displayName: BOOTSTRAP_USERNAME,
@@ -162,11 +167,11 @@ export function createAuth(persistence: Persistence): Auth {
         forcePasswordChange: true,
       });
       if (inserted.isErr()) return inserted;
-      const trail = persistence.appendActivityTrail({ userId: inserted.value.id, event: 'admin-bootstrapped' });
-      if (trail.isErr()) return err(trail.error);
+      const audited = append({ userId: inserted.value.id, event: 'admin-bootstrapped' });
+      if (audited.isErr()) return err(audited.error);
       return inserted;
     });
-    if (created.isErr()) return err(persistenceError(created.error));
+    if (created.isErr()) return err(created.error);
 
     return ok({ type: 'bootstrapAdmin', username: BOOTSTRAP_USERNAME, password });
   }
@@ -200,7 +205,7 @@ export function createAuth(persistence: Persistence): Auth {
     }
 
     const passwordHash = await hashPassword(input.password);
-    const created = persistence.transaction((): Result<UserRecord, string> => {
+    const created = trail.write((append): Result<UserRecord, string> => {
       const inserted = persistence.createUser({
         username,
         displayName: input.displayName?.trim() || username,
@@ -209,15 +214,15 @@ export function createAuth(persistence: Persistence): Auth {
         forcePasswordChange: true,
       });
       if (inserted.isErr()) return inserted;
-      const trail = persistence.appendActivityTrail({
+      const audited = append({
         userId: inserted.value.id,
         event: 'user-created',
         payload: { by: admin.username },
       });
-      if (trail.isErr()) return err(trail.error);
+      if (audited.isErr()) return err(audited.error);
       return inserted;
     });
-    if (created.isErr()) return err(persistenceError(created.error));
+    if (created.isErr()) return err(created.error);
 
     return ok({ type: 'createUser', user: toSessionUser(created.value) });
   }
@@ -239,14 +244,14 @@ export function createAuth(persistence: Persistence): Auth {
     }
 
     const sessionId = randomUUID();
-    const created = persistence.transaction((): Result<SessionRecord, string> => {
+    const created = trail.write((append): Result<SessionRecord, string> => {
       const inserted = persistence.createSession(user.id, sessionId);
       if (inserted.isErr()) return inserted;
-      const trail = persistence.appendActivityTrail({ userId: user.id, event: 'sign-in', payload: { via: 'password' } });
-      if (trail.isErr()) return err(trail.error);
+      const audited = append({ userId: user.id, event: 'sign-in', payload: { via: 'password' } });
+      if (audited.isErr()) return err(audited.error);
       return inserted;
     });
-    if (created.isErr()) return err(persistenceError(created.error));
+    if (created.isErr()) return err(created.error);
 
     return ok({ type: 'login', sessionId, user: toSessionUser(user) });
   }
@@ -257,14 +262,14 @@ export function createAuth(persistence: Persistence): Auth {
     if (found.value === null) return ok({ type: 'ok' });
     const userId = found.value.userId;
 
-    const result = persistence.transaction((): Result<void, string> => {
+    const result = trail.write((append): Result<void, string> => {
       const deleted = persistence.deleteSession(sessionId);
       if (deleted.isErr()) return deleted;
-      const trail = persistence.appendActivityTrail({ userId, event: 'sign-out' });
-      if (trail.isErr()) return trail;
+      const audited = append({ userId, event: 'sign-out' });
+      if (audited.isErr()) return audited;
       return ok(undefined);
     });
-    if (result.isErr()) return err(persistenceError(result.error));
+    if (result.isErr()) return err(result.error);
 
     return ok({ type: 'ok' });
   }
@@ -290,16 +295,16 @@ export function createAuth(persistence: Persistence): Auth {
     }
 
     const newHash = await hashPassword(newPassword);
-    const result = persistence.transaction((): Result<void, string> => {
+    const result = trail.write((append): Result<void, string> => {
       const updated = persistence.updateUserPassword(userId, newHash, false);
       if (updated.isErr()) return updated;
       const cleared = persistence.deleteSessionsForUser(userId);
       if (cleared.isErr()) return cleared;
-      const trail = persistence.appendActivityTrail({ userId, event: 'password-change' });
-      if (trail.isErr()) return trail;
+      const audited = append({ userId, event: 'password-change' });
+      if (audited.isErr()) return audited;
       return ok(undefined);
     });
-    if (result.isErr()) return err(persistenceError(result.error));
+    if (result.isErr()) return err(result.error);
 
     return ok({ type: 'ok' });
   }
@@ -316,16 +321,16 @@ export function createAuth(persistence: Persistence): Auth {
     if (target.isErr()) return err(persistenceError(target.error));
     if (target.value === null) return err({ code: 'not-found', message: 'User not found.' });
 
-    const blocked = persistence.transaction((): Result<void, string> => {
+    const blocked = trail.write((append): Result<void, string> => {
       const set = persistence.setUserBlocked(userId, true);
       if (set.isErr()) return set;
       const cleared = persistence.deleteSessionsForUser(userId);
       if (cleared.isErr()) return cleared;
-      const trail = persistence.appendActivityTrail({ userId, event: 'user-blocked', payload: { by: admin.username } });
-      if (trail.isErr()) return trail;
+      const audited = append({ userId, event: 'user-blocked', payload: { by: admin.username } });
+      if (audited.isErr()) return audited;
       return ok(undefined);
     });
-    if (blocked.isErr()) return err(persistenceError(blocked.error));
+    if (blocked.isErr()) return err(blocked.error);
 
     return ok({ type: 'ok' });
   }
@@ -339,14 +344,14 @@ export function createAuth(persistence: Persistence): Auth {
     if (target.isErr()) return err(persistenceError(target.error));
     if (target.value === null) return err({ code: 'not-found', message: 'User not found.' });
 
-    const unblocked = persistence.transaction((): Result<void, string> => {
+    const unblocked = trail.write((append): Result<void, string> => {
       const set = persistence.setUserBlocked(userId, false);
       if (set.isErr()) return set;
-      const trail = persistence.appendActivityTrail({ userId, event: 'user-unblocked', payload: { by: admin.username } });
-      if (trail.isErr()) return trail;
+      const audited = append({ userId, event: 'user-unblocked', payload: { by: admin.username } });
+      if (audited.isErr()) return audited;
       return ok(undefined);
     });
-    if (unblocked.isErr()) return err(persistenceError(unblocked.error));
+    if (unblocked.isErr()) return err(unblocked.error);
 
     return ok({ type: 'ok' });
   }
@@ -360,14 +365,14 @@ export function createAuth(persistence: Persistence): Auth {
     if (target.isErr()) return err(persistenceError(target.error));
     if (target.value === null) return err({ code: 'not-found', message: 'User not found.' });
 
-    const forced = persistence.transaction((): Result<void, string> => {
+    const forced = trail.write((append): Result<void, string> => {
       const set = persistence.setUserForcePasswordChange(userId, true);
       if (set.isErr()) return set;
-      const trail = persistence.appendActivityTrail({ userId, event: 'password-change-forced', payload: { by: admin.username } });
-      if (trail.isErr()) return trail;
+      const audited = append({ userId, event: 'password-change-forced', payload: { by: admin.username } });
+      if (audited.isErr()) return audited;
       return ok(undefined);
     });
-    if (forced.isErr()) return err(persistenceError(forced.error));
+    if (forced.isErr()) return err(forced.error);
 
     return ok({ type: 'ok' });
   }
@@ -387,16 +392,16 @@ export function createAuth(persistence: Persistence): Auth {
     const password = generatePassword();
     const passwordHash = await hashPassword(password);
 
-    const updated = persistence.transaction((): Result<void, string> => {
+    const updated = trail.write((append): Result<void, string> => {
       const set = persistence.updateUserPassword(userId, passwordHash, true);
       if (set.isErr()) return set;
       const cleared = persistence.deleteSessionsForUser(userId);
       if (cleared.isErr()) return cleared;
-      const trail = persistence.appendActivityTrail({ userId, event: 'password-reset', payload: { by: admin.username } });
-      if (trail.isErr()) return trail;
+      const audited = append({ userId, event: 'password-reset', payload: { by: admin.username } });
+      if (audited.isErr()) return audited;
       return ok(undefined);
     });
-    if (updated.isErr()) return err(persistenceError(updated.error));
+    if (updated.isErr()) return err(updated.error);
 
     return ok({ type: 'resetPassword', username: target.value.username, password });
   }
@@ -415,18 +420,18 @@ export function createAuth(persistence: Persistence): Auth {
       return err({ code: 'display-name-taken', message: 'That display name is already in use.' });
     }
 
-    const updated = persistence.transaction((): Result<void, string> => {
+    const updated = trail.write((append): Result<void, string> => {
       const set = persistence.updateUserDisplayName(actor.id, name);
       if (set.isErr()) return set;
-      const trail = persistence.appendActivityTrail({
+      const audited = append({
         userId: actor.id,
         event: 'display-name-change',
         payload: { from: actor.displayName, to: name },
       });
-      if (trail.isErr()) return trail;
+      if (audited.isErr()) return audited;
       return ok(undefined);
     });
-    if (updated.isErr()) return err(persistenceError(updated.error));
+    if (updated.isErr()) return err(updated.error);
 
     return ok({ type: 'changeDisplayName', user: { ...actor, displayName: name } });
   }

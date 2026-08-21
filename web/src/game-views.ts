@@ -197,8 +197,17 @@ export interface GameView {
   readonly resultText: string | null;
   /** Remaining stones and capstones per seat. */
   readonly reserves: Readonly<Record<1 | 2, { readonly stones: number; readonly capstones: number }>>;
-  /** Whether each seat has made its opening (first) move. */
-  readonly opened: Readonly<Record<1 | 2, boolean>>;
+  /**
+   * The player to move is on their opening turn (CONTEXT.md: Opening turn), so
+   * the stone they place is their opponent's. False while not in play.
+   */
+  readonly isOpeningTurn: boolean;
+  /**
+   * The seat whose *stone* goes onto the board next — not the seat to move.
+   * On an opening turn those differ: the mover places their opponent's stone.
+   * Null while not in play. Decided here so no template re-derives the rule.
+   */
+  readonly stoneSeat: 1 | 2 | null;
   /** The viewer's own share toggle, or null when they are not a participant. */
   readonly viewerShared: boolean | null;
   /** The viewer is a participant and may hide this game from their own views. */
@@ -328,6 +337,12 @@ export function createGameViews(deps: GameViewsDeps): GameViews {
     const seat1Ref = deps.seatOf(game, 1) === game.proposerId ? proposer.value : opponent.value;
     const seat2Ref = deps.seatOf(game, 2) === game.proposerId ? proposer.value : opponent.value;
     const toMove = toMoveSeat === null ? null : toMoveSeat === 1 ? seat1Ref : seat2Ref;
+    // CONTEXT.md's Place rule, stated once: a player's opening turn places one
+    // of their opponent's stones, every turn after it places their own. Both
+    // facts are positional — they never consult the viewer.
+    const isOpeningTurn = toMoveSeat !== null && !tak.state.opened[toMoveSeat];
+    const stoneSeat: 1 | 2 | null =
+      toMoveSeat === null ? null : isOpeningTurn ? (toMoveSeat === 1 ? 2 : 1) : toMoveSeat;
 
     // The single pending request/offer, resolved to a name for the board.
     let pending: PendingRequestView | null = null;
@@ -394,7 +409,8 @@ export function createGameViews(deps: GameViewsDeps): GameViews {
       canOfferTakeBack: inPlay && participant && !selfPlay && noPending && lastLiveSeat === viewerSeat,
       resultText: resultTextOf(game.result, seat1Ref, seat2Ref),
       reserves: tak.state.reserves,
-      opened: tak.state.opened,
+      isOpeningTurn,
+      stoneSeat,
       viewerShared,
       canHide: sides.length > 0,
       canAdminDelete: isAdmin && !game.adminRemoved,
