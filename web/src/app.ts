@@ -11,7 +11,7 @@ import type { Persistence, PersistenceSnapshot } from './persistence.js';
 import { Metrics } from './metrics.js';
 import type { Logger } from './logging.js';
 import { newRequestId } from './logging.js';
-import { escapeHtml, renderShell } from './html.js';
+import { escapeHtml, renderShell, type Regions } from './html.js';
 import { SITE_CSS_URL, CLIENT_SCRIPT_URL } from './static-urls.js';
 
 /** The committed static assets (ADR-0013): `web/static/`, one level up from this module's directory. */
@@ -39,28 +39,31 @@ import {
 } from './list-query.js';
 import {
   renderAccountPage,
+  renderAdminGamesPage,
   renderAdminUsersPage,
   renderChangeDisplayNamePage,
   renderChangePasswordPage,
-  renderExportPage,
   renderLoginPage,
-  renderFindGamesPage,
-  renderAdminGamesPage,
-  renderGamePage,
-  renderMyGamesPage,
-  renderNotFoundPage,
   renderResetPasswordResult,
   renderRoot,
   renderStatusPageBody,
-  findGamesRegions,
-  gameRegions,
-  myGamesRegions,
   type AdminUsersView,
-  type FindGamesView,
-  type GameViewPageView,
-  type MyGamesView,
-  type Regions,
 } from './views.js';
+import {
+  findGamesRegions,
+  myGamesRegions,
+  renderFindGamesPage,
+  renderMyGamesPage,
+  type FindGamesView,
+  type MyGamesView,
+} from './game-lists.js';
+import {
+  gameRegions,
+  renderExportPage,
+  renderGamePage,
+  renderNotFoundPage,
+  type GameViewPageView,
+} from './game-screen.js';
 
 export interface AppDeps {
   persistence: Persistence;

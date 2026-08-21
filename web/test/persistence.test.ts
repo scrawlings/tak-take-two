@@ -32,6 +32,50 @@ describe('persistence', () => {
     });
   });
 
+  describe('failure reporting', () => {
+    it('names the failing statement, so a driver message says which call raised it', () => {
+      const db = makeDb();
+      const p = createPersistence(db);
+      db.close();
+
+      expect(p.findUserById(1)._unsafeUnwrapErr()).toMatch(/^findUserById: /);
+      expect(p.listUsers()._unsafeUnwrapErr()).toMatch(/^listUsers: /);
+    });
+
+    it("names a driver refusal, not only a driver fault", () => {
+      const db = makeDb();
+      const p = createPersistence(db);
+      const aoife = { username: 'aoife', displayName: 'Aoife', passwordHash: 'hash', role: 'player' as const, forcePasswordChange: false };
+      expect(p.createUser(aoife).isOk()).toBe(true);
+      // A duplicate username is the driver refusing; the name still leads.
+      expect(p.createUser(aoife)._unsafeUnwrapErr()).toMatch(/^createUser: /);
+    });
+
+    it("names a method's own refusal the same way as the driver's", () => {
+      const db = makeDb();
+      insertUser(db, 1, 'aoife');
+      // A database that takes the insert and then loses the row: the one case
+      // a method must refuse on its own terms rather than relay the driver's.
+      db.exec(
+        `CREATE TRIGGER lose_session AFTER INSERT ON sessions
+         BEGIN DELETE FROM sessions WHERE id = NEW.id; END`,
+      );
+      const p = createPersistence(db);
+
+      expect(p.createSession(1, 'session-1')._unsafeUnwrapErr()).toBe(
+        'createSession: inserted session row not found',
+      );
+    });
+
+    it("reports a transaction closure's own error verbatim, unprefixed", () => {
+      const p = createPersistence(makeDb());
+
+      const result = p.transaction(() => err('the closure said no'));
+
+      expect(result._unsafeUnwrapErr()).toBe('the closure said no');
+    });
+  });
+
   describe('metricsSnapshot', () => {
     it('reports an empty snapshot for a fresh database', () => {
       const p = createPersistence(makeDb());
@@ -134,23 +178,33 @@ describe('persistence', () => {
       });
     });
 
-    it('writes an event with no optional fields', () => {
+    it('writes an account event, which is about no game and carries no payload', () => {
       const db = makeDb();
+      insertUser(db, 1, 'alice');
       const p = createPersistence(db);
-      const r = p.appendActivityTrail({ event: 'export' });
+      const r = p.appendActivityTrail({ userId: 1, event: 'sign-out' });
       expect(r.isOk()).toBe(true);
 
       const row = db
         .prepare('SELECT user_id, game_id, event, payload FROM activity_trail')
         .get() as Record<string, unknown>;
-      expect(row).toEqual({ user_id: null, game_id: null, event: 'export', payload: null });
+      expect(row).toEqual({ user_id: 1, game_id: null, event: 'sign-out', payload: null });
+    });
+
+    it('refuses an entry whose actor is not an account', () => {
+      const db = makeDb();
+      const p = createPersistence(db);
+
+      // Accounts are permanent, so the trail's actor is a real foreign key
+      // (migration 8) rather than a number nobody checks.
+      expect(p.appendActivityTrail({ userId: 99, event: 'sign-in' }).isErr()).toBe(true);
     });
 
     it('fails when the database is closed', () => {
       const db = makeDb();
       const p = createPersistence(db);
       db.close();
-      expect(p.appendActivityTrail({ event: 'sign-in' }).isErr()).toBe(true);
+      expect(p.appendActivityTrail({ userId: 1, event: 'sign-in' }).isErr()).toBe(true);
     });
   });
 
