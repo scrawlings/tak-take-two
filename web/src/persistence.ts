@@ -326,7 +326,7 @@ export function createPersistence(db: Db): Persistence {
         const payload = entry.payload === undefined ? null : JSON.stringify(entry.payload);
         db.prepare(
           `INSERT INTO activity_trail (user_id, game_id, event, payload) VALUES (?, ?, ?, ?)`,
-        ).run(entry.userId ?? null, entry.gameId ?? null, entry.event, payload);
+        ).run(entry.userId, entry.gameId ?? null, entry.event, payload);
       });
     },
 

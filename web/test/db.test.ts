@@ -39,6 +39,10 @@ function versions(db: Database.Database): number[] {
  * are deliberately frozen copies rather than slices of `MIGRATIONS`: a fixture
  * derived from the array would silently follow it forward and stop describing
  * the old database a migration has to cope with.
+ *
+ * One deliberate divergence: the `created_at`/`played_at`/`occurred_at` defaults
+ * are a fixed timestamp rather than migration 1's `strftime(…, 'now')`, so a
+ * row copied through a rebuild can be compared for equality.
  */
 function databaseAtMigration1(): Database.Database {
   const db = new Database(':memory:');
@@ -269,10 +273,30 @@ describe('delete rules and account permanence (migration 8)', () => {
     });
   });
 
-  it('still cascades a deleted user’s sessions and preferences, which are not evidence', () => {
+  it('leaves sessions and preferences cascading, since neither is evidence', () => {
     const db = migrated();
     expect(deleteRules(db, 'sessions').user_id).toBe('users:CASCADE');
     expect(deleteRules(db, 'user_prefs').user_id).toBe('users:CASCADE');
+  });
+
+  it('leaves foreign keys as it found them, having turned them off to rebuild', () => {
+    const on = new Database(':memory:');
+    on.pragma('foreign_keys = ON');
+    const off = new Database(':memory:');
+    off.pragma('foreign_keys = OFF');
+
+    expect(runMigrations(on).isOk()).toBe(true);
+    expect(runMigrations(off).isOk()).toBe(true);
+
+    expect(on.pragma('foreign_keys', { simple: true })).toBe(1);
+    expect(off.pragma('foreign_keys', { simple: true })).toBe(0);
+  });
+
+  it('reports a dead handle as an error rather than throwing out of the restore', () => {
+    const db = new Database(':memory:');
+    db.close();
+
+    expect(runMigrations(db).isErr()).toBe(true);
   });
 
   it('declares the rule in the schema, not only in behaviour', () => {

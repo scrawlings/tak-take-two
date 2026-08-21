@@ -197,20 +197,19 @@ export function openDatabase(path: string): Result<Db, string> {
 /**
  * Apply every migration the database has not seen yet, in order.
  *
- * Foreign keys are off for the duration and `foreign_key_check` runs inside
- * each migration's transaction instead. That trade is what lets a migration
- * rebuild a table — SQLite cannot alter a foreign key in place, so the only
- * route is create-copy-drop-rename, and with keys enforced the `DROP` would
- * cascade into the children before the new table existed. Checking the whole
- * database at the end of each migration is the stronger guarantee anyway: a
- * migration that leaves a dangling reference rolls back, unapplied.
+ * A migration runs with foreign keys off and is verified by `foreign_key_check`
+ * inside its own transaction instead, so one that leaves a dangling reference
+ * rolls back unapplied. That is what lets a migration rebuild a table (see
+ * migration 8). The pragma is restored to whatever the caller had it set to.
  *
- * The pragma is restored to whatever the caller had it set to, and cannot be
- * changed inside a transaction, which is why it sits outside the loop.
+ * Call this outside a transaction. `PRAGMA foreign_keys` is silently a no-op
+ * inside one, so a caller that wrapped this would get keys left enforced and a
+ * rebuilding migration would cascade rows away instead of moving them.
  */
 export function runMigrations(db: Db): Result<void, string> {
-  const foreignKeysWereOn = db.pragma('foreign_keys', { simple: true }) === 1;
+  let foreignKeysWereOn = true;
   try {
+    foreignKeysWereOn = db.pragma('foreign_keys', { simple: true }) === 1;
     db.exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
       version INTEGER PRIMARY KEY,
       applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
@@ -237,6 +236,11 @@ export function runMigrations(db: Db): Result<void, string> {
   } catch (e) {
     return err(e instanceof Error ? e.message : String(e));
   } finally {
-    db.pragma(`foreign_keys = ${foreignKeysWereOn ? 'ON' : 'OFF'}`);
+    try {
+      db.pragma(`foreign_keys = ${foreignKeysWereOn ? 'ON' : 'OFF'}`);
+    } catch {
+      // The handle is already unusable — whatever failed above is the error
+      // worth reporting, and this function returns a `Result`, never throws.
+    }
   }
 }
