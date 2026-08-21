@@ -718,7 +718,10 @@ describe('the game screen', () => {
     return { app, db, aoife, takashi, gameId: 1 };
   }
 
-  it('renders the board and history for a participant', async () => {
+  // What the screen *shows* is `game-screen.test.ts`'s: these routes prove the
+  // page is reachable, addressed to the right game, and drawn for the right
+  // viewer — not what its markup says.
+  it('serves the game screen to a participant, drawn for the game they asked for', async () => {
     const { app, aoife, gameId } = await inPlayGame();
 
     const res = await app.request(`/games/${gameId}`, withCookie({}, aoife));
@@ -731,53 +734,9 @@ describe('the game screen', () => {
     expect(html).toContain('x-data="takBoard({&quot;');
     expect(html).toContain('Your move');
     expect(html).toContain('Aoife Nolan');
-    // Axes: files across the top, ranks down the side.
-    expect(html).toContain('<span class="axis">a</span>');
-    expect(html).toContain('<span class="axis">5</span>');
-    // Your colour and the opening-turn colour.
-    expect(html).toContain('You play ● (filled)');
-    expect(html).toContain('your opening move places your opponent');
-    // The stone-to-place picker: glyph buttons, not a text select. On the
-    // opening the move places an opponent stone, so the glyphs are open.
-    expect(html).toContain('aria-label="Place a flat stone"');
-    expect(html).toContain('x-on:click="pick(\'flat\')"');
-    expect(html).toContain('stone-glyph">○</span>');
-    expect(html).toContain('stone-glyph">△</span>');
-    expect(html).toContain('stone-glyph">□</span>');
-    expect(html).not.toContain('<select');
-    // Stones left and the move-syntax summary.
-    expect(html).toContain('Stones left');
-    expect(html).toContain('Move syntax');
   });
 
-  it('renders the stack-move builder: lift control, drop adjusters, path counts', async () => {
-    const { app, aoife, gameId } = await inPlayGame();
-
-    const res = await app.request(`/games/${gameId}`, withCookie({}, aoife));
-    const html = await res.text();
-
-    // The lift stepper, shown once a stack is picked up (ticket 19).
-    expect(html).toContain('Stones to lift');
-    expect(html).toContain('x-on:click="bumpLift(-1)"');
-    expect(html).toContain('x-on:click="bumpLift(1)"');
-    // Its bounds are the builder's, so the buttons cannot compose a bad lift.
-    expect(html).toContain(':disabled="lift >= liftCeiling"');
-    expect(html).toContain('x-on:click="cancel()"');
-
-    // One drop adjuster per square of the path, driven by the builder's state.
-    expect(html).toContain('Stones dropped');
-    expect(html).toContain('x-for="(step, i) in path"');
-    expect(html).toContain('x-on:click="shiftDrop(i, -1)"');
-    expect(html).toContain('x-on:click="shiftDrop(i, 1)"');
-    // A shift that would do nothing is disabled rather than silently refused.
-    expect(html).toContain(':disabled="!canShiftDrop(i, -1)"');
-
-    // Each square shows what it would receive, and lights up on the path.
-    expect(html).toContain(`x-text="dropsOn('a1')"`);
-    expect(html).toContain(`'is-path': dropsOn('a1') > 0`);
-  });
-
-  it('offers no builder controls to a spectator', async () => {
+  it('draws the same game for a spectator without the move controls', async () => {
     const { app, db, aoife, takashi, gameId } = await inPlayGame();
     await app.request(`/games/${gameId}/share`, withCookie(form({ on: '1' }), aoife));
     await app.request(`/games/${gameId}/share`, withCookie(form({ on: '1' }), takashi));
@@ -789,10 +748,7 @@ describe('the game screen', () => {
 
     expect(res.status).toBe(200);
     expect(html).toContain('data-square="a1"'); // the board still renders
-    expect(html).not.toContain('Stones to lift');
-    // The bundle names these methods, so assert on the markup that calls them.
-    expect(html).not.toContain('x-on:click="shiftDrop(i, -1)"');
-    expect(html).not.toContain('x-on:click="bumpLift(1)"');
+    expect(html).not.toContain('Your move');
   });
 
   it('records a move and redirects back to the game screen', async () => {
@@ -917,26 +873,6 @@ describe('review mode: the history scrubber (ticket 01)', () => {
     expect(html).toContain(`'is-reviewed': reviewAt === 1`);
   });
 
-  it('renders the review bar, hidden until the client puts the page into review', async () => {
-    const { app, aoife, gameId } = await inPlayGame();
-
-    const html = await (await app.request(`/games/${gameId}`, withCookie({}, aoife))).text();
-
-    expect(html).toContain('class="review-bar panel"');
-    expect(html).toContain('x-show="reviewing"');
-    expect(html).toContain('x-on:click="snapToEnd()"');
-    expect(html).toContain('Snap to end');
-  });
-
-  it("tells a scrubbed player their move is waiting, when it is their turn live", async () => {
-    const { app, aoife, gameId } = await inPlayGame();
-
-    const html = await (await app.request(`/games/${gameId}`, withCookie({}, aoife))).text();
-
-    // It is the opening: aoife (seat 1) is to move.
-    expect(html).toContain('Your turn — they’re waiting on you.');
-  });
-
   it('still offers the scrubber on a finished game', async () => {
     const { app, aoife, gameId } = await inPlayGame();
     await app.request(`/games/${gameId}/move`, withCookie(form({ move: 'a1' }), aoife));
@@ -975,18 +911,6 @@ describe('keyboard shortcuts on the game screen (ticket 02)', () => {
     await app.request('/games/1/join', withCookie(form({ from: 'find' }), takashi));
     return { app, db, aoife, gameId: 1 };
   }
-
-  it('carries the shortcuts panel and its window-level key listener', async () => {
-    const { app, aoife, gameId } = await inPlayGame();
-
-    const html = await (await app.request(`/games/${gameId}`, withCookie({}, aoife))).text();
-
-    expect(html).toContain('x-on:keydown.window="handleKey($event)"');
-    expect(html).toContain('class="shortcuts-help panel"');
-    expect(html).toContain('x-show="helpVisible"');
-    expect(html).toContain('x-on:click="toggleHelp()"');
-    expect(html).toContain('Press <kbd>?</kbd> for keyboard shortcuts.');
-  });
 
   it('ships the shortcuts panel on the game page only, not on the games lists', async () => {
     const { app, aoife } = await inPlayGame();
