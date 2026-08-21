@@ -42,13 +42,29 @@ describe('persistence', () => {
       expect(p.listUsers()._unsafeUnwrapErr()).toMatch(/^listUsers: /);
     });
 
-    it("names a method's own refusal the same way, not just the driver's", () => {
+    it("names a driver refusal, not only a driver fault", () => {
       const db = makeDb();
       const p = createPersistence(db);
-      // A duplicate username is the driver refusing; the name still leads.
       const aoife = { username: 'aoife', displayName: 'Aoife', passwordHash: 'hash', role: 'player' as const, forcePasswordChange: false };
       expect(p.createUser(aoife).isOk()).toBe(true);
+      // A duplicate username is the driver refusing; the name still leads.
       expect(p.createUser(aoife)._unsafeUnwrapErr()).toMatch(/^createUser: /);
+    });
+
+    it("names a method's own refusal the same way as the driver's", () => {
+      const db = makeDb();
+      insertUser(db, 1, 'aoife');
+      // A database that takes the insert and then loses the row: the one case
+      // a method must refuse on its own terms rather than relay the driver's.
+      db.exec(
+        `CREATE TRIGGER lose_session AFTER INSERT ON sessions
+         BEGIN DELETE FROM sessions WHERE id = NEW.id; END`,
+      );
+      const p = createPersistence(db);
+
+      expect(p.createSession(1, 'session-1')._unsafeUnwrapErr()).toBe(
+        'createSession: inserted session row not found',
+      );
     });
 
     it("reports a transaction closure's own error verbatim, unprefixed", () => {

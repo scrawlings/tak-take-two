@@ -143,6 +143,15 @@ describe('the board', () => {
     expect(html).not.toContain('stack-tip');
   });
 
+  it('shows on each square what the move being built would drop there', () => {
+    const html = gameRegions(view()).board;
+
+    expect(html).toContain(`x-text="dropsOn('a1')"`);
+    expect(html).toContain(`x-show="dropsOn('a1') > 0"`);
+    expect(html).toContain(`'is-path': dropsOn('a1') > 0`);
+    expect(html).toContain(`'is-source': isSource('a1')`);
+  });
+
   it('states what the viewer may do with the board inside the region, so a stream swap refreshes it', () => {
     const mine = gameRegions(view({ canMove: true, viewerSeat: 1, selfPlay: false })).board;
     const theirs = gameRegions(view({ canMove: false, viewerSeat: null, selfPlay: false })).board;
@@ -238,10 +247,18 @@ describe('the move controls', () => {
 
     expect(html).toContain('Stones to lift');
     expect(html).toContain('x-on:click="bumpLift(-1)"');
+    expect(html).toContain('x-on:click="bumpLift(1)"');
+    // The stepper's bounds are the builder's, so the buttons cannot compose a bad lift.
+    expect(html).toContain(':disabled="lift <= liftFloor"');
     expect(html).toContain(':disabled="lift >= liftCeiling"');
+    expect(html).toContain('x-on:click="cancel()"');
     expect(html).toContain('Stones dropped');
     expect(html).toContain('x-for="(step, i) in path"');
+    expect(html).toContain('x-on:click="shiftDrop(i, -1)"');
+    expect(html).toContain('x-on:click="shiftDrop(i, 1)"');
+    // A shift that would do nothing is disabled rather than silently refused.
     expect(html).toContain(':disabled="!canShiftDrop(i, -1)"');
+    expect(html).toContain(':disabled="!canShiftDrop(i, 1)"');
   });
 
   it('gives a spectator no move form at all', () => {
@@ -249,6 +266,9 @@ describe('the move controls', () => {
 
     expect(html).not.toContain('Stones to lift');
     expect(html).not.toContain('action="/games/7/move"');
+    // The bundle names these methods, so assert on the markup that calls them.
+    expect(html).not.toContain('x-on:click="shiftDrop(i, -1)"');
+    expect(html).not.toContain('x-on:click="bumpLift(1)"');
   });
 
   it('offers resign, draw and take-back only as the view allows each', () => {
@@ -298,6 +318,7 @@ describe('the review bar', () => {
     expect(html).toContain('<div class="review-bar panel" x-show="reviewing" x-cloak>');
     expect(html).toContain('of 3.');
     expect(html).toContain('data-total-moves="3"');
+    expect(html).toContain('x-on:click="snapToEnd()"');
     expect(html).toContain('Snap to end');
   });
 
@@ -360,6 +381,7 @@ describe('the reserves', () => {
   it('counts each seat’s stones and capstones, marking the viewer’s row', () => {
     const html = gameRegions(view({ reserves: { 1: { stones: 18, capstones: 1 }, 2: { stones: 20, capstones: 0 } } })).reserves;
 
+    expect(html).toContain('<h2>Stones left</h2>');
     expect(html).toContain('Aoife Nolan (you)');
     expect(html).toContain('Takashi Mori');
     expect(html).not.toContain('Takashi Mori (you)');
@@ -426,10 +448,11 @@ describe('the whole game page', () => {
 
     expect(html).toContain('src="/client.js"');
     expect(html).toContain('class="shortcuts-help panel"');
+    expect(html).toContain('x-show="helpVisible"');
     expect(html).toContain('x-on:keydown.window="handleKey($event)"');
     expect(html).toContain('x-on:click="toggleHelp()"');
     expect(html).toContain('Press <kbd>?</kbd> for keyboard shortcuts.');
-    expect(html).toContain('▲ wall');
+    expect(html).toContain('■ capstone');
     expect(html).toContain('Move syntax');
   });
 

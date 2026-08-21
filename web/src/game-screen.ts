@@ -41,8 +41,8 @@ export function renderNotFoundPage(): string {
 </div>`;
 }
 
-/** The board glyph for one stone — one table for server and bundle, in `contract.ts` (ADR-0013). */
-
+/** The colour dot for a seat. The stone glyphs themselves are one table for
+ *  server and bundle, in `contract.ts` (ADR-0013). */
 function playerColor(seat: 1 | 2): string {
   return seat === 1 ? '●' : '○';
 }
