@@ -86,3 +86,5 @@ A glossary of Tak and this system's domain terms. Vocabulary for the game itself
 - **Admin** — a privileged account that administers users and games. An Admin is never a Player; a person who is both holds two separate accounts.
 - **Username** — the login identifier for an account; unique and immutable.
 - **Display name** — the public name shown for a user; unique and freely changeable; defaults to the username when the account is created.
+- **Account permanence** — an account is never deleted; **Block** is the only way to retire one. Ranked play makes the record of who played whom permanent evidence: a rated game whose opponent had vanished could not be interpreted, so removing an account would destroy the meaning of every game it touched. This is the same reasoning that records the ranked/unranked categorisation before any rating exists — the data has to be clean before it is needed.
+  _Avoid_: delete account (blocking is the mechanism; deletion is not offered)
