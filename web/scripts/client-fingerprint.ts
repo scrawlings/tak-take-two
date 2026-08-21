@@ -1,5 +1,5 @@
 /**
- * A fingerprint of everything the inlined client bundle is built from. The
+ * A fingerprint of everything the client bundle is built from. The
  * bundle is committed so nothing needs a build step to run, which leaves one
  * failure mode: editing the sources and forgetting to rebuild, so the game page
  * silently serves yesterday's script. The build records this fingerprint and a
