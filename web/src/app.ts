@@ -6,6 +6,7 @@ import { routePath } from 'hono/route';
 import { streamSSE } from 'hono/streaming';
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
 import { createMiddleware } from 'hono/factory';
+import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import { err, ok, type Result } from 'neverthrow';
 import type { Persistence, PersistenceSnapshot } from './persistence.js';
 import { Metrics } from './metrics.js';
@@ -17,7 +18,14 @@ import { SITE_CSS_URL, CLIENT_SCRIPT_URL } from './static-urls.js';
 /** The committed static assets (ADR-0013): `web/static/`, one level up from this module's directory. */
 const STATIC_DIR = join(fileURLToPath(new URL('..', import.meta.url)), 'static');
 import { createAuth, type Auth, type AuthCommand, type AuthError, type SessionUser } from './auth.js';
-import { createGames, type GameCommand, type GameError, type Games } from './games.js';
+import {
+  createGames,
+  type GameCommand,
+  type GameError,
+  type Games,
+  type GameSummary,
+  type GameView,
+} from './games.js';
 import { GAMES_TOPIC, announceGameChanges, createUpdates, gameTopic } from './updates.js';
 import {
   createFormAction,
@@ -36,6 +44,8 @@ import {
   parseQuery,
   parseReturnTo,
   queryString,
+  type FindGamesSearch,
+  type MyGamesQuery,
 } from './list-query.js';
 import {
   renderAccountPage,
@@ -82,6 +92,8 @@ type Variables = {
   requestId: string;
   user: SessionUser;
 };
+
+type Ctx = Context<{ Variables: Variables }>;
 
 export type App = Hono<{ Variables: Variables }>;
 
@@ -220,55 +232,264 @@ export function createApp(deps: AppDeps): App {
   const gameViewReturn = (returnTo: string | null | undefined): boolean =>
     !!returnTo && /^\/games\/\d+$/.test(returnTo);
 
-  /** A refused game command is reported on the player's own games list, still narrowed as `returnTo` had it. */
-  const myGamesError = (
-    c: Context<{ Variables: Variables }>,
-    error: GameError,
-    returnTo: string | null | undefined,
-    extra?: Partial<MyGamesView>,
-  ): Response => {
-    const asked = parseReturnTo(MY_GAMES_SCHEMA, '/games', returnTo);
-    return pageError(
-      c,
-      c.get('user'),
-      {
-        name: 'list games',
-        reload: () => games.listMyGames(c.get('user'), asked),
-        render: (data, view: MyGamesView, status) => c.html(renderMyGamesPage(c.get('user'), data, view), status),
-        view: (e): MyGamesView => ({ ...extra, error: e.message, filters: asked }),
-        statusOf: statusForGameError,
-      },
-      error,
-    );
+  /** A query parameter, or undefined when absent or blank ("any"). */
+  const query = (c: Ctx, name: string): string | undefined => {
+    const value = c.req.query(name);
+    return value === undefined || value.trim() === '' ? undefined : value;
   };
 
-  /** A refused follow/unfollow, or a join reported back on the find page — re-run narrowed as `returnTo` had it. */
-  const findGamesError = (
-    c: Context<{ Variables: Variables }>,
-    error: GameError,
-    returnTo: string | null | undefined,
-  ): Response => {
-    const asked = parseReturnTo(FIND_GAMES_SCHEMA, '/games/find', returnTo);
-    return pageError(
-      c,
-      c.get('user'),
-      {
-        name: 'search games',
-        reload: () => games.searchProposed(c.get('user'), asked),
-        render: (data, view: FindGamesView, status) => c.html(renderFindGamesPage(c.get('user'), data, view), status),
-        view: (e): FindGamesView => ({ error: e.message, filters: asked }),
-        statusOf: statusForGameError,
-      },
-      error,
-    );
+  /**
+   * A game they cannot see must read as absent, as the game route has it;
+   * anything else falls back to plain text — in practice this only ever fires
+   * on `not-found`, the one error code a page/stream route can reach that
+   * `pageAction` doesn't already answer generically (forbidden, persistence).
+   */
+  const notFoundOrText = (c: Ctx, actor: SessionUser, error: GameError, status: ContentfulStatusCode): Response =>
+    error.code === 'not-found'
+      ? c.html(renderShell('Not found', renderNotFoundPage(), { user: actor }), status)
+      : c.text(error.message, status);
+
+  /** What a streamed page needs: a topic to listen on, and how to draw itself. */
+  interface StreamSpec<D> {
+    /** Named for log lines, as the page adapters are. */
+    readonly name: string;
+    /** The change topic this page follows. */
+    readonly topic: string;
+    /** Re-read through the module on every change, so the stream authorises per frame. */
+    load(actor: SessionUser): Result<D, GameError>;
+    regions(data: D): Regions;
+  }
+
+  /**
+   * The stream adapter — the live twin of `pageAction` (ADR-0007's hand-rolled
+   * SSE). It holds the connection open and, whenever the topic changes,
+   * re-reads the page through the Game module and pushes its regions as one
+   * frame.
+   *
+   * Re-reading rather than pushing what the command produced is what gates a
+   * spectator per frame: the moment a share is switched off the module answers
+   * `not-found`, and the stream says so and stops. It is also what keeps the
+   * frames consistent — a stream woken by two moves at once reads the position
+   * after both, never a board and a move list a move apart.
+   */
+  const streamPage = <D>(c: Ctx, spec: StreamSpec<D>): Response => {
+    const actor = c.get('user');
+    const sessionId = getCookie(c, SESSION_COOKIE) ?? '';
+
+    // Authorise before the stream opens, so a viewer who may not see this page
+    // gets the page's own answer — a status an EventSource treats as final,
+    // rather than a stream it would reconnect to forever. This is exactly
+    // `pageAction`'s branching, so it *is* `pageAction`: the load it does is
+    // the authorising read, and the render it triggers opens the stream. The
+    // loop below reads again for the first frame; one extra read buys the
+    // honest status code.
+    return pageAction(c, actor, {
+      name: spec.name,
+      load: spec.load,
+      render: () => openStream(),
+      renderError: (error, status) => notFoundOrText(c, actor, error, status),
+      statusOf: statusForGameError,
+    });
+
+    function openStream(): Response {
+      return streamSSE(c, async (stream) => {
+        const closing = new AbortController();
+        stream.onAbort(() => closing.abort());
+
+        let seen = 0;
+        while (!stream.closed && !closing.signal.aborted) {
+          const change = await updates.next(spec.topic, seen, { signal: closing.signal, waitMs: heartbeatMs });
+          if (change.type === 'closed') return;
+          if (change.type === 'idle') {
+            await stream.writeSSE({ event: 'ping', data: '' });
+            continue;
+          }
+          seen = change.revision;
+
+          // A stream outlives the request that opened it, so the session is
+          // re-checked before every frame: a password change, a sign-out or a
+          // block ends all sessions (ticket 07), and an open stream must be no
+          // exception. Nothing has been sent in the meantime — an idle stream
+          // pushes only contentless heartbeats.
+          const viewer = auth.getSessionUser(sessionId);
+          if (viewer.isErr() || viewer.value.blocked) return;
+
+          // Read after the change, never before: this is the frame's whole
+          // claim to being current. A stream that slept through two moves
+          // reads the position after both.
+          const current = spec.load(viewer.value);
+          if (current.isErr()) {
+            const error = current.error;
+            // The viewer has lost sight of the game — removed, deleted, or no
+            // longer shared. Say so once and stop; the page route is the one
+            // place that decides what they should see instead.
+            if (error.code === 'not-found' || error.code === 'forbidden') {
+              await stream.writeSSE({ event: 'gone', data: '' });
+              return;
+            }
+            logger.log('error', spec.name, { error });
+            return;
+          }
+          await stream.writeSSE({
+            event: 'state',
+            data: JSON.stringify({ regions: spec.regions(current.value) }),
+          });
+        }
+      });
+    }
   };
+
+  /**
+   * What a screen needs to draw itself, addressed three ways: a `GET` page, a
+   * `GET` stream, and the error-adapter other commands report a refusal
+   * through. Before this, "My games", "Find a game" and the game view each
+   * restated their own `load`/`render` at three call sites that could
+   * silently drift; a `Screen` states each once and `mountScreen` derives the
+   * three.
+   *
+   * `Address` identifies which instance of the screen is being asked for —
+   * resolved filters for the two lists, a game id for the game view.
+   * `parseAddress` reads it live (a query string, a path param);
+   * `resolveErrorAddress` recovers it when reporting a refusal from another
+   * route — a `return_to` field for the lists (reachable from many filtered
+   * views), the same path param for the game view (its own command routes are
+   * nested under `/games/:id`, so the id is always already there).
+   */
+  interface ScreenSpec<Address, Data, View> {
+    /** Named for log lines, as the page/stream/error-adapter alike. */
+    readonly name: string;
+    readonly path: string;
+    readonly streamPath: string;
+    parseAddress(c: Ctx): Result<Address, GameError>;
+    /** The page's answer to a bad address — a list re-renders inline; the game view has no page without one. */
+    onBadAddress(c: Ctx, actor: SessionUser, error: GameError): Response;
+    /** The stream's answer to a bad address. Defaults to plain text; the game view overrides it to match its page. */
+    onBadAddressStream?(c: Ctx, error: GameError): Response;
+    resolveErrorAddress(c: Ctx, returnTo: string | null | undefined): Result<Address, GameError>;
+    topic(address: Address): string;
+    load(actor: SessionUser, address: Address): Result<Data, GameError>;
+    /** The view shown on a bare, successful `GET` — a list's resolved filters, the game view's empty `{}`. */
+    defaultView(address: Address): View;
+    /** The view shown after a refused command. `extra` carries a caller's own augmentation (propose's submitted echo). */
+    errorView(error: GameError, address: Address, extra?: Partial<View>): View;
+    renderPage(actor: SessionUser, data: Data, view: View): string;
+    renderRegions(actor: SessionUser, data: Data, address: Address): Regions;
+  }
+
+  /**
+   * Registers a screen's page and stream `GET` routes, and returns its
+   * error-adapter for other command routes to report a refusal through.
+   */
+  function mountScreen<Address, Data, View>(
+    spec: ScreenSpec<Address, Data, View>,
+  ): (c: Ctx, error: GameError, returnTo?: string | null, extra?: Partial<View>) => Response {
+    app.get(spec.path, requireUser, (c) => {
+      const actor = c.get('user');
+      const address = spec.parseAddress(c);
+      if (address.isErr()) return spec.onBadAddress(c, actor, address.error);
+      return pageAction(c, actor, {
+        name: spec.name,
+        load: () => spec.load(actor, address.value),
+        render: (data) => c.html(spec.renderPage(actor, data, spec.defaultView(address.value))),
+        renderError: (error, status) => notFoundOrText(c, actor, error, status),
+        statusOf: statusForGameError,
+      });
+    });
+
+    app.get(spec.streamPath, requireUser, (c) => {
+      const address = spec.parseAddress(c);
+      if (address.isErr()) {
+        return spec.onBadAddressStream
+          ? spec.onBadAddressStream(c, address.error)
+          : c.text(address.error.message, statusForGameError(address.error));
+      }
+      return streamPage(c, {
+        name: `stream ${spec.name}`,
+        topic: spec.topic(address.value),
+        load: (actor) => spec.load(actor, address.value),
+        regions: (data) => spec.renderRegions(c.get('user'), data, address.value),
+      });
+    });
+
+    return (c, error, returnTo, extra) => {
+      const actor = c.get('user');
+      const address = spec.resolveErrorAddress(c, returnTo);
+      if (address.isErr()) return spec.onBadAddress(c, actor, address.error);
+      return pageError(
+        c,
+        actor,
+        {
+          name: spec.name,
+          reload: () => spec.load(actor, address.value),
+          render: (data, view: View, status) => c.html(spec.renderPage(actor, data, view), status),
+          view: (e) => spec.errorView(e, address.value, extra),
+          statusOf: statusForGameError,
+        },
+        error,
+      );
+    };
+  }
+
+  const myGamesError = mountScreen<MyGamesQuery, GameSummary[], MyGamesView>({
+    name: 'list games',
+    path: '/games',
+    streamPath: '/games/stream',
+    parseAddress: (c) => parseQuery(MY_GAMES_SCHEMA, (param) => query(c, param)),
+    // A bad status/sort/direction is the user's to fix: keep the form and say what is wrong.
+    onBadAddress: (c, actor, error) =>
+      c.html(renderMyGamesPage(actor, [], { error: error.message }), statusForGameError(error)),
+    resolveErrorAddress: (_c, returnTo) => ok(parseReturnTo(MY_GAMES_SCHEMA, '/games', returnTo)),
+    topic: () => GAMES_TOPIC,
+    load: (actor, address) => games.listMyGames(actor, address),
+    defaultView: (address) => ({ filters: address }),
+    errorView: (error, address, extra) => ({ ...extra, error: error.message, filters: address }),
+    renderPage: (actor, data, view) => renderMyGamesPage(actor, data, view),
+    renderRegions: (actor, data, address) => myGamesRegions(actor, data, address),
+  });
+
+  const findGamesError = mountScreen<FindGamesSearch, GameSummary[], FindGamesView>({
+    name: 'search games',
+    path: '/games/find',
+    streamPath: '/games/find/stream',
+    parseAddress: (c) => parseQuery(FIND_GAMES_SCHEMA, (param) => query(c, param)),
+    // A bad filter is the user's to fix: keep the form and say what is wrong.
+    onBadAddress: (c, actor, error) =>
+      c.html(renderFindGamesPage(actor, [], { error: error.message }), statusForGameError(error)),
+    resolveErrorAddress: (_c, returnTo) => ok(parseReturnTo(FIND_GAMES_SCHEMA, '/games/find', returnTo)),
+    topic: () => GAMES_TOPIC,
+    load: (actor, address) => games.searchProposed(actor, address),
+    defaultView: (address) => ({ filters: address }),
+    errorView: (error, address) => ({ error: error.message, filters: address }),
+    renderPage: (actor, data, view) => renderFindGamesPage(actor, data, view),
+    renderRegions: (actor, data, address) => findGamesRegions(actor, data, address),
+  });
+
+  /** The game view's one answer to "there is nothing here" — a bad id, or `getGame`'s own not-found. */
+  const gameViewNotFound = (c: Ctx): Response =>
+    c.html(renderShell('Not found', renderNotFoundPage(), { user: c.get('user') }), 404);
+
+  const gameViewError = mountScreen<number, GameView, GameViewPageView>({
+    name: 'game view',
+    path: '/games/:id',
+    streamPath: '/games/:id/stream',
+    parseAddress: (c) => paramId(c, 'id', 'That game no longer exists.'),
+    onBadAddress: (c) => gameViewNotFound(c),
+    onBadAddressStream: (c) => gameViewNotFound(c),
+    resolveErrorAddress: (c) => paramId(c, 'id', 'That game no longer exists.'),
+    topic: (id) => gameTopic(id),
+    load: (actor, id) => games.getGame(actor, id),
+    defaultView: () => ({}),
+    errorView: (error) => ({ error: error.message }),
+    renderPage: (actor, data, view) => renderGamePage(actor, data, view),
+    renderRegions: (_actor, data) => gameRegions(data),
+  });
 
   /**
    * A refused join is reported on whichever list offered the button, so the
    * player stays where they were and can pick another game.
    */
   const gameJoinError = (
-    c: Context<{ Variables: Variables }>,
+    c: Ctx,
     error: GameError,
     returnTo: string | null | undefined,
   ): Response => {
@@ -283,36 +504,10 @@ export function createApp(deps: AppDeps): App {
    * `gameJoinError`, just with a two-way split instead of a three-way one.
    */
   const gameHideError = (
-    c: Context<{ Variables: Variables }>,
+    c: Ctx,
     error: GameError,
     returnTo: string | null | undefined,
   ): Response => (gameViewReturn(returnTo) ? gameViewError(c, error) : myGamesError(c, error, returnTo));
-
-  /** A refused game command on the game screen is reported there, re-read fresh. */
-  const gameViewError = (c: Context<{ Variables: Variables }>, error: GameError): Response => {
-    const id = paramId(c, 'id', 'That game no longer exists.');
-    if (id.isErr()) {
-      return c.html(renderShell('Not found', renderNotFoundPage(), { user: c.get('user') }), 404);
-    }
-    return pageError(
-      c,
-      c.get('user'),
-      {
-        name: 'game view',
-        reload: () => games.getGame(c.get('user'), id.value),
-        render: (data, view: GameViewPageView, status) => c.html(renderGamePage(c.get('user'), data, view), status),
-        view: (e): GameViewPageView => ({ error: e.message }),
-        statusOf: statusForGameError,
-      },
-      error,
-    );
-  };
-
-  /** A query parameter, or undefined when absent or blank ("any"). */
-  const query = (c: Context<{ Variables: Variables }>, name: string): string | undefined => {
-    const value = c.req.query(name);
-    return value === undefined || value.trim() === '' ? undefined : value;
-  };
 
   /**
    * The command routes are one registration each — `paramId` guards the `:id`,
@@ -387,101 +582,6 @@ export function createApp(deps: AppDeps): App {
       onOk: (c) => c.redirect('/admin/users', 303),
       renderError: usersError,
     }));
-  };
-
-  /** What a streamed page needs: a topic to listen on, and how to draw itself. */
-  interface StreamSpec<D> {
-    /** Named for log lines, as the page adapters are. */
-    readonly name: string;
-    /** The change topic this page follows. */
-    readonly topic: string;
-    /** Re-read through the module on every change, so the stream authorises per frame. */
-    load(actor: SessionUser): Result<D, GameError>;
-    regions(data: D): Regions;
-  }
-
-  /**
-   * The stream adapter — the live twin of `pageAction` (ADR-0007's hand-rolled
-   * SSE). It holds the connection open and, whenever the topic changes,
-   * re-reads the page through the Game module and pushes its regions as one
-   * frame.
-   *
-   * Re-reading rather than pushing what the command produced is what gates a
-   * spectator per frame: the moment a share is switched off the module answers
-   * `not-found`, and the stream says so and stops. It is also what keeps the
-   * frames consistent — a stream woken by two moves at once reads the position
-   * after both, never a board and a move list a move apart.
-   */
-  const streamPage = <D>(c: Context<{ Variables: Variables }>, spec: StreamSpec<D>): Response => {
-    const actor = c.get('user');
-    const sessionId = getCookie(c, SESSION_COOKIE) ?? '';
-
-    // Authorise before the stream opens, so a viewer who may not see this page
-    // gets the page's own answer — a status an EventSource treats as final,
-    // rather than a stream it would reconnect to forever. This is exactly
-    // `pageAction`'s branching, so it *is* `pageAction`: the load it does is
-    // the authorising read, and the render it triggers opens the stream. The
-    // loop below reads again for the first frame; one extra read buys the
-    // honest status code.
-    return pageAction(c, actor, {
-      name: spec.name,
-      load: spec.load,
-      render: () => openStream(),
-      // A page they cannot see must read as absent, as the game route has it;
-      // anything else is a bad request, and a stream has no page to say so on.
-      renderError: (error, status) =>
-        error.code === 'not-found'
-          ? c.html(renderShell('Not found', renderNotFoundPage(), { user: actor }), status)
-          : c.text(error.message, status),
-      statusOf: statusForGameError,
-    });
-
-    function openStream(): Response {
-      return streamSSE(c, async (stream) => {
-        const closing = new AbortController();
-        stream.onAbort(() => closing.abort());
-
-        let seen = 0;
-        while (!stream.closed && !closing.signal.aborted) {
-          const change = await updates.next(spec.topic, seen, { signal: closing.signal, waitMs: heartbeatMs });
-          if (change.type === 'closed') return;
-          if (change.type === 'idle') {
-            await stream.writeSSE({ event: 'ping', data: '' });
-            continue;
-          }
-          seen = change.revision;
-
-          // A stream outlives the request that opened it, so the session is
-          // re-checked before every frame: a password change, a sign-out or a
-          // block ends all sessions (ticket 07), and an open stream must be no
-          // exception. Nothing has been sent in the meantime — an idle stream
-          // pushes only contentless heartbeats.
-          const viewer = auth.getSessionUser(sessionId);
-          if (viewer.isErr() || viewer.value.blocked) return;
-
-          // Read after the change, never before: this is the frame's whole
-          // claim to being current. A stream that slept through two moves
-          // reads the position after both.
-          const current = spec.load(viewer.value);
-          if (current.isErr()) {
-            const error = current.error;
-            // The viewer has lost sight of the game — removed, deleted, or no
-            // longer shared. Say so once and stop; the page route is the one
-            // place that decides what they should see instead.
-            if (error.code === 'not-found' || error.code === 'forbidden') {
-              await stream.writeSSE({ event: 'gone', data: '' });
-              return;
-            }
-            logger.log('error', spec.name, { error });
-            return;
-          }
-          await stream.writeSSE({
-            event: 'state',
-            data: JSON.stringify({ regions: spec.regions(current.value) }),
-          });
-        }
-      });
-    }
   };
 
   app.get('/healthz', (c) => c.json({ status: 'ok' }));
@@ -607,63 +707,8 @@ export function createApp(deps: AppDeps): App {
       c.html(renderChangeDisplayNamePage(c.get('user'), { error: e.message }), statusForAuthError(e)),
   }));
 
-  app.get('/games', requireUser, (c) => {
-    const actor = c.get('user');
-    const parsed = parseQuery(MY_GAMES_SCHEMA, (param) => query(c, param));
-    if (parsed.isErr()) {
-      // A bad status/sort/direction is the user's to fix: keep the form and say what is wrong.
-      return c.html(renderMyGamesPage(actor, [], { error: parsed.error.message }), statusForGameError(parsed.error));
-    }
-    const asked = parsed.value;
-    return pageAction(c, actor, {
-      name: 'list games',
-      load: () => games.listMyGames(actor, asked),
-      render: (data) => c.html(renderMyGamesPage(actor, data, { filters: asked })),
-    });
-  });
-
-  // The lists follow one topic: any change anywhere can add a row, remove one,
-  // or move whose turn it is (see `GAMES_TOPIC`).
-  app.get('/games/stream', requireUser, (c) => {
-    const parsed = parseQuery(MY_GAMES_SCHEMA, (param) => query(c, param));
-    if (parsed.isErr()) return c.text(parsed.error.message, statusForGameError(parsed.error));
-    const asked = parsed.value;
-    return streamPage(c, {
-      name: 'stream games',
-      topic: GAMES_TOPIC,
-      // The same query the page ran, so the stream's answer is the page's.
-      load: (actor) => games.listMyGames(actor, asked),
-      regions: (data) => myGamesRegions(c.get('user'), data, asked),
-    });
-  });
-
-  app.get('/games/find/stream', requireUser, (c) => {
-    const parsed = parseQuery(FIND_GAMES_SCHEMA, (param) => query(c, param));
-    if (parsed.isErr()) return c.text(parsed.error.message, statusForGameError(parsed.error));
-    const asked = parsed.value;
-    return streamPage(c, {
-      name: 'stream search',
-      topic: GAMES_TOPIC,
-      // The same search the page ran, so the stream's answer is the page's.
-      load: (actor) => games.searchProposed(actor, asked),
-      regions: (data) => findGamesRegions(c.get('user'), data, asked),
-    });
-  });
-
-  app.get('/games/find', requireUser, (c) => {
-    const actor = c.get('user');
-    const parsed = parseQuery(FIND_GAMES_SCHEMA, (param) => query(c, param));
-    if (parsed.isErr()) {
-      // A bad filter is the user's to fix: keep the form and say what is wrong.
-      return c.html(renderFindGamesPage(actor, [], { error: parsed.error.message }), statusForGameError(parsed.error));
-    }
-    const asked = parsed.value;
-    return pageAction(c, actor, {
-      name: 'search games',
-      load: () => games.searchProposed(actor, asked),
-      render: (data) => c.html(renderFindGamesPage(actor, data, { filters: asked })),
-    });
-  });
+  // "Your games", "Find a game" (page + stream) are registered by
+  // `mountScreen` above, alongside their error-adapters.
 
   listCommand(
     '/games/find/follow',
@@ -731,35 +776,8 @@ export function createApp(deps: AppDeps): App {
     myGamesError,
   );
 
-  app.get('/games/:id', requireUser, (c) => {
-    const actor = c.get('user');
-    const id = paramId(c, 'id', 'That game no longer exists.');
-    if (id.isErr()) {
-      return c.html(renderShell('Not found', renderNotFoundPage(), { user: actor }), 404);
-    }
-    return pageAction(c, actor, {
-      name: 'game view',
-      load: () => games.getGame(actor, id.value),
-      render: (view) => c.html(renderGamePage(actor, view)),
-      renderError: (e, status) => c.html(renderShell('Not found', renderNotFoundPage(), { user: actor }), status),
-      statusOf: statusForGameError,
-    });
-  });
-
-  app.get('/games/:id/stream', requireUser, (c) => {
-    const id = paramId(c, 'id', 'That game no longer exists.');
-    if (id.isErr()) {
-      return c.html(renderShell('Not found', renderNotFoundPage(), { user: c.get('user') }), 404);
-    }
-    return streamPage(c, {
-      name: 'stream game view',
-      topic: gameTopic(id.value),
-      // `getGame` is the visibility rule (ADR-0003), so the spectator gate on
-      // the stream is the very one on the page — the route decides nothing.
-      load: (actor) => games.getGame(actor, id.value),
-      regions: gameRegions,
-    });
-  });
+  // The game view (page + stream) is registered by `mountScreen` above,
+  // alongside its error-adapter.
 
   gameScreenCommand('/games/:id/move', ['move'], (f, id) => ({ type: 'playMove', gameId: id, move: f.move ?? '' }));
 
