@@ -538,6 +538,84 @@ export function createGames(persistence: Persistence): Games {
   }
 
   /**
+   * What a command requires of a game it already knows the id of, and what to
+   * say when a gate refuses. `access: 'visible'` is ADR-0003's rule verbatim
+   * (participant, or a spectator once both sides share; an admin always
+   * passes) — `getGame`/`exportGame`'s shape. `access: 'participant'` requires
+   * the actor to hold a side; `gateVisibility` additionally reads an invisible
+   * non-participant as not-found rather than forbidden, matching the
+   * play/resign/offer/take-back commands. `share`/`hide` leave it unset: a
+   * stranger to a private game still hears "forbidden", not "not-found",
+   * because those commands never gated on visibility to begin with.
+   */
+  interface GameRequirement {
+    /** Omitted for the two spectator-readable commands (getGame, exportGame). */
+    readonly role?: 'player';
+    readonly access: 'participant' | 'visible';
+    readonly gateVisibility?: boolean;
+    /** The participant-forbidden message reads "Only ${subject} may ${act}." */
+    readonly subject?: string;
+    readonly act?: string;
+    readonly lifecycle?: 'in_play';
+    /** Self-play's message isn't a mechanical transform of `act`, so it's its own string. */
+    readonly selfPlay?: { readonly message: string };
+  }
+
+  interface AddressedGame {
+    readonly game: GameRecord;
+    readonly seat: Player | null;
+    readonly sides: readonly GameSide[];
+  }
+
+  /**
+   * The one place ADR-0003's visibility, participation, lifecycle and
+   * self-play gates are decided for a game a command already has the id of.
+   * Replaces `loadVisibleGame`/`loadInPlayGame`/`loadOwnSides`: the ten
+   * commands that address an already-identified game differed only in which
+   * of these gates applied and what to say when one refused, never in the
+   * checks themselves. `deleteProposal`, `join` and `adminDelete` keep their
+   * own rules — none of them is "is the actor already in this game", which is
+   * all this function decides.
+   */
+  function addressedGame(
+    actor: SessionUser,
+    gameId: number,
+    requirement: GameRequirement,
+  ): Result<AddressedGame, GameError> {
+    if (requirement.role === 'player') {
+      const player = requirePlayer(actor);
+      if (player.isErr()) return err(player.error);
+    }
+
+    const found = persistence.findGameById(gameId);
+    if (found.isErr()) return err(persistenceError(found.error));
+    if (found.value === null) return err({ code: 'not-found', message: 'That game no longer exists.' });
+    const game = found.value;
+
+    if (requirement.access === 'visible') {
+      if (actor.role !== 'admin' && !visibleTo(game, actor.id)) {
+        return err({ code: 'not-found', message: 'That game no longer exists.' });
+      }
+      return ok({ game, seat: seatOfActor(game, actor.id), sides: sidesOf(game, actor.id) });
+    }
+
+    if (requirement.gateVisibility && !visibleTo(game, actor.id)) {
+      return err({ code: 'not-found', message: 'That game no longer exists.' });
+    }
+    const sides = sidesOf(game, actor.id);
+    if (sides.length === 0) {
+      return err({ code: 'forbidden', message: `Only ${requirement.subject} may ${requirement.act}.` });
+    }
+    if (requirement.lifecycle === 'in_play' && game.state !== 'in_play') {
+      return err({ code: 'not-in-play', message: 'This game is not being played right now.' });
+    }
+    if (requirement.selfPlay && isSelfPlay(game)) {
+      return err({ code: 'forbidden', message: requirement.selfPlay.message });
+    }
+    return ok({ game, seat: seatOfActor(game, actor.id), sides });
+  }
+
+  /**
    * The stored game as the core loader wants it: the record's own columns plus
    * the move rows, unchanged. Reading the rows is this module's job; folding
    * them into a playable game is the core's (ADR-0005).
@@ -630,23 +708,17 @@ export function createGames(persistence: Persistence): Games {
     actor: SessionUser,
     command: Extract<GameCommand, { type: 'playMove' }>,
   ): Result<GameCommandResult, GameError> {
-    const player = requirePlayer(actor);
-    if (player.isErr()) return err(player.error);
+    const addressed = addressedGame(actor, command.gameId, {
+      role: 'player',
+      access: 'participant',
+      gateVisibility: true,
+      subject: 'the two players',
+      act: 'move in a game',
+      lifecycle: 'in_play',
+    });
+    if (addressed.isErr()) return err(addressed.error);
+    const { game } = addressed.value;
 
-    const found = persistence.findGameById(command.gameId);
-    if (found.isErr()) return err(persistenceError(found.error));
-    if (found.value === null) return err({ code: 'not-found', message: 'That game no longer exists.' });
-    const game = found.value;
-
-    if (!visibleTo(game, actor.id)) {
-      return err({ code: 'not-found', message: 'That game no longer exists.' });
-    }
-    if (!isParticipant(game, actor.id)) {
-      return err({ code: 'forbidden', message: 'Only the two players may move in a game.' });
-    }
-    if (game.state !== 'in_play') {
-      return err({ code: 'not-in-play', message: 'This game is not being played right now.' });
-    }
     if (game.pendingKind !== null) {
       const what = game.pendingKind === 'draw' ? 'A draw offer' : 'A take-back request';
       return err({ code: 'request-pending', message: `${what} is pending; accept or reject it first.` });
@@ -704,30 +776,20 @@ export function createGames(persistence: Persistence): Games {
     actor: SessionUser,
     command: Extract<GameCommand, { type: 'resign' }>,
   ): Result<GameCommandResult, GameError> {
-    const player = requirePlayer(actor);
-    if (player.isErr()) return err(player.error);
-
-    const found = persistence.findGameById(command.gameId);
-    if (found.isErr()) return err(persistenceError(found.error));
-    if (found.value === null) return err({ code: 'not-found', message: 'That game no longer exists.' });
-    const game = found.value;
-
-    if (!visibleTo(game, actor.id)) {
-      return err({ code: 'not-found', message: 'That game no longer exists.' });
-    }
-    if (!isParticipant(game, actor.id)) {
-      return err({ code: 'forbidden', message: 'Only the two players may end a game.' });
-    }
-    if (game.state !== 'in_play') {
-      return err({ code: 'not-in-play', message: 'This game is not being played right now.' });
-    }
-    if (isSelfPlay(game)) {
-      return err({ code: 'forbidden', message: 'You cannot resign against yourself.' });
-    }
+    const addressed = addressedGame(actor, command.gameId, {
+      role: 'player',
+      access: 'participant',
+      gateVisibility: true,
+      subject: 'the two players',
+      act: 'end a game',
+      lifecycle: 'in_play',
+      selfPlay: { message: 'You cannot resign against yourself.' },
+    });
+    if (addressed.isErr()) return err(addressed.error);
+    const { game, seat } = addressed.value;
 
     const current = loadTakGame(game);
     if (current.isErr()) return err(current.error);
-    const seat = seatOfActor(game, actor.id);
     if (seat === null) {
       return err({ code: 'forbidden', message: 'Only the two players may end a game.' });
     }
@@ -741,39 +803,6 @@ export function createGames(persistence: Persistence): Games {
     if (persisted.isErr()) return err(persisted.error);
 
     return ok({ type: 'ok' });
-  }
-
-  /**
-   * The shared preamble for the offer/respond commands: a player, a visible
-   * in-play game they participate in, and not self-play. Returns the game.
-   */
-  function loadInPlayGame(
-    actor: SessionUser,
-    gameId: number,
-    act: string,
-    selfPlayMessage: string,
-  ): Result<GameRecord, GameError> {
-    const player = requirePlayer(actor);
-    if (player.isErr()) return err(player.error);
-
-    const found = persistence.findGameById(gameId);
-    if (found.isErr()) return err(persistenceError(found.error));
-    if (found.value === null) return err({ code: 'not-found', message: 'That game no longer exists.' });
-    const game = found.value;
-
-    if (!visibleTo(game, actor.id)) {
-      return err({ code: 'not-found', message: 'That game no longer exists.' });
-    }
-    if (!isParticipant(game, actor.id)) {
-      return err({ code: 'forbidden', message: `Only the two players may ${act}.` });
-    }
-    if (game.state !== 'in_play') {
-      return err({ code: 'not-in-play', message: 'This game is not being played right now.' });
-    }
-    if (isSelfPlay(game)) {
-      return err({ code: 'forbidden', message: selfPlayMessage });
-    }
-    return ok(game);
   }
 
   /**
@@ -799,16 +828,25 @@ export function createGames(persistence: Persistence): Games {
     actor: SessionUser,
     command: Extract<GameCommand, { type: 'offerDraw' }>,
   ): Result<GameCommandResult, GameError> {
-    const game = loadInPlayGame(actor, command.gameId, 'request a draw', 'You cannot draw against yourself.');
-    if (game.isErr()) return err(game.error);
-    if (game.value.pendingKind !== null) {
+    const addressed = addressedGame(actor, command.gameId, {
+      role: 'player',
+      access: 'participant',
+      gateVisibility: true,
+      subject: 'the two players',
+      act: 'request a draw',
+      lifecycle: 'in_play',
+      selfPlay: { message: 'You cannot draw against yourself.' },
+    });
+    if (addressed.isErr()) return err(addressed.error);
+    const { game } = addressed.value;
+    if (game.pendingKind !== null) {
       return err({ code: 'request-pending', message: 'Only one request or offer may be pending.' });
     }
 
     const persisted = trail.write((append): Result<void, string> => {
-      const set = persistence.setPendingRequest(game.value.id, 'draw', actor.id);
+      const set = persistence.setPendingRequest(game.id, 'draw', actor.id);
       if (set.isErr()) return set;
-      return append({ userId: actor.id, gameId: game.value.id, event: 'draw-offered' });
+      return append({ userId: actor.id, gameId: game.id, event: 'draw-offered' });
     });
     if (persisted.isErr()) return err(persisted.error);
 
@@ -819,23 +857,32 @@ export function createGames(persistence: Persistence): Games {
     actor: SessionUser,
     command: Extract<GameCommand, { type: 'acceptDraw' }>,
   ): Result<GameCommandResult, GameError> {
-    const game = loadInPlayGame(actor, command.gameId, 'respond to a draw offer', 'You cannot respond to yourself.');
-    if (game.isErr()) return err(game.error);
-    const requester = checkPending(game.value, 'draw', actor, 'draw offer');
+    const addressed = addressedGame(actor, command.gameId, {
+      role: 'player',
+      access: 'participant',
+      gateVisibility: true,
+      subject: 'the two players',
+      act: 'respond to a draw offer',
+      lifecycle: 'in_play',
+      selfPlay: { message: 'You cannot respond to yourself.' },
+    });
+    if (addressed.isErr()) return err(addressed.error);
+    const { game } = addressed.value;
+    const requester = checkPending(game, 'draw', actor, 'draw offer');
     if (requester.isErr()) return err(requester.error);
 
-    const current = loadTakGame(game.value);
+    const current = loadTakGame(game);
     if (current.isErr()) return err(current.error);
 
     const persisted = trail.write((append): Result<void, string> => {
       const accepted = append({
         userId: actor.id,
-        gameId: game.value.id,
+        gameId: game.id,
         event: 'draw-accepted',
         payload: { by: requester.value },
       });
       if (accepted.isErr()) return accepted;
-      return finishGameTransaction(append, actor, game.value, current.value, '1/2-1/2', 'mutual-draw');
+      return finishGameTransaction(append, actor, game, current.value, '1/2-1/2', 'mutual-draw');
     });
     if (persisted.isErr()) return err(persisted.error);
 
@@ -846,17 +893,26 @@ export function createGames(persistence: Persistence): Games {
     actor: SessionUser,
     command: Extract<GameCommand, { type: 'rejectDraw' }>,
   ): Result<GameCommandResult, GameError> {
-    const game = loadInPlayGame(actor, command.gameId, 'respond to a draw offer', 'You cannot respond to yourself.');
-    if (game.isErr()) return err(game.error);
-    const requester = checkPending(game.value, 'draw', actor, 'draw offer');
+    const addressed = addressedGame(actor, command.gameId, {
+      role: 'player',
+      access: 'participant',
+      gateVisibility: true,
+      subject: 'the two players',
+      act: 'respond to a draw offer',
+      lifecycle: 'in_play',
+      selfPlay: { message: 'You cannot respond to yourself.' },
+    });
+    if (addressed.isErr()) return err(addressed.error);
+    const { game } = addressed.value;
+    const requester = checkPending(game, 'draw', actor, 'draw offer');
     if (requester.isErr()) return err(requester.error);
 
     const persisted = trail.write((append): Result<void, string> => {
-      const cleared = persistence.clearPendingRequest(game.value.id);
+      const cleared = persistence.clearPendingRequest(game.id);
       if (cleared.isErr()) return cleared;
       return append({
         userId: actor.id,
-        gameId: game.value.id,
+        gameId: game.id,
         event: 'draw-rejected',
         payload: { by: requester.value },
       });
@@ -870,26 +926,30 @@ export function createGames(persistence: Persistence): Games {
     actor: SessionUser,
     command: Extract<GameCommand, { type: 'requestTakeBack' }>,
   ): Result<GameCommandResult, GameError> {
-    const game = loadInPlayGame(
-      actor,
-      command.gameId,
-      'request a take-back',
-      'You cannot request a take-back against yourself.',
-    );
-    if (game.isErr()) return err(game.error);
-    if (game.value.pendingKind !== null) {
+    const addressed = addressedGame(actor, command.gameId, {
+      role: 'player',
+      access: 'participant',
+      gateVisibility: true,
+      subject: 'the two players',
+      act: 'request a take-back',
+      lifecycle: 'in_play',
+      selfPlay: { message: 'You cannot request a take-back against yourself.' },
+    });
+    if (addressed.isErr()) return err(addressed.error);
+    const { game, seat } = addressed.value;
+    if (game.pendingKind !== null) {
       return err({ code: 'request-pending', message: 'Only one request or offer may be pending.' });
     }
 
     // A take-back needs a live move of yours, played since the opponent moved.
-    const current = loadTakGame(game.value);
+    const current = loadTakGame(game);
     if (current.isErr()) return err(current.error);
     const tak = current.value;
     if (tak.history.length <= tak.fixedMoves) {
       return err({ code: 'no-move-to-take-back', message: 'There is no move of yours to take back.' });
     }
     const lastSeat: 1 | 2 = (tak.history.length - 1) % 2 === 0 ? 1 : 2;
-    if (seatOfActor(game.value, actor.id) !== lastSeat) {
+    if (seat !== lastSeat) {
       return err({
         code: 'no-move-to-take-back',
         message: 'Your opponent has already moved; there is nothing to take back.',
@@ -897,9 +957,9 @@ export function createGames(persistence: Persistence): Games {
     }
 
     const persisted = trail.write((append): Result<void, string> => {
-      const set = persistence.setPendingRequest(game.value.id, 'take-back', actor.id);
+      const set = persistence.setPendingRequest(game.id, 'take-back', actor.id);
       if (set.isErr()) return set;
-      return append({ userId: actor.id, gameId: game.value.id, event: 'take-back-requested' });
+      return append({ userId: actor.id, gameId: game.id, event: 'take-back-requested' });
     });
     if (persisted.isErr()) return err(persisted.error);
 
@@ -910,26 +970,30 @@ export function createGames(persistence: Persistence): Games {
     actor: SessionUser,
     command: Extract<GameCommand, { type: 'acceptTakeBack' }>,
   ): Result<GameCommandResult, GameError> {
-    const game = loadInPlayGame(
-      actor,
-      command.gameId,
-      'respond to a take-back request',
-      'You cannot respond to yourself.',
-    );
-    if (game.isErr()) return err(game.error);
-    const requester = checkPending(game.value, 'take-back', actor, 'take-back request');
+    const addressed = addressedGame(actor, command.gameId, {
+      role: 'player',
+      access: 'participant',
+      gateVisibility: true,
+      subject: 'the two players',
+      act: 'respond to a take-back request',
+      lifecycle: 'in_play',
+      selfPlay: { message: 'You cannot respond to yourself.' },
+    });
+    if (addressed.isErr()) return err(addressed.error);
+    const { game } = addressed.value;
+    const requester = checkPending(game, 'take-back', actor, 'take-back request');
     if (requester.isErr()) return err(requester.error);
 
     // The board cannot have changed since the request: moves are blocked while
     // pending, so the last recorded move is still the requester's.
     const persisted = trail.write((append): Result<void, string> => {
-      const deleted = persistence.deleteLastMove(game.value.id);
+      const deleted = persistence.deleteLastMove(game.id);
       if (deleted.isErr()) return deleted;
-      const cleared = persistence.clearPendingRequest(game.value.id);
+      const cleared = persistence.clearPendingRequest(game.id);
       if (cleared.isErr()) return cleared;
       return append({
         userId: actor.id,
-        gameId: game.value.id,
+        gameId: game.id,
         event: 'take-back-accepted',
         payload: { by: requester.value },
       });
@@ -943,22 +1007,26 @@ export function createGames(persistence: Persistence): Games {
     actor: SessionUser,
     command: Extract<GameCommand, { type: 'rejectTakeBack' }>,
   ): Result<GameCommandResult, GameError> {
-    const game = loadInPlayGame(
-      actor,
-      command.gameId,
-      'respond to a take-back request',
-      'You cannot respond to yourself.',
-    );
-    if (game.isErr()) return err(game.error);
-    const requester = checkPending(game.value, 'take-back', actor, 'take-back request');
+    const addressed = addressedGame(actor, command.gameId, {
+      role: 'player',
+      access: 'participant',
+      gateVisibility: true,
+      subject: 'the two players',
+      act: 'respond to a take-back request',
+      lifecycle: 'in_play',
+      selfPlay: { message: 'You cannot respond to yourself.' },
+    });
+    if (addressed.isErr()) return err(addressed.error);
+    const { game } = addressed.value;
+    const requester = checkPending(game, 'take-back', actor, 'take-back request');
     if (requester.isErr()) return err(requester.error);
 
     const persisted = trail.write((append): Result<void, string> => {
-      const cleared = persistence.clearPendingRequest(game.value.id);
+      const cleared = persistence.clearPendingRequest(game.id);
       if (cleared.isErr()) return cleared;
       return append({
         userId: actor.id,
-        gameId: game.value.id,
+        gameId: game.id,
         event: 'take-back-rejected',
         payload: { by: requester.value },
       });
@@ -968,34 +1036,18 @@ export function createGames(persistence: Persistence): Games {
     return ok({ type: 'ok' });
   }
 
-  /** Load a game and the actor's side(s) in it, refusing a non-participant. */
-  function loadOwnSides(
-    actor: SessionUser,
-    gameId: number,
-    act: string,
-  ): Result<{ game: GameRecord; sides: GameSide[] }, GameError> {
-    const player = requirePlayer(actor);
-    if (player.isErr()) return err(player.error);
-
-    const found = persistence.findGameById(gameId);
-    if (found.isErr()) return err(persistenceError(found.error));
-    if (found.value === null) return err({ code: 'not-found', message: 'That game no longer exists.' });
-    const game = found.value;
-
-    const sides = sidesOf(game, actor.id);
-    if (sides.length === 0) {
-      return err({ code: 'forbidden', message: `Only a participant may ${act}.` });
-    }
-    return ok({ game, sides });
-  }
-
   function share(
     actor: SessionUser,
     command: Extract<GameCommand, { type: 'share' }>,
   ): Result<GameCommandResult, GameError> {
-    const loaded = loadOwnSides(actor, command.gameId, 'change sharing');
-    if (loaded.isErr()) return err(loaded.error);
-    const { game, sides } = loaded.value;
+    const addressed = addressedGame(actor, command.gameId, {
+      role: 'player',
+      access: 'participant',
+      subject: 'a participant',
+      act: 'change sharing',
+    });
+    if (addressed.isErr()) return err(addressed.error);
+    const { game, sides } = addressed.value;
 
     const persisted = trail.write((append): Result<void, string> => {
       for (const side of sides) {
@@ -1024,9 +1076,14 @@ export function createGames(persistence: Persistence): Games {
     actor: SessionUser,
     command: Extract<GameCommand, { type: 'hide' }>,
   ): Result<GameCommandResult, GameError> {
-    const loaded = loadOwnSides(actor, command.gameId, 'hide a game');
-    if (loaded.isErr()) return err(loaded.error);
-    const { game, sides } = loaded.value;
+    const addressed = addressedGame(actor, command.gameId, {
+      role: 'player',
+      access: 'participant',
+      subject: 'a participant',
+      act: 'hide a game',
+    });
+    if (addressed.isErr()) return err(addressed.error);
+    const { game, sides } = addressed.value;
 
     const mutual = sides.length === 2 || (sides[0] === 'proposer' ? game.opponentHidden : game.proposerHidden);
 
@@ -1148,22 +1205,6 @@ export function createGames(persistence: Persistence): Games {
   }
 
   /**
-   * Load a game the actor is allowed to look at. Ticket 13: an admin may see
-   * any game regardless of share state; everyone else goes through `visibleTo`.
-   * A game they may not see reads as absent, so share state never leaks.
-   */
-  function loadVisibleGame(actor: SessionUser, gameId: number): Result<GameRecord, GameError> {
-    const found = persistence.findGameById(gameId);
-    if (found.isErr()) return err(persistenceError(found.error));
-    if (found.value === null) return err({ code: 'not-found', message: 'That game no longer exists.' });
-    const game = found.value;
-    if (actor.role !== 'admin' && !visibleTo(game, actor.id)) {
-      return err({ code: 'not-found', message: 'That game no longer exists.' });
-    }
-    return ok(game);
-  }
-
-  /**
    * Copy the record out as PTN or TPS (ticket 15). This is a read, but an
    * audited one — CONTEXT.md lists exports among the activity trail's events —
    * so it is a command rather than a query, and the trail write stays inside
@@ -1176,9 +1217,9 @@ export function createGames(persistence: Persistence): Games {
     const format = parseExportFormat(command.format);
     if (format.isErr()) return err(format.error);
 
-    const loaded = loadVisibleGame(actor, command.gameId);
-    if (loaded.isErr()) return err(loaded.error);
-    const game = loaded.value;
+    const addressed = addressedGame(actor, command.gameId, { access: 'visible' });
+    if (addressed.isErr()) return err(addressed.error);
+    const { game } = addressed.value;
 
     const loadedRecord = loadStoredGame(game);
     if (loadedRecord.isErr()) return err(loadedRecord.error);
@@ -1342,9 +1383,9 @@ export function createGames(persistence: Persistence): Games {
     getGame(actor, gameId): Result<GameView, GameError> {
       // The reads: visibility (ADR-0003), names, and the record+tak pair. The
       // shaping happens in the view module.
-      const loaded = loadVisibleGame(actor, gameId);
-      if (loaded.isErr()) return err(loaded.error);
-      const game = loaded.value;
+      const addressed = addressedGame(actor, gameId, { access: 'visible' });
+      if (addressed.isErr()) return err(addressed.error);
+      const { game } = addressed.value;
       const loadedRecord = loadStoredGame(game);
       if (loadedRecord.isErr()) return err(loadedRecord.error);
       return views.gameView({
