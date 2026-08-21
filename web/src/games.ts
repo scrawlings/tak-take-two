@@ -26,6 +26,7 @@ import type {
   ProposedGameFilters,
   UserRecord,
 } from './persistence.js';
+import { createTrail, type AppendEntry } from './trail.js';
 import type { SessionUser } from './auth.js';
 import {
   FIND_GAMES_SCHEMA,
@@ -307,6 +308,9 @@ export function createGames(persistence: Persistence): Games {
   // The view assembly, fed by this module's reads (ADR-0011). The straddling
   // rules are injected once here; the views decide nothing about authorization.
   const views = createGameViews({ seatOf, seatOfActor, sidesOf, isSelfPlay, deletableBy, joinableBy });
+  // The activity trail owns the transaction-plus-entry ritual and its error
+  // shape; `TrailError` is already a `GameError` structurally.
+  const trail = createTrail(persistence);
 
   /** Resolve user ids to display names once per list, not once per row. */
   function nameResolver(): (id: number) => Result<PlayerRef, GameError> {
@@ -404,7 +408,7 @@ export function createGames(persistence: Persistence): Games {
     const invited = resolveInvite(joinType.value, command.invitedDisplayName);
     if (invited.isErr()) return err(invited.error);
 
-    const created = persistence.transaction((): Result<GameRecord, string> => {
+    const created = trail.write((append): Result<GameRecord, string> => {
       const inserted = persistence.createGame({
         boardSize,
         joinType: joinType.value,
@@ -418,7 +422,7 @@ export function createGames(persistence: Persistence): Games {
         opponentShared: joinType.value === 'open',
       });
       if (inserted.isErr()) return inserted;
-      const trail = persistence.appendActivityTrail({
+      const audited = append({
         userId: actor.id,
         gameId: inserted.value.id,
         event: 'game-proposed',
@@ -430,10 +434,10 @@ export function createGames(persistence: Persistence): Games {
           proposerSeat: proposerSeat.value,
         },
       });
-      if (trail.isErr()) return err(trail.error);
+      if (audited.isErr()) return err(audited.error);
       return inserted;
     });
-    if (created.isErr()) return err(persistenceError(created.error));
+    if (created.isErr()) return err(created.error);
 
     return ok({ type: 'propose', gameId: created.value.id });
   }
@@ -456,20 +460,20 @@ export function createGames(persistence: Persistence): Games {
       return err({ code: 'already-joined', message: 'Someone has joined this game, so it cannot be deleted.' });
     }
 
-    const deleted = persistence.transaction((): Result<void, string> => {
+    const deleted = trail.write((append): Result<void, string> => {
       // activity_trail.game_id is ON DELETE SET NULL, so deleting the game
       // erases the column this entry is about. The trail is append-only
       // evidence, so the id goes in the payload too, where nothing clears it.
-      const trail = persistence.appendActivityTrail({
+      const audited = append({
         userId: actor.id,
         gameId: game.id,
         event: 'game-proposal-deleted',
         payload: { gameId: game.id, boardSize: game.boardSize, joinType: game.joinType },
       });
-      if (trail.isErr()) return trail;
+      if (audited.isErr()) return audited;
       return persistence.deleteGame(game.id);
     });
-    if (deleted.isErr()) return err(persistenceError(deleted.error));
+    if (deleted.isErr()) return err(deleted.error);
 
     return ok({ type: 'ok' });
   }
@@ -498,7 +502,7 @@ export function createGames(persistence: Persistence): Games {
       return err({ code: 'not-invited', message: 'This game is for the player it names.' });
     }
 
-    const joined = persistence.transaction((): Result<boolean, string> => {
+    const joined = trail.write((append): Result<boolean, string> => {
       // A random start resolves here, once, when the second player claims the
       // game; a seat the proposer already chose is left alone by COALESCE.
       const proposerSeat: 1 | 2 = game.proposerSeat ?? (Math.random() < 0.5 ? 1 : 2);
@@ -507,16 +511,16 @@ export function createGames(persistence: Persistence): Games {
       // The conditional UPDATE is the real guard: if it changed nothing, the
       // game stopped being an unjoined proposal, so write no trail event.
       if (!claimed.value) return ok(false);
-      const trail = persistence.appendActivityTrail({
+      const audited = append({
         userId: actor.id,
         gameId: game.id,
         event: 'game-joined',
         payload: { proposer: game.proposerId, joinType: game.joinType, proposerSeat },
       });
-      if (trail.isErr()) return err(trail.error);
+      if (audited.isErr()) return err(audited.error);
       return ok(true);
     });
-    if (joined.isErr()) return err(persistenceError(joined.error));
+    if (joined.isErr()) return err(joined.error);
     if (!joined.value) {
       return err({ code: 'already-joined', message: 'Someone else joined this game first.' });
     }
@@ -594,6 +598,7 @@ export function createGames(persistence: Persistence): Games {
    * derived game stats, and record the `game-finished` trail event.
    */
   function finishGameTransaction(
+    append: AppendEntry,
     actor: SessionUser,
     game: GameRecord,
     played: TakGame,
@@ -613,7 +618,7 @@ export function createGames(persistence: Persistence): Games {
       result,
     });
     if (stats.isErr()) return stats;
-    return persistence.appendActivityTrail({
+    return append({
       userId: actor.id,
       gameId: game.id,
       event: 'game-finished',
@@ -666,7 +671,7 @@ export function createGames(persistence: Persistence): Games {
     const moveNumber = played.value.history.length;
     const finishedResult = isFinished(played.value) ? resultCode(played.value) : null;
 
-    const persisted = persistence.transaction((): Result<void, string> => {
+    const persisted = trail.write((append): Result<void, string> => {
       const appended = persistence.appendMove({
         gameId: game.id,
         moveNumber,
@@ -675,22 +680,22 @@ export function createGames(persistence: Persistence): Games {
         position: generateTps(played.value.state),
       });
       if (appended.isErr()) return err(appended.error);
-      const trail = persistence.appendActivityTrail({
+      const audited = append({
         userId: actor.id,
         gameId: game.id,
         event: 'move-played',
         payload: { moveNumber, notation, result: finishedResult },
       });
-      if (trail.isErr()) return trail;
+      if (audited.isErr()) return audited;
       if (finishedResult !== null) {
         // Only a move can finish the board, so a non-null result here is a road or flat win.
         const how = played.value.result?.kind === 'board' ? played.value.result.outcome.type : 'board';
-        const fin = finishGameTransaction(actor, game, played.value, finishedResult, how);
+        const fin = finishGameTransaction(append, actor, game, played.value, finishedResult, how);
         if (fin.isErr()) return fin;
       }
       return ok(undefined);
     });
-    if (persisted.isErr()) return err(persistenceError(persisted.error));
+    if (persisted.isErr()) return err(persisted.error);
 
     return ok({ type: 'ok' });
   }
@@ -730,10 +735,10 @@ export function createGames(persistence: Persistence): Games {
     if (done.isErr()) return err({ code: 'not-in-play', message: done.error.message });
     const result = resultCode(done.value)!;
 
-    const persisted = persistence.transaction(() =>
-      finishGameTransaction(actor, game, done.value, result, 'resign'),
+    const persisted = trail.write((append) =>
+      finishGameTransaction(append, actor, game, done.value, result, 'resign'),
     );
-    if (persisted.isErr()) return err(persistenceError(persisted.error));
+    if (persisted.isErr()) return err(persisted.error);
 
     return ok({ type: 'ok' });
   }
@@ -800,12 +805,12 @@ export function createGames(persistence: Persistence): Games {
       return err({ code: 'request-pending', message: 'Only one request or offer may be pending.' });
     }
 
-    const persisted = persistence.transaction((): Result<void, string> => {
+    const persisted = trail.write((append): Result<void, string> => {
       const set = persistence.setPendingRequest(game.value.id, 'draw', actor.id);
       if (set.isErr()) return set;
-      return persistence.appendActivityTrail({ userId: actor.id, gameId: game.value.id, event: 'draw-offered' });
+      return append({ userId: actor.id, gameId: game.value.id, event: 'draw-offered' });
     });
-    if (persisted.isErr()) return err(persistenceError(persisted.error));
+    if (persisted.isErr()) return err(persisted.error);
 
     return ok({ type: 'ok' });
   }
@@ -822,17 +827,17 @@ export function createGames(persistence: Persistence): Games {
     const current = loadTakGame(game.value);
     if (current.isErr()) return err(current.error);
 
-    const persisted = persistence.transaction((): Result<void, string> => {
-      const accepted = persistence.appendActivityTrail({
+    const persisted = trail.write((append): Result<void, string> => {
+      const accepted = append({
         userId: actor.id,
         gameId: game.value.id,
         event: 'draw-accepted',
         payload: { by: requester.value },
       });
       if (accepted.isErr()) return accepted;
-      return finishGameTransaction(actor, game.value, current.value, '1/2-1/2', 'mutual-draw');
+      return finishGameTransaction(append, actor, game.value, current.value, '1/2-1/2', 'mutual-draw');
     });
-    if (persisted.isErr()) return err(persistenceError(persisted.error));
+    if (persisted.isErr()) return err(persisted.error);
 
     return ok({ type: 'ok' });
   }
@@ -846,17 +851,17 @@ export function createGames(persistence: Persistence): Games {
     const requester = checkPending(game.value, 'draw', actor, 'draw offer');
     if (requester.isErr()) return err(requester.error);
 
-    const persisted = persistence.transaction((): Result<void, string> => {
+    const persisted = trail.write((append): Result<void, string> => {
       const cleared = persistence.clearPendingRequest(game.value.id);
       if (cleared.isErr()) return cleared;
-      return persistence.appendActivityTrail({
+      return append({
         userId: actor.id,
         gameId: game.value.id,
         event: 'draw-rejected',
         payload: { by: requester.value },
       });
     });
-    if (persisted.isErr()) return err(persistenceError(persisted.error));
+    if (persisted.isErr()) return err(persisted.error);
 
     return ok({ type: 'ok' });
   }
@@ -891,12 +896,12 @@ export function createGames(persistence: Persistence): Games {
       });
     }
 
-    const persisted = persistence.transaction((): Result<void, string> => {
+    const persisted = trail.write((append): Result<void, string> => {
       const set = persistence.setPendingRequest(game.value.id, 'take-back', actor.id);
       if (set.isErr()) return set;
-      return persistence.appendActivityTrail({ userId: actor.id, gameId: game.value.id, event: 'take-back-requested' });
+      return append({ userId: actor.id, gameId: game.value.id, event: 'take-back-requested' });
     });
-    if (persisted.isErr()) return err(persistenceError(persisted.error));
+    if (persisted.isErr()) return err(persisted.error);
 
     return ok({ type: 'ok' });
   }
@@ -917,19 +922,19 @@ export function createGames(persistence: Persistence): Games {
 
     // The board cannot have changed since the request: moves are blocked while
     // pending, so the last recorded move is still the requester's.
-    const persisted = persistence.transaction((): Result<void, string> => {
+    const persisted = trail.write((append): Result<void, string> => {
       const deleted = persistence.deleteLastMove(game.value.id);
       if (deleted.isErr()) return deleted;
       const cleared = persistence.clearPendingRequest(game.value.id);
       if (cleared.isErr()) return cleared;
-      return persistence.appendActivityTrail({
+      return append({
         userId: actor.id,
         gameId: game.value.id,
         event: 'take-back-accepted',
         payload: { by: requester.value },
       });
     });
-    if (persisted.isErr()) return err(persistenceError(persisted.error));
+    if (persisted.isErr()) return err(persisted.error);
 
     return ok({ type: 'ok' });
   }
@@ -948,17 +953,17 @@ export function createGames(persistence: Persistence): Games {
     const requester = checkPending(game.value, 'take-back', actor, 'take-back request');
     if (requester.isErr()) return err(requester.error);
 
-    const persisted = persistence.transaction((): Result<void, string> => {
+    const persisted = trail.write((append): Result<void, string> => {
       const cleared = persistence.clearPendingRequest(game.value.id);
       if (cleared.isErr()) return cleared;
-      return persistence.appendActivityTrail({
+      return append({
         userId: actor.id,
         gameId: game.value.id,
         event: 'take-back-rejected',
         payload: { by: requester.value },
       });
     });
-    if (persisted.isErr()) return err(persistenceError(persisted.error));
+    if (persisted.isErr()) return err(persisted.error);
 
     return ok({ type: 'ok' });
   }
@@ -992,18 +997,18 @@ export function createGames(persistence: Persistence): Games {
     if (loaded.isErr()) return err(loaded.error);
     const { game, sides } = loaded.value;
 
-    const persisted = persistence.transaction((): Result<void, string> => {
+    const persisted = trail.write((append): Result<void, string> => {
       for (const side of sides) {
         const set = persistence.setGameShare(game.id, side, command.on);
         if (set.isErr()) return set;
       }
-      return persistence.appendActivityTrail({
+      return append({
         userId: actor.id,
         gameId: game.id,
         event: command.on ? 'game-shared' : 'game-unshared',
       });
     });
-    if (persisted.isErr()) return err(persistenceError(persisted.error));
+    if (persisted.isErr()) return err(persisted.error);
 
     return ok({ type: 'ok' });
   }
@@ -1025,16 +1030,16 @@ export function createGames(persistence: Persistence): Games {
 
     const mutual = sides.length === 2 || (sides[0] === 'proposer' ? game.opponentHidden : game.proposerHidden);
 
-    const persisted = persistence.transaction((): Result<void, string> => {
+    const persisted = trail.write((append): Result<void, string> => {
       const hidden = persistence.hideGame(game.id, sides);
       if (hidden.isErr()) return hidden;
-      const trail = persistence.appendActivityTrail({ userId: actor.id, gameId: game.id, event: 'game-hidden' });
-      if (trail.isErr()) return trail;
+      const audited = append({ userId: actor.id, gameId: game.id, event: 'game-hidden' });
+      if (audited.isErr()) return audited;
       if (!mutual) return ok(undefined);
 
       // activity_trail.game_id is ON DELETE SET NULL, so the id goes in the
       // payload too, same as deleteProposal's trail entry.
-      const deleted = persistence.appendActivityTrail({
+      const deleted = append({
         userId: actor.id,
         gameId: game.id,
         event: 'game-deleted',
@@ -1043,7 +1048,7 @@ export function createGames(persistence: Persistence): Games {
       if (deleted.isErr()) return deleted;
       return persistence.deleteGame(game.id);
     });
-    if (persisted.isErr()) return err(persistenceError(persisted.error));
+    if (persisted.isErr()) return err(persisted.error);
 
     return ok({ type: 'ok' });
   }
@@ -1066,12 +1071,12 @@ export function createGames(persistence: Persistence): Games {
     const follows = new Set(prefs.value.follows);
     edit(follows);
 
-    const persisted = persistence.transaction((): Result<void, string> => {
+    const persisted = trail.write((append): Result<void, string> => {
       const saved = persistence.setUserPrefs(actor.id, { follows: [...follows] });
       if (saved.isErr()) return saved;
-      return persistence.appendActivityTrail({ userId: actor.id, event, payload: { followedUserId: userId } });
+      return append({ userId: actor.id, event, payload: { followedUserId: userId } });
     });
-    if (persisted.isErr()) return err(persistenceError(persisted.error));
+    if (persisted.isErr()) return err(persisted.error);
 
     return ok({ type: 'ok' });
   }
@@ -1125,19 +1130,19 @@ export function createGames(persistence: Persistence): Games {
       return err({ code: 'already-removed', message: 'This game has already been removed by an admin.' });
     }
 
-    const persisted = persistence.transaction((): Result<void, string> => {
+    const persisted = trail.write((append): Result<void, string> => {
       const cleared = persistence.clearPendingRequest(game.id);
       if (cleared.isErr()) return cleared;
       const removed = persistence.adminRemoveGame(game.id);
       if (removed.isErr()) return removed;
-      return persistence.appendActivityTrail({
+      return append({
         userId: actor.id,
         gameId: game.id,
         event: 'game-admin-deleted',
         payload: { by: actor.username, priorState: game.state },
       });
     });
-    if (persisted.isErr()) return err(persistenceError(persisted.error));
+    if (persisted.isErr()) return err(persisted.error);
 
     return ok({ type: 'ok' });
   }
@@ -1231,13 +1236,14 @@ export function createGames(persistence: Persistence): Games {
       text = generated.value;
     }
 
-    const trail = persistence.appendActivityTrail({
+    // Auditing a read: there are no writes for the entry to be atomic with.
+    const audited = trail.append({
       userId: actor.id,
       gameId: game.id,
       event: 'game-exported',
       payload: { format: format.value, throughMove, complete: throughMove === totalMoves },
     });
-    if (trail.isErr()) return err(persistenceError(trail.error));
+    if (audited.isErr()) return err(audited.error);
 
     return ok({ type: 'export', format: format.value, text, throughMove, totalMoves });
   }

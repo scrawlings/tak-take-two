@@ -21,8 +21,9 @@ import type { GameBoardSize, GameLifecycleState, JoinType, Persistence } from '.
  * 2. **A failure is reported one way.** `TrailError` is `{ code: 'persistence',
  *    message }` — structurally a `GameError` *and* an `AuthError` (both unions
  *    carry `'persistence'`) without importing either, the same one-way trick
- *    ADR-0008 used for `FilterError`. Both modules' private `persistenceError`
- *    helpers go away.
+ *    ADR-0008 used for `FilterError`. Both modules keep their private
+ *    `persistenceError` for plain reads, which map a string and never touch
+ *    the trail; only its transaction uses go.
  * 3. **A hard delete keeps its game id.** `activity_trail.game_id` is
  *    `ON DELETE SET NULL`, so the two events that really delete a game —
  *    `game-proposal-deleted` and `game-deleted` — would lose the column they
@@ -82,11 +83,17 @@ type GameEvent =
       };
     }
   | { readonly event: 'draw-offered' }
-  | { readonly event: 'draw-accepted'; readonly payload: { readonly by: string } }
-  | { readonly event: 'draw-rejected'; readonly payload: { readonly by: string } }
+  /**
+   * `by` is the requester's user *id* on these four, but a *username* on the
+   * account events and on `game-admin-deleted` — one key, two meanings. Typing
+   * the vocabulary is what exposed it. Left as-is deliberately: the key is
+   * stored JSON, so renaming it would split the historical record in two.
+   */
+  | { readonly event: 'draw-accepted'; readonly payload: { readonly by: number } }
+  | { readonly event: 'draw-rejected'; readonly payload: { readonly by: number } }
   | { readonly event: 'take-back-requested' }
-  | { readonly event: 'take-back-accepted'; readonly payload: { readonly by: string } }
-  | { readonly event: 'take-back-rejected'; readonly payload: { readonly by: string } }
+  | { readonly event: 'take-back-accepted'; readonly payload: { readonly by: number } }
+  | { readonly event: 'take-back-rejected'; readonly payload: { readonly by: number } }
   | { readonly event: 'game-shared' }
   | { readonly event: 'game-unshared' }
   | { readonly event: 'game-hidden' }
