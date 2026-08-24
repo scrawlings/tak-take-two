@@ -22,9 +22,9 @@ export interface NavUser {
 
 /**
  * What a page needs from the browser (ADR-0007). Alpine is the one runtime;
- * `client` adds the inlined bundle — the board move builder (ADR-0006) and the
- * SSE stream component (ticket 14) — for the pages that register those
- * components. Pages that say nothing ship nothing.
+ * `client` links the served bundle (ADR-0013) — the board move builder
+ * (ADR-0006) and the SSE stream component (ticket 14) — for the pages that
+ * register those components. Pages that say nothing ship nothing.
  */
 export type PageScripts = 'none' | 'alpine' | 'client';
 
